@@ -1166,7 +1166,7 @@ class TestSuggestGapsCLI(unittest.TestCase):
 
     def _ratchet(self, *args):
         return subprocess.run([sys.executable, _RATCHET, *args, "--cwd", self.d],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, encoding="utf-8")
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1209,7 +1209,7 @@ class TestSuggestGapsCLI(unittest.TestCase):
         with open(draft, "w", encoding="utf-8") as fh:
             fh.write(r.stdout)
         v = subprocess.run([sys.executable, _RATCHET, "validate", "--config", draft],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(v.returncode, 0, v.stdout + v.stderr)
 
     def test_cli_draft_lint_fails_on_markers(self):
@@ -1303,6 +1303,7 @@ class TestAtomicWrite(unittest.TestCase):
         with open(real) as fh:
             self.assertEqual(fh.read(), "new\n")  # real target updated
 
+    @unittest.skipIf(os.name == "nt", "Windows has no POSIX exec bit (git-for-windows sh runs the hook regardless)")
     def test_executable_mode(self):
         p = os.path.join(self.d, "hook")
         _atomic_write(p, "#!/bin/sh\n", mode=0o755)
@@ -1407,7 +1408,8 @@ class TestInstall(_GitRepo):
         pp = self._read(".git/hooks/pre-push")
         self.assertIn(RATCHET_BEGIN, pp)
         self.assertIn("[ -f .ratchet/ratchet.py ]", pp)  # inert guard
-        self.assertTrue(os.stat(self._prepush()).st_mode & 0o111)
+        if os.name != "nt":  # Windows has no POSIX exec bit
+            self.assertTrue(os.stat(self._prepush()).st_mode & 0o111)
         self.assertTrue(os.path.exists(os.path.join(self.d, ".github", "workflows", "ratchet.yml")))
         self.assertIn(".ratchet/.state", self._read(".gitignore"))
 
@@ -1460,7 +1462,7 @@ class TestInstall(_GitRepo):
         vendored = os.path.join(self.d, ".ratchet", "ratchet.py")
         size_before = os.path.getsize(vendored)
         r = subprocess.run([sys.executable, vendored, "install", "--cwd", self.d, "--no-config", "--no-hook", "--no-ci"],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(os.path.getsize(vendored), size_before)  # not truncated
 

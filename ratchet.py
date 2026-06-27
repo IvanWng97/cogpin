@@ -2744,6 +2744,14 @@ def cmd_doctor(cwd: str = ".", as_json: bool = False) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The renders carry non-ASCII glyphs (the `─` rule in suggest, doctor's ✓/~/✗/·);
+    # a Windows console/pipe defaults to cp1252 and would UnicodeEncodeError on them.
+    # Force UTF-8 at the CLI boundary only (a library must not reconfigure global streams).
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, ValueError):
+            pass
     p = argparse.ArgumentParser(
         prog="ratchet",
         description="Ungameable diff-fact enforcement of the closing-discipline.",
