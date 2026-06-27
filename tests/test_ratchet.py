@@ -1559,6 +1559,7 @@ class TestInstall(_GitRepo):
         _quiet(cmd_install, self.d)
         self.assertFalse(os.path.exists(self._prepush()))
 
+    @unittest.skipIf(os.name == "nt", "Windows has no POSIX exec bit (git-for-windows sh runs the hook regardless)")
     def test_prepush_append_preserves_existing_perms(self):
         """#6: appending the managed block keeps the existing hook's perms (only ensures +x),
         never widening an existing husky/.githooks file to 0o755."""
@@ -1571,6 +1572,7 @@ class TestInstall(_GitRepo):
         self.assertEqual(os.stat(pp).st_mode & 0o777, 0o751)  # preserved 0o640 + ensured +x
         self.assertIn(RATCHET_BEGIN, self._read(".git/hooks/pre-push"))
 
+    @unittest.skipIf(os.name == "nt", "Windows has no POSIX exec bit (git-for-windows sh runs the hook regardless)")
     def test_prepush_new_hook_is_executable(self):
         """A hook ratchet authors from scratch is 0o755."""
         pp = self._prepush()
