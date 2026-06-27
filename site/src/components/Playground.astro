@@ -1,0 +1,229 @@
+---
+// Interactive playground: loads Pyodide (CPython in WASM), writes the REAL shipped
+// ratchet.py + glue.py into its virtual FS, and runs the engine against a DiffFacts
+// built from the editor's mini-diff — no git, no server, the actual engine judging
+// live in the browser. The same glue is unit-tested under local python3.
+const base = import.meta.env.BASE_URL;
+---
+
+<div class="pg" data-base={base}>
+  <div class="pg-grid">
+    <div class="pg-pane">
+      <label class="pg-h" for="pg-toml">ratchet.toml <span>— your policy</span></label>
+      <textarea id="pg-toml" class="pg-edit" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+    </div>
+    <div class="pg-pane">
+      <label class="pg-h" for="pg-scen">change <span>— what the agent did</span></label>
+      <textarea id="pg-scen" class="pg-edit" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+      <p class="pg-legend"><code>A/M/D path</code> file · <code>+ line</code> added · <code>- line</code> removed · <code>$ cmd</code> command · <code>@ branch</code></p>
+    </div>
+  </div>
+  <div class="pg-controls">
+    <span class="pg-presets">try:</span>
+    <button class="pg-preset" data-preset="strip">strip an assert</button>
+    <button class="pg-preset" data-preset="delete">delete the test</button>
+    <button class="pg-preset" data-preset="main">commit to main</button>
+    <button class="pg-preset" data-preset="invalid">an un-blockable rule</button>
+    <button class="pg-run" data-run>▶ run ratchet</button>
+  </div>
+  <div class="pg-out" data-out aria-live="polite"><div class="pg-boot">booting the real engine in your browser…</div></div>
+</div>
+
+<style>
+  .pg { border: 1px solid var(--sl-color-gray-5); border-radius: 12px; overflow: hidden; background: var(--sl-color-black); }
+  .pg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--sl-color-gray-5); }
+  @media (max-width: 640px) { .pg-grid { grid-template-columns: 1fr; } }
+  .pg-pane { background: var(--sl-color-black); display: flex; flex-direction: column; }
+  .pg-h { font-size: 12px; padding: 9px 12px 5px; color: var(--sl-color-white); font-weight: 600; }
+  .pg-h span { color: var(--sl-color-gray-3); font-weight: 400; }
+  .pg-edit {
+    flex: 1; min-height: 232px; resize: vertical; border: 0; outline: 0;
+    background: var(--sl-color-black); color: var(--sl-color-gray-1);
+    font-family: var(--__sl-font-mono, ui-monospace, Menlo, monospace); font-size: 13px; line-height: 1.55;
+    padding: 4px 12px 12px; tab-size: 2;
+  }
+  .pg-legend { margin: 0; padding: 7px 12px; font-size: 11px; color: var(--sl-color-gray-3); border-top: 1px solid var(--sl-color-gray-6); }
+  .pg-legend code { font-size: 11px; }
+  .pg-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 11px 12px; border-top: 1px solid var(--sl-color-gray-5); }
+  .pg-presets { color: var(--sl-color-gray-3); font-size: 13px; }
+  .pg-preset {
+    font-size: 12.5px; padding: 4px 11px; border-radius: 999px; cursor: pointer;
+    border: 1px solid var(--sl-color-gray-5); background: var(--sl-color-gray-6); color: var(--sl-color-white);
+  }
+  .pg-preset:hover { border-color: var(--sl-color-accent); }
+  .pg-run {
+    margin-left: auto; font-size: 13.5px; font-weight: 600; padding: 6px 16px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--sl-color-accent); background: var(--sl-color-accent); color: var(--sl-color-accent-low);
+  }
+  .pg-run[disabled] { opacity: .55; cursor: progress; }
+  .pg-out { padding: 14px; min-height: 84px; font-family: var(--__sl-font-mono, ui-monospace, Menlo, monospace); font-size: 13px; border-top: 1px solid var(--sl-color-gray-5); }
+  .pg-boot { color: var(--sl-color-gray-3); }
+  .pg-boot::before { content: "⏳ "; }
+  .pg-status { display: inline-block; font-weight: 700; padding: 3px 10px; border-radius: 7px; margin-bottom: 10px; }
+  .pg-status.bad { background: #2a1014; color: #ff7a85; border: 1px solid #5b2026; }
+  .pg-status.good { background: #0e2417; color: #4ade80; border: 1px solid #1f5236; }
+  .pg-group { color: var(--sl-color-gray-3); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin: 10px 0 4px; }
+  .pg-f { margin: 3px 0; padding-left: 2px; }
+  .pg-f .tag { font-weight: 700; margin-right: 7px; }
+  .pg-f.block .tag { color: #ff7a85; } .pg-f.warn .tag { color: #febc2e; }
+  .pg-f .id { color: var(--sl-color-white); } .pg-f .why { color: var(--sl-color-gray-2); }
+  .pg-err { color: #ff7a85; white-space: pre-wrap; }
+</style>
+
+<script>
+  const STARTER = `schema = 1
+[repo]
+default_branch = "main"
+code = ["src/**/*.py"]
+tests = ["tests/**/*.py"]
+
+# real-time (agent layer): if on main, branch first
+[[check]]
+id = "branch-first"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "forbid_commit_on_branch"
+branch = ["main"]
+
+# don't delete the failing test (file D-status)
+[[check]]
+id = "no-test-delete"
+kind = "fact"
+severity = "block"
+primitive = "forbid_delete"
+scope = "tests"
+unless_paired_add = true
+
+# don't strip the assertion (the '-' twin of forbid_pattern)
+[[check]]
+id = "keep-asserts"
+kind = "fact"
+severity = "block"
+primitive = "forbid_removal"
+pattern = "assert"
+scope = "tests"
+
+# never leak a credential
+[[check]]
+id = "secret-scan"
+kind = "fact"
+severity = "block"
+primitive = "secret_scan"
+`;
+
+  const INVALID = `schema = 1
+[repo]
+default_branch = "main"
+
+# This tries to HARD-BLOCK on a judgment (an LLM-judge the agent could sway).
+# ratchet refuses to load it: severity="block" REQUIRES kind="fact".
+[[check]]
+id = "vibes-check"
+kind = "advisory"
+severity = "block"
+primitive = "judge"
+prompt = "is the code good?"
+`;
+
+  const PRESETS: Record<string, { toml: string; scen: string }> = {
+    strip: { toml: STARTER, scen: 'M tests/test_auth.py\n-     assert token.valid()' },
+    delete: { toml: STARTER, scen: 'D tests/test_auth.py' },
+    main: { toml: STARTER, scen: '$ git commit -m wip\n@ main' },
+    invalid: { toml: INVALID, scen: '' },
+  };
+
+  const PYODIDE = 'https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js';
+  let ready: Promise<any> | null = null;
+
+  async function boot(base: string) {
+    if (!(window as any).loadPyodide) {
+      await new Promise<void>((res, rej) => {
+        const s = document.createElement('script');
+        s.src = PYODIDE;
+        s.onload = () => res();
+        s.onerror = () => rej(new Error('failed to load Pyodide'));
+        document.head.appendChild(s);
+      });
+    }
+    const pyodide = await (window as any).loadPyodide();
+    const [eng, glue] = await Promise.all([
+      fetch(base + 'ratchet.py').then((r) => r.text()),
+      fetch(base + 'glue.py').then((r) => r.text()),
+    ]);
+    pyodide.FS.writeFile('ratchet.py', eng);
+    pyodide.FS.writeFile('glue.py', glue);
+    pyodide.runPython('import glue');
+    return pyodide;
+  }
+
+  function esc(s: string) {
+    return s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]!);
+  }
+
+  function render(out: HTMLElement, res: any) {
+    if (!res.ok) {
+      out.innerHTML = `<div class="pg-status bad">config invalid</div><div class="pg-err">${esc(res.error || '')}</div>`;
+      return;
+    }
+    const denied = res.agent_denials.length > 0;
+    const blocked = res.change_findings.some((f: any) => f.sev === 'block');
+    const pill = denied || blocked ? 'bad' : 'good';
+    let html = `<div class="pg-status ${pill}">${esc(res.summary)}</div>`;
+    const row = (f: any) =>
+      `<div class="pg-f ${f.sev}"><span class="tag">[${f.sev === 'block' ? 'BLOCK' : 'warn'}]</span><span class="id">${esc(f.id)}</span> <span class="why">— ${esc(f.reason)}</span></div>`;
+    if (res.agent_denials.length) {
+      html += `<div class="pg-group">agent layer · denied in real time</div>${res.agent_denials.map(row).join('')}`;
+    }
+    if (res.change_findings.length) {
+      html += `<div class="pg-group">change layer · pre-push + CI</div>${res.change_findings.map(row).join('')}`;
+    }
+    if (!res.agent_denials.length && !res.change_findings.length) {
+      html += `<div class="pg-f"><span class="why">no findings — the change satisfies every rule.</span></div>`;
+    }
+    out.innerHTML = html;
+  }
+
+  function init() {
+    const pg = document.querySelector<HTMLElement>('.pg');
+    if (!pg) return;
+    const base = pg.dataset.base || '/';
+    const toml = pg.querySelector<HTMLTextAreaElement>('#pg-toml')!;
+    const scen = pg.querySelector<HTMLTextAreaElement>('#pg-scen')!;
+    const out = pg.querySelector<HTMLElement>('[data-out]')!;
+    const runBtn = pg.querySelector<HTMLButtonElement>('[data-run]')!;
+
+    toml.value = PRESETS.strip.toml;
+    scen.value = PRESETS.strip.scen;
+
+    async function run() {
+      runBtn.disabled = true;
+      try {
+        if (!ready) ready = boot(base);
+        const pyodide = await ready;
+        pyodide.globals.set('__toml', toml.value);
+        pyodide.globals.set('__scen', scen.value);
+        const res = JSON.parse(pyodide.runPython('glue.run_json(__toml, __scen)'));
+        render(out, res);
+      } catch (e) {
+        out.innerHTML = `<div class="pg-status bad">engine failed to load</div><div class="pg-err">${esc(String(e))}\n\nPyodide needs WebAssembly + network access to the CDN.</div>`;
+      } finally {
+        runBtn.disabled = false;
+      }
+    }
+
+    pg.querySelectorAll<HTMLButtonElement>('.pg-preset').forEach((b) =>
+      b.addEventListener('click', () => {
+        const p = PRESETS[b.dataset.preset!];
+        toml.value = p.toml;
+        scen.value = p.scen;
+        run();
+      })
+    );
+    runBtn.addEventListener('click', run);
+    run(); // auto-run the default so the page shows a live verdict immediately
+  }
+
+  if (document.readyState !== 'loading') init();
+  else document.addEventListener('DOMContentLoaded', init);
+</script>

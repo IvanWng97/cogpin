@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.astro/
+
+# vendored into public/ by sync-engine at predev/prebuild — regenerated, not source
+public/ratchet.py
+public/glue.py
+public/assets/

@@ -1,0 +1,44 @@
+---
+title: ratchet
+description: A Definition-of-Done gate for AI coding agents — blocks the corner-cuts an agent takes to look done, over facts it can never fake.
+template: splash
+tableOfContents: false
+---
+
+import HeroDemo from '../../components/HeroDemo.astro';
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+export const base = import.meta.env.BASE_URL;
+
+<div class="hero-wrap">
+  <h1>ratchet</h1>
+  <p class="lede">
+    The closing-discipline an AI agent keeps skipping — forgets the test, bypasses the
+    hook with <span class="hero-mono">--no-verify</span>, deletes the failing test, leaves
+    the docs stale — turned into <b>a gate it can’t talk its way around.</b>
+  </p>
+</div>
+
+<HeroDemo />
+
+<div class="hero-cta">
+  <a class="btn primary" href={`${base}try-it/`}>▶ Try it live</a>
+  <a class="btn" href={`${base}install/`}>Install</a>
+  <a class="btn" href="https://github.com/IvanWng97/ratchet">GitHub</a>
+</div>
+
+<div class="the-rule">severity = "block" <span class="req">REQUIRES</span> kind = "fact"</div>
+
+A **fact** decides only over things the agent can’t fake — the diff it’s committing, the
+command it’s about to run, PR/commit metadata. Those may hard-block. Anything that needs
+*judgment* (an LLM-judge, a self-checkbox) stays **advisory** — it warns, never blocks.
+One stdlib-only `ratchet.py`, one per-repo `ratchet.toml`, installed as a Claude Code
+plugin. That’s the whole moat: an agent can’t pass a block it didn’t actually satisfy,
+because it never authored the evidence the block reads.
+
+<CardGrid>
+  <LinkCard title="What it catches →" href={`${base}what-it-catches/`} description="Every corner-cut mapped to the fact that catches it — including delete-the-test, strip-the-assert, commit-to-main." />
+  <LinkCard title="Try it live →" href={`${base}try-it/`} description="The real engine, running in your browser. Edit a policy + a diff, watch it block." />
+  <LinkCard title="Install →" href={`${base}install/`} description="One /plugin command for the agent layer; /ratchet-init wires the base-pinned change layer." />
+  <LinkCard title="Concepts →" href={`${base}concepts/`} description="Fact vs judgment, the two layers, and why base-pinning makes the gate un-loosenable." />
+</CardGrid>

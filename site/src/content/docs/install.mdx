@@ -1,0 +1,61 @@
+---
+title: Install
+description: One /plugin command gives you the real-time agent layer; /ratchet-init wires the base-pinned change layer per repo.
+---
+
+import { Steps } from '@astrojs/starlight/components';
+
+ratchet is a Claude Code plugin. The engine is a single stdlib-only `ratchet.py`, so
+`python3` (3.11+) needs to be on your PATH — including the *non-interactive* shell’s PATH
+for Nix/nvm setups. If it isn’t, nothing errors; the gate just stays quiet.
+
+## Agent layer — per developer
+
+<Steps>
+
+1. Add the marketplace:
+
+   ```
+   /plugin marketplace add IvanWng97/ratchet
+   ```
+
+2. Install the plugin (a separate prompt — send it after the first):
+
+   ```
+   /plugin install ratchet@ratchet
+   ```
+
+</Steps>
+
+That’s the **agent layer** immediately: the `PreToolUse` deny + `Stop` nudge fire every
+session, and `/ratchet-init` / `/ratchet-check` become available. “Default-on” means
+enforcement is a property of your client + the repo, not a step the agent has to remember.
+
+> The desktop app has no `/plugin` command — install from the UI: Customize → the `+` by
+> personal plugins → Create plugin and add marketplace → Add from repository → the repo URL.
+
+## Change layer — per repo (authoritative)
+
+The agent layer is per-developer and bypassable; the **change layer** (pre-push + CI,
+base-pinned, un-bypassable) is per-repo. Run once, inside Claude Code:
+
+```
+/ratchet-init
+```
+
+It vendors the engine to `.ratchet/ratchet.py`, scaffolds `ratchet.toml`, and adds the CI
+step. Commit those and every clone — every agent, every PR — meets the same gate:
+
+```yaml
+- uses: actions/checkout@v4
+  with: { fetch-depth: 0 }          # base-pinning needs history
+- uses: actions/setup-python@v5
+  with: { python-version: "3.12" }
+- run: python3 .ratchet/ratchet.py check
+```
+
+No npm, no package manager, no binary download — one stdlib-Python file, committed. The
+change layer needs no Claude Code at all, so it gates **human** PRs and **any** agent CLI
+too; only the real-time agent layer is Claude-Code-specific.
+
+Next: **[lift a recipe →](/ratchet/recipes/)** for your stack.

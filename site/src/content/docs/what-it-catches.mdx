@@ -1,0 +1,52 @@
+---
+title: What it catches
+description: Every shortcut an AI agent takes to look done, mapped to the ungameable fact that catches it.
+---
+
+export const base = import.meta.env.BASE_URL;
+
+Every shortcut an agent takes to *look* done maps to a fact it can’t author. The right-hand
+column is the signal each rule reads — and the agent writes none of it.
+
+<img src={`${base}assets/catches.svg`} alt="Each corner-cut and the fact that catches it" style="width:100%;max-width:840px;display:block;margin:1rem auto;" />
+
+## The new fact-surface primitives
+
+Most gates scan **added** lines for bad patterns. That leaves the parts of a diff where the
+canonical AI corner-cuts actually live — *removals*, *deletions*, *the branch you’re on* —
+completely unguarded. These three close that:
+
+- **`forbid_removal`** — the `-` twin of `forbid_pattern`. A **removed** line matching a
+  guard pattern (an `assert`, an `await`, an error-propagating `?`, an auth check, a
+  `# nosec` / SPDX header) blocks. *“Silently delete the safety net”* is the most common AI
+  corner-cut, and the one a scanner of added lines cannot see.
+- **`forbid_delete`** — file D-status guard. *“Delete the failing test to reach green.”* A
+  whole-file deletion under a scope blocks, with `unless_paired_add` to let a genuine
+  rename/reorg through.
+- **`forbid_commit_on_branch`** — the live-branch fact. *“Commit straight to main.”* The
+  `PreToolUse` hook denies a commit/push on a protected branch in real time; the only way
+  past is `git checkout -b`, which is the intended outcome. A `run` check can’t substitute
+  — it isn’t a real-time op-denier.
+
+## The full primitive library
+
+Every check reads only facts — never your code.
+
+| primitive | kind | decides over |
+|---|---|---|
+| `forbid_command` | fact | the agent’s command string (agent layer) |
+| `forbid_commit_on_branch` | fact | the live current branch (agent layer) |
+| `secret_scan` | fact | added lines vs token shapes + forbidden file globs |
+| `forbid_pattern` | fact | **added** lines under a path scope |
+| `forbid_removal` | fact | **removed** lines under a path scope |
+| `forbid_delete` | fact | per-file D-status (a deletion under scope) |
+| `path_requires` | fact | name-status: if `when` changed, `need` must too |
+| `cooccur` | fact | if `trigger` appears, `require` must too |
+| `marker_present` | fact | a marker block exists in the PR body |
+| `commit_footer` | fact | every commit ends with the required footer |
+| `protected_path` | fact | gate-defining files changed → need an independent approval |
+| `run` | fact\* | shell-out; the exit code is the fact (**`block` only at the change layer**) |
+| `attest` | advisory | a class-gated `Stop`-hook checklist box (forcing function) |
+| `judge` | advisory | an advisory LLM-judge prompt for a CI substance check |
+
+Want to feel it? **[Try it live →](/ratchet/try-it/)**

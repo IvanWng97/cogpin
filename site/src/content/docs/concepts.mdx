@@ -1,0 +1,70 @@
+---
+title: Concepts
+description: Fact vs judgment, the two layers, and why base-pinning makes the gate impossible to loosen in the diff it gates.
+---
+
+export const base = import.meta.env.BASE_URL;
+
+## Fact vs judgment — the moat
+
+ratchet rests on one rule, enforced at parse time:
+
+```
+severity = "block"   REQUIRES   kind = "fact"
+```
+
+A **fact** is something the gated agent cannot author: added/removed diff lines, per-file
+A/M/D status, the command string, the current branch, PR/commit metadata, reviewer
+approvals. Only facts may hard-block. Anything that needs **judgment** — an LLM-judge, a
+self-attestation the agent ticks — is **advisory**: it warns or nudges, never blocks.
+
+This is the whole guarantee. A forgetful or over-confident agent can’t pass a block it
+didn’t actually satisfy, because it never wrote the evidence the block reads. And the
+boundary can’t silently erode, because `validate` rejects any `block` that isn’t a `fact`.
+The honest flip side: anything genuinely semantic (did the test *meaningfully* exercise the
+change? is this refactor safe?) stays advisory — ratchet surfaces it, a human decides.
+
+## Two layers, one config
+
+<img src={`${base}assets/layers.svg`} alt="The agent layer and the change layer enforce the same config twice" style="width:100%;max-width:840px;display:block;margin:1rem auto;" />
+
+| Layer | Fires at | Authority |
+|---|---|---|
+| **agent** | Claude Code `PreToolUse` / `Stop` hook | real-time friction: denies `--no-verify`, commit/push on a protected branch, and an un-DoD’d push/merge; `Stop` blocks turn-end on unticked attestation. Bypassable (and logged) |
+| **change** | git pre-push hook + CI | **authoritative** — base-pinned, ignores the bypass |
+
+The agent layer catches the cut the moment the agent reaches for it and mirrors what CI will
+enforce, so you fix it before you push. The change layer is the final word — a red CI check
+no env var can turn green.
+
+## Why it can’t loosen itself
+
+A `fact` block is only ungameable if the agent can’t edit the gate **in the same diff it’s
+being gated on**.
+
+<img src={`${base}assets/bypass.svg`} alt="Base-pinning: the gate is read from the base ref, not the PR head" style="width:100%;max-width:840px;display:block;margin:1rem auto;" />
+
+- **Base-pinning** — `ratchet.toml` (and your gate-defining files) are read from the pinned
+  base ref, never the PR head. A same-PR edit that relaxes a check is evaluated against the
+  *old* policy, so it can’t disarm itself.
+- **`protected_path`** — changing those gate-defining files needs an independent approval.
+- **Isolated `run`** — invoke tools isolated (`ruff --isolated`, a pinned `pytest -c …`) so
+  head-side config can’t defang the teeth.
+
+## What it does and doesn’t claim
+
+ratchet guarantees the **forcing function**, not omniscience. A `fact` block can’t be talked
+past — that’s the strong claim, and it holds. But `secret_scan` is best-effort pattern
+matching (pair it with `gitleaks` via a `run` block); `forbid_removal`/`forbid_pattern` are
+presence-ungameable but value-gameable (`assert(true)` satisfies a naive “has an assert”);
+`attest`/`judge` are advisory by construction; and a human with repo-admin rights can always
+change the base policy through review. The line ratchet draws: **anything an agent can do
+mid-task to cut a corner, it stops; anything that needs human judgment stays advisory and
+visible.**
+
+This isn’t hypothetical. Two reports in Claude Code’s own tracker name the gap exactly:
+[#32198](https://github.com/anthropics/claude-code/issues/32198) (“skips mandatory rules in
+CLAUDE.md — Definition of Done”) and
+[#40117](https://github.com/anthropics/claude-code/issues/40117) (“bypasses git pre-commit
+hooks using `--no-verify` despite explicit deny rules”). A prose rule *asks*; ratchet makes
+the unwanted outcome a non-event.

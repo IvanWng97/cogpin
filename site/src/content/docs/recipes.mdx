@@ -1,0 +1,76 @@
+---
+title: Recipes
+description: Ready-to-lift ratchet.toml policies for Python, Node/TypeScript, and a real Rust workspace.
+---
+
+Lift one, adjust the globs, `python3 .ratchet/ratchet.py validate`, commit. Each ships in
+the repo under [`examples/`](https://github.com/IvanWng97/ratchet/tree/main/examples).
+
+## Python
+
+```toml
+schema = 1
+[repo]
+default_branch = "main"
+code = ["src/**/*.py", "*.py"]
+tests = ["tests/**/*.py", "**/test_*.py", "**/*_test.py"]
+docs = ["**/*.md", "docs/**"]
+
+[meta]
+base_pinned = true
+bypass_env = "RATCHET_BYPASS"
+
+[[check]]                      # if on main, branch first (agent layer)
+id = "branch-first"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "forbid_commit_on_branch"
+branch = ["main", "master"]
+
+[[check]]                      # delete the failing test → blocked
+id = "no-test-delete"
+kind = "fact"
+severity = "block"
+primitive = "forbid_delete"
+scope = "tests"
+unless_paired_add = true
+
+[[check]]                      # strip an assertion → blocked
+id = "keep-asserts"
+kind = "fact"
+severity = "block"
+primitive = "forbid_removal"
+pattern = '\bassert\b|\bself\.assert'
+scope = "tests"
+
+[[check]]                      # the teeth: the real suite, base-pinned (change layer)
+id = "tests-pass"
+kind = "fact"
+severity = "block"
+layer = "change"
+primitive = "run"
+cmd = "python3 -m pytest -q"
+```
+
+See the full file (with secret-scan, debugger guard, skip-marker warn, docs-currency) →
+[`examples/python/ratchet.toml`](https://github.com/IvanWng97/ratchet/blob/main/examples/python/ratchet.toml).
+
+## Node / TypeScript
+
+A focused test (`it.only`), a committed `debugger;`, a deleted test, a stripped `await`,
+plus the real `npm run lint && npm test` as the change-layer teeth →
+[`examples/node-ts/ratchet.toml`](https://github.com/IvanWng97/ratchet/blob/main/examples/node-ts/ratchet.toml).
+
+## A real Rust workspace
+
+A faithful port of an 890-line bespoke Definition-of-Done gate (the pixtuoid project) into
+21 declarative checks — prod-`println!` guard, settings-write guard, two-lens-review marker,
+docs/ledger coupling, the new diff-side guards, and an advisory substance judge →
+[`examples/pixtuoid/ratchet.toml`](https://github.com/IvanWng97/ratchet/blob/main/examples/pixtuoid/ratchet.toml).
+
+## Promoting `warn` → `block`
+
+A new rule that gates real code should start at `severity = "warn"`, ride a few PRs to
+confirm zero false positives, then move to `block`. A `fact` is *presence*-ungameable from
+day one; the soak is only to tune scopes and exemptions against your repo’s real diffs.

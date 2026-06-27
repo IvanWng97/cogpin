@@ -1,0 +1,171 @@
+---
+// The hero: an auto-looping "agent session" terminal. An AI agent reaches for three
+// corner-cuts — skip the hook, delete the failing test, commit to main — and ratchet
+// intercepts each in real time, then the agent self-corrects. Pure CSS/JS, no deps.
+// SSR ships a static "caught" frame (works with JS off); the script hydrates it into
+// the loop, and honors prefers-reduced-motion by leaving the static frame in place.
+---
+
+<div class="hd" role="img" aria-label="An AI agent tries to skip the hook, delete a failing test, and commit to main; ratchet blocks each in real time and the agent fixes it properly.">
+  <div class="hd-term">
+    <div class="hd-bar">
+      <span class="hd-dot r"></span><span class="hd-dot y"></span><span class="hd-dot g"></span>
+      <span class="hd-title">agent session</span>
+      <span class="hd-live"><i></i>ratchet armed</span>
+    </div>
+    <div class="hd-body" data-term>
+      <div class="hd-ln cmd">git commit --no-verify -m "ship it"</div>
+      <div class="hd-ln block"><b>⛔ ratchet · blocked</b><span>--no-verify denied before it ran</span></div>
+      <div class="hd-ln del">tests/test_auth.py</div>
+      <div class="hd-ln block"><b>⛔ ratchet · blocked</b><span>forbid_delete · don’t delete the failing test</span></div>
+      <div class="hd-ln cmd branch" data-branch="main">git commit -m wip</div>
+      <div class="hd-ln block"><b>⛔ ratchet · blocked</b><span>branch-first · you’re on main</span></div>
+      <div class="hd-ln ok"><b>✓ fixed properly</b><span>tests ran · on a branch · committed</span></div>
+    </div>
+  </div>
+  <p class="hd-cap">Prose asks. <b>ratchet enforces.</b> — over facts the agent can’t fake.</p>
+</div>
+
+<style>
+  .hd { position: relative; max-width: 640px; margin: 0 auto; }
+  .hd-term {
+    position: relative;
+    border-radius: 14px;
+    background: #0b0f17;
+    border: 1px solid #1e2735;
+    box-shadow: 0 24px 60px -20px rgba(0,0,0,.7), 0 0 0 1px rgba(255,255,255,.02) inset;
+    overflow: hidden;
+    font-family: var(--__sl-font-mono, ui-monospace, "SF Mono", Menlo, monospace);
+  }
+  /* soft animated glow behind the card */
+  .hd::before {
+    content: ""; position: absolute; inset: -2px; z-index: -1; border-radius: 18px;
+    background: conic-gradient(from 0deg, #2563eb55, #1a7f3755, #cf222e55, #2563eb55);
+    filter: blur(26px); opacity: .55; animation: hd-spin 14s linear infinite;
+  }
+  @keyframes hd-spin { to { transform: rotate(360deg); } }
+  .hd-bar {
+    display: flex; align-items: center; gap: 7px;
+    padding: 9px 13px; background: #0e131c; border-bottom: 1px solid #1e2735;
+  }
+  .hd-dot { width: 11px; height: 11px; border-radius: 50%; }
+  .hd-dot.r { background: #ff5f57; } .hd-dot.y { background: #febc2e; } .hd-dot.g { background: #28c840; }
+  .hd-title { margin-left: 6px; color: #5b6675; font-size: 12px; }
+  .hd-live { margin-left: auto; color: #4ea1ff; font-size: 11px; display: flex; align-items: center; gap: 6px; }
+  .hd-live i { width: 7px; height: 7px; border-radius: 50%; background: #4ea1ff; box-shadow: 0 0 8px #4ea1ff; animation: hd-pulse 1.6s ease-in-out infinite; }
+  @keyframes hd-pulse { 50% { opacity: .35; } }
+
+  .hd-body { padding: 16px 18px; min-height: 232px; font-size: 13.5px; line-height: 1.5; }
+  .hd-ln { margin: 3px 0; color: #c4cdda; white-space: pre-wrap; word-break: break-word; }
+  .hd-ln.cmd::before { content: "$ "; color: #5b6675; }
+  .hd-ln.cmd { color: #e7edf5; }
+  .hd-ln.cmd.branch::after {
+    content: "⎇ " attr(data-branch); margin-left: 10px; color: #febc2e;
+    font-size: 11px; border: 1px solid #3a3320; background: #1c180c; border-radius: 6px; padding: 1px 6px;
+  }
+  .hd-ln.del::before { content: "D "; color: #cf6b6b; }
+  .hd-ln.del { color: #e0a3a3; }
+  .hd-ln.del::after { content: "  − assert token.valid()"; color: #cf6b6b; opacity: .8; }
+  .hd-ln.block, .hd-ln.ok {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px;
+    margin: 7px 0; padding: 7px 11px; border-radius: 9px; font-size: 12.5px;
+  }
+  .hd-ln.block { background: #2a1014; border: 1px solid #5b2026; }
+  .hd-ln.block b { color: #ff7a85; } .hd-ln.block span { color: #d8a3a8; }
+  .hd-ln.ok { background: #0e2417; border: 1px solid #1f5236; }
+  .hd-ln.ok b { color: #4ade80; } .hd-ln.ok span { color: #9bd7b3; }
+  .hd-cap { text-align: center; color: var(--sl-color-gray-3); font-size: 14px; margin: 16px 0 0; }
+  .hd-cap b { color: var(--sl-color-white); }
+
+  /* animation-driven states (added by the script) */
+  .hd[data-anim] .hd-ln { opacity: 0; transform: translateY(4px); }
+  .hd[data-anim] .hd-ln.show { opacity: 1; transform: none; transition: opacity .22s ease, transform .22s ease; }
+  .hd[data-anim] .hd-ln.block.show { animation: hd-shake .4s ease; }
+  .hd .cursor::after { content: "▋"; color: #4ea1ff; animation: hd-blink 1s step-end infinite; margin-left: 1px; }
+  @keyframes hd-blink { 50% { opacity: 0; } }
+  @keyframes hd-shake { 0%,100%{transform:translateX(0)} 20%{transform:translateX(-4px)} 40%{transform:translateX(4px)} 60%{transform:translateX(-2px)} 80%{transform:translateX(2px)} }
+
+  @media (max-width: 480px) { .hd-body { min-height: 270px; font-size: 12.5px; } }
+</style>
+
+<script>
+  type Step =
+    | { k: 'cmd'; t: string; branch?: string }
+    | { k: 'del'; t: string }
+    | { k: 'block'; t: string; d: string }
+    | { k: 'ok'; t: string; d: string };
+
+  const ACTS: Step[][] = [
+    [
+      { k: 'cmd', t: 'git commit --no-verify -m "ship it"' },
+      { k: 'block', t: '⛔ ratchet · blocked', d: '--no-verify denied before it ran' },
+      { k: 'cmd', t: 'git commit -m "ship it"' },
+      { k: 'ok', t: '✓ allowed', d: 'the hook ran · committed' },
+    ],
+    [
+      { k: 'del', t: 'tests/test_auth.py' },
+      { k: 'block', t: '⛔ ratchet · blocked', d: 'forbid_delete · don’t delete the failing test' },
+    ],
+    [
+      { k: 'cmd', t: 'git commit -m wip', branch: 'main' },
+      { k: 'block', t: '⛔ ratchet · blocked', d: 'branch-first · you’re on main' },
+      { k: 'cmd', t: 'git checkout -b fix/auth', branch: 'main' },
+      { k: 'ok', t: '✓ fixed properly', d: 'on a branch · tests ran · committed' },
+    ],
+  ];
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  async function play(hd: HTMLElement) {
+    const body = hd.querySelector<HTMLElement>('[data-term]')!;
+    hd.setAttribute('data-anim', '');
+    body.textContent = '';
+    for (;;) {
+      for (const act of ACTS) {
+        body.textContent = '';
+        for (const step of act) {
+          const ln = document.createElement('div');
+          ln.className = 'hd-ln ' + step.k;
+          if (step.k === 'cmd' && step.branch) {
+            ln.classList.add('branch');
+            ln.dataset.branch = step.branch;
+          }
+          body.appendChild(ln);
+          if (step.k === 'cmd') {
+            ln.classList.add('show', 'cursor');
+            for (const ch of step.t) {
+              ln.firstChild ? (ln.childNodes[0].textContent += ch) : ln.appendChild(document.createTextNode(ch));
+              await sleep(26);
+            }
+            await sleep(420);
+            ln.classList.remove('cursor');
+          } else if (step.k === 'del') {
+            ln.textContent = step.t;
+            requestAnimationFrame(() => ln.classList.add('show'));
+            await sleep(620);
+          } else {
+            const b = document.createElement('b');
+            b.textContent = step.t;
+            const s = document.createElement('span');
+            s.textContent = step.d;
+            ln.append(b, s);
+            requestAnimationFrame(() => ln.classList.add('show'));
+            await sleep(step.k === 'block' ? 1150 : 1500);
+          }
+        }
+        await sleep(900);
+      }
+    }
+  }
+
+  function init() {
+    const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    document.querySelectorAll<HTMLElement>('.hd').forEach((hd) => {
+      if (reduce) return; // leave the SSR static "caught" frame in place
+      play(hd);
+    });
+  }
+
+  if (document.readyState !== 'loading') init();
+  else document.addEventListener('DOMContentLoaded', init);
+</script>
