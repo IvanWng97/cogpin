@@ -1594,7 +1594,7 @@ HOUSE_RULE_MAP: tuple[_Rule, ...] = (
           {"pattern": "--no-verify|--no-gpg-sign|HUSKY=0"}, "agent", "block", "high", "--no-verify"),
     _Rule("branch-first", r"branch first|never commit.*(to )?(main|master)|work in a (git )?worktree|branch off",
           "forbid_commit_on_branch", {}, "agent", "block", "high"),
-    _Rule("secret-scan", r"no secrets?|don'?t commit (secrets|credentials)|\.env\b|API key", "secret_scan",
+    _Rule("secret-scan", r"no secrets?|(don'?t|never|do not) commit.*(secret|credential)|\.env\b|API key", "secret_scan",
           {"forbid_paths": [".env", ".env.*", "*.pem", "*.key", "id_rsa", "*.p12"]}, "change", "block", "high"),
     _Rule("self-protect", r"don'?t (edit|weaken).*(gate|config)|protected (files|paths)", "self_protect",
           {"paths": ["ratchet.toml", ".ratchet/**", ".github/workflows/**"]}, "agent", "block", "high"),

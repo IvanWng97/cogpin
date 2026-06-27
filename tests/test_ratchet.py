@@ -955,6 +955,10 @@ class TestHouseRuleScan(unittest.TestCase):
     def test_no_secrets(self):
         self.assertIn("secret-scan", self._ids(self._scan("Don't commit secrets or .env files.")))
 
+    def test_never_commit_secrets_phrasing(self):
+        # the common imperative phrasing ("Never commit secrets") must also map
+        self.assertIn("secret-scan", self._ids(self._scan("Never commit secrets to the repo.")))
+
     def test_update_docs(self):
         self.assertIn("docs-currency", self._ids(self._scan("Keep docs current when you change the API.")))
 
