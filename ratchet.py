@@ -99,6 +99,9 @@ PRIMITIVES = {
     "forbid_removal",
     "forbid_delete",
     "forbid_commit_on_branch",
+    "scope_lock",
+    "forbid_in_message",
+    "numeric_floor",
     "path_requires",
     "cooccur",
     "marker_present",
@@ -167,6 +170,17 @@ class Check:
     # forbid_commit_on_branch: protected branch glob(s) + the git op(s) to deny on them
     branch: list[str] = field(default_factory=list)
     ops: list[str] = field(default_factory=list)
+    # scope_lock: the ONLY path globs a change may touch (a positive allowlist)
+    allow: list[str] = field(default_factory=list)
+    # forbid_in_message: literal tokens forbidden in commit/PR message text
+    tokens: list[str] = field(default_factory=list)
+    msg_scope: list[str] = field(default_factory=list)  # commit_subject|commit_body|pr_body (default all)
+    # forbid_command: a normalized-verb deny-list (defeats git -C/cd &&/env wrappers)
+    deny: list[str] = field(default_factory=list)
+    # numeric_floor: a key regex (group 1 = value) + a direction; optional absolute floor
+    key: str | None = None
+    direction: str | None = None
+    floor: float | None = None
     cls: str | None = None  # attestation class: always | feature | public_surface | claude_md
     box: str | None = None  # the attestation checkbox label to look for (defaults to id)
     prompt: str | None = None
@@ -248,6 +262,13 @@ class Config:
                         unless_paired_add=bool(c.get("unless_paired_add", False)),
                         branch=_as_list(c.get("branch")),
                         ops=_as_list(c.get("ops")),
+                        allow=_as_list(c.get("allow")),
+                        tokens=_as_list(c.get("tokens")),
+                        msg_scope=_as_list(c.get("msg_scope")),
+                        deny=_as_list(c.get("deny")),
+                        key=c.get("key"),
+                        direction=c.get("direction"),
+                        floor=(float(c["floor"]) if c.get("floor") is not None else None),
                         cls=c.get("class"),
                         box=c.get("box"),
                         prompt=c.get("prompt"),
@@ -429,9 +450,16 @@ def _strip_comment(line: str) -> str:
 
 
 def forbid_command(check: Check, facts: CommandFacts) -> str | None:
+    # legacy `pattern`: a raw regex matched anywhere (catches --no-verify in any position)
     pat = _rx(check.pattern)
     if pat and pat.search(facts.command):
         return f"command matches forbidden pattern for `{check.id}`"
+    # `deny`: a NORMALIZED verb match — strips `git -C`/`-c k=v`, `cd d &&`, `env X=Y`,
+    # `sudo` wrappers so the gated verb can't be smuggled past prefix matching (#66176).
+    if check.deny:
+        hit = _deny_hit(facts.command, check.deny)
+        if hit:
+            return f"`{check.id}`: forbidden command `{hit}`"
     return None
 
 
@@ -509,6 +537,88 @@ def forbid_delete(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
     if check.unless_paired_add and any(st == ADDED and in_scope(p) for st, p in facts.changed):
         return None
     return f"forbidden deletion of {deleted[0]} (under {check.scope or 'any path'})"
+
+
+def scope_lock(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
+    """Positive allowlist — the structural inverse of the denylist path family. Every
+    A/M/D path must fall inside `allow`; any file outside the declared scope blocks
+    (the scope-creep / unauthorized-out-of-scope-edit class). An empty allow is inert."""
+    if not check.allow:
+        return None
+    allow = _resolve(check.allow, repo)
+    for _st, path in facts.changed:
+        if not _path_matches(path, allow):
+            return f"`{check.id}`: {path} is outside the declared scope {check.allow}"
+    return None
+
+
+_MSG_SCOPES = ("commit_subject", "commit_body", "pr_body")
+
+
+def forbid_in_message(check: Check, facts: DiffFacts) -> str | None:
+    """Forbid literal tokens (case-insensitive) in commit/PR message text — e.g. a
+    `[skip ci]` that disarms the change layer's own CI host. The require-presence
+    primitives (marker_present/commit_footer) have no forbid-presence inverse."""
+    if not check.tokens:
+        return None
+    scopes = set(check.msg_scope) or set(_MSG_SCOPES)
+    hay: list[str] = []
+    for msg in facts.commit_msgs:
+        lines = msg.splitlines()
+        if "commit_subject" in scopes and lines:
+            hay.append(lines[0])
+        if "commit_body" in scopes and len(lines) > 1:
+            hay.append("\n".join(lines[1:]))
+    if "pr_body" in scopes and facts.pr_body:
+        hay.append(facts.pr_body)
+    blob = "\n".join(hay).lower()
+    for t in check.tokens:
+        if t.lower() in blob:
+            return f"`{check.id}`: forbidden token `{t}` in the commit/PR message"
+    return None
+
+
+def _num_hits(lines: list[tuple[str, str]], scope: list[str], key_rx: re.Pattern[str]) -> dict[str, float]:
+    """{key-prefix → value} for lines (in scope) whose key regex captures a number in
+    group 1. The prefix (text before the value) is the pairing identity across hunks."""
+    out: dict[str, float] = {}
+    for path, line in lines:
+        if scope and not _path_matches(path, scope):
+            continue
+        m = key_rx.search(line)
+        if not m:
+            continue
+        try:
+            out[line[: m.start(1)].strip()] = float(m.group(1))
+        except (ValueError, IndexError):
+            continue
+    return out
+
+
+def numeric_floor(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
+    """The namesake ratchet: pair a numeric token across the remove/add hunks on the
+    SAME key and block a weakening direction (lower coverage / raised retries), plus an
+    optional absolute floor. forbid_removal/forbid_pattern see one side only — neither
+    computes direction (85→75 is byte-identical to 75→85)."""
+    key_rx = _rx(check.key)
+    if not key_rx:
+        return None
+    scope = _resolve(check.scope, repo) if check.scope else []
+    direction = check.direction or "no_decrease"
+    olds = _num_hits(facts.removed, scope, key_rx)
+    news = _num_hits(facts.added, scope, key_rx)
+    for prefix, new_val in news.items():
+        if check.floor is not None:
+            if direction == "no_decrease" and new_val < check.floor:
+                return f"`{check.id}`: {prefix} {new_val:g} is below the floor {check.floor:g}"
+            if direction == "no_increase" and new_val > check.floor:
+                return f"`{check.id}`: {prefix} {new_val:g} is above the ceiling {check.floor:g}"
+        if prefix in olds:
+            old_val = olds[prefix]
+            weaker = new_val < old_val if direction == "no_decrease" else new_val > old_val
+            if weaker:
+                return f"`{check.id}`: {prefix} weakened {old_val:g} → {new_val:g}"
+    return None
 
 
 def path_requires(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
@@ -632,6 +742,12 @@ def _eval_diff(c: Check, cfg: Config, facts: DiffFacts) -> str | None:
         return forbid_removal(c, facts, cfg.repo)
     if p == "forbid_delete":
         return forbid_delete(c, facts, cfg.repo)
+    if p == "scope_lock":
+        return scope_lock(c, facts, cfg.repo)
+    if p == "forbid_in_message":
+        return forbid_in_message(c, facts)
+    if p == "numeric_floor":
+        return numeric_floor(c, facts, cfg.repo)
     if p == "path_requires":
         return path_requires(c, facts, cfg.repo)
     if p == "cooccur":
@@ -784,6 +900,49 @@ def push_or_merge(cmd: str) -> str | None:
     if _MERGE_RE.search(_strip_quotes(cmd or "")):
         return "merge"
     return "push" if "push" in _git_ops(cmd) else None
+
+
+_ENV_ASSIGN = re.compile(r"^\w+=")
+
+
+def _normalize_command_segments(cmd: str) -> list[list[str]]:
+    """Shell-split, then per segment strip leading `sudo` + `VAR=val` assignments and,
+    for a git invocation, drop global options (+ their values) so the gated verb sits at
+    the front. Quote-stripped first. Defeats the `git -C/path`, `cd d &&`, `env X=Y`,
+    `git -c k=v` evasions that prefix matching misses (#66176)."""
+    segs: list[list[str]] = []
+    for seg in _SHELL_SEP.split(_strip_quotes(cmd or "")):
+        toks = seg.split()
+        i = 0
+        while i < len(toks) and (toks[i] == "sudo" or _ENV_ASSIGN.match(toks[i])):
+            i += 1
+        toks = toks[i:]
+        if toks and toks[0] == "git":
+            j = 1
+            while j < len(toks) and toks[j].startswith("-"):
+                opt = toks[j]
+                j += 1
+                if opt in _GIT_VALUE_OPTS and j < len(toks):
+                    j += 1
+            toks = ["git"] + toks[j:]
+        if toks:
+            segs.append(toks)
+    return segs
+
+
+def _deny_hit(cmd: str, deny: list[str]) -> str | None:
+    """The first deny phrase whose tokens appear as a contiguous run in any normalized
+    segment (token-equality, so `git push` never matches `git push-mirror`)."""
+    norm = _normalize_command_segments(cmd)
+    for phrase in deny:
+        pt = phrase.split()
+        if not pt:
+            continue
+        for toks in norm:
+            for s in range(len(toks) - len(pt) + 1):
+                if toks[s : s + len(pt)] == pt:
+                    return phrase
+    return None
 
 
 def run_branch_gate(cfg: Config, cmd: CommandFacts, current_branch: str | None) -> list[Finding]:

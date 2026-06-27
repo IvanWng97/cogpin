@@ -20,15 +20,18 @@ from ratchet import (  # noqa: E402
     cooccur,
     forbid_command,
     forbid_delete,
+    forbid_in_message,
     forbid_pattern,
     forbid_removal,
     has_block,
     marker_present,
+    numeric_floor,
     path_requires,
     protected_path,
     run_branch_gate,
     run_change,
     run_command_gate,
+    scope_lock,
     secret_scan,
     attestation_gaps,
     change_classes,
@@ -593,6 +596,109 @@ class TestDiffParsing(unittest.TestCase):
         self.assertIn(("D", "gone.py"), facts.changed)
         # the deleted file's lines surface as removed, tagged with the old path
         self.assertIn(("gone.py", "assert critical"), facts.removed)
+
+
+class TestMinedPrimitives(unittest.TestCase):
+    """The four mining-confirmed, zero-new-fact gaps: scope_lock, forbid_in_message,
+    forbid_command `deny` (normalized verb match), numeric_floor."""
+
+    def test_scope_lock_allowlist(self):
+        c = one_check(
+            '[[check]]\nid="sl"\nkind="fact"\nseverity="block"\nprimitive="scope_lock"\n'
+            'allow=["docs/**", "src/**/*.py"]'
+        )
+        r = repo()
+        # every changed path inside the allowlist → pass
+        self.assertIsNone(scope_lock(c, DiffFacts(changed=[("M", "src/a.py"), ("A", "docs/x.md")]), r))
+        # a modified path outside allow → block
+        self.assertIsNotNone(scope_lock(c, DiffFacts(changed=[("M", "src/a.py"), ("M", "infra/deploy.tf")]), r))
+        # A/M/D all count — a deletion outside scope blocks too
+        self.assertIsNotNone(scope_lock(c, DiffFacts(changed=[("D", "prod/secrets.py")]), r))
+        # empty allow → never blocks (unconfigured)
+        empty = one_check('[[check]]\nid="e"\nkind="fact"\nseverity="block"\nprimitive="scope_lock"')
+        self.assertIsNone(scope_lock(empty, DiffFacts(changed=[("M", "anything")]), r))
+
+    def test_scope_lock_resolves_named_scopes(self):
+        c = one_check('[[check]]\nid="sl"\nkind="fact"\nseverity="block"\nprimitive="scope_lock"\nallow=["docs"]')
+        r = repo()  # docs = ["**/*.md", "docs/**"]
+        self.assertIsNone(scope_lock(c, DiffFacts(changed=[("M", "README.md")]), r))
+        self.assertIsNotNone(scope_lock(c, DiffFacts(changed=[("M", "src/a.py")]), r))
+
+    def test_forbid_in_message(self):
+        c = one_check(
+            '[[check]]\nid="sci"\nkind="fact"\nseverity="block"\nprimitive="forbid_in_message"\n'
+            'tokens=["[skip ci]", "[ci skip]"]'
+        )
+        self.assertIsNotNone(forbid_in_message(c, DiffFacts(commit_msgs=["feat: x [skip ci]"])))
+        self.assertIsNotNone(forbid_in_message(c, DiffFacts(commit_msgs=["feat: x [SKIP CI]"])))  # case-insensitive
+        self.assertIsNotNone(forbid_in_message(c, DiffFacts(pr_body="please [ci skip] this")))
+        self.assertIsNone(forbid_in_message(c, DiffFacts(commit_msgs=["feat: normal"], pr_body="fine")))
+        self.assertIsNone(forbid_in_message(c, DiffFacts(commit_msgs=["feat: ok"])))  # no pr context, clean
+
+    def test_forbid_in_message_scope(self):
+        # restrict to the commit SUBJECT (first line) — a token in the body is then ignored
+        c = one_check(
+            '[[check]]\nid="s"\nkind="fact"\nseverity="block"\nprimitive="forbid_in_message"\n'
+            'tokens=["[skip ci]"]\nmsg_scope=["commit_subject"]'
+        )
+        self.assertIsNotNone(forbid_in_message(c, DiffFacts(commit_msgs=["wip [skip ci]\n\nbody"])))
+        self.assertIsNone(forbid_in_message(c, DiffFacts(commit_msgs=["wip\n\nbody has [skip ci]"])))
+
+    def test_forbid_command_deny_normalized(self):
+        c = one_check(
+            '[[check]]\nid="d"\nkind="fact"\nseverity="block"\nlayer="agent"\nprimitive="forbid_command"\n'
+            'deny=["git push", "git reset --hard", "rm -rf"]'
+        )
+        self.assertIsNotNone(forbid_command(c, CommandFacts("git push origin main")))   # direct
+        self.assertIsNotNone(forbid_command(c, CommandFacts("git -C /repo push")))       # -C wrapper
+        self.assertIsNotNone(forbid_command(c, CommandFacts("cd /repo && git push")))    # cd && wrapper
+        self.assertIsNotNone(forbid_command(c, CommandFacts("FOO=1 git push")))          # env prefix
+        self.assertIsNotNone(forbid_command(c, CommandFacts("git -c k=v reset --hard HEAD~1")))  # -c k=v
+        self.assertIsNotNone(forbid_command(c, CommandFacts("sudo rm -rf /tmp/x")))      # rm -rf
+        self.assertIsNone(forbid_command(c, CommandFacts("git status")))                 # benign
+        self.assertIsNone(forbid_command(c, CommandFacts("git format-patch")))           # different subcommand
+        self.assertIsNone(forbid_command(c, CommandFacts('echo "git push later"')))      # quoted → not a real op
+
+    def test_forbid_command_pattern_still_works_with_deny(self):
+        # the legacy `pattern` (raw regex, matches anywhere) coexists with `deny`
+        c = one_check(
+            '[[check]]\nid="d"\nkind="fact"\nseverity="block"\nlayer="agent"\nprimitive="forbid_command"\n'
+            'pattern="--no-verify"\ndeny=["git push"]'
+        )
+        self.assertIsNotNone(forbid_command(c, CommandFacts("git commit --no-verify")))
+        self.assertIsNotNone(forbid_command(c, CommandFacts("git -C x push")))
+        self.assertIsNone(forbid_command(c, CommandFacts("git commit -m ok")))
+
+    def test_numeric_floor_no_decrease(self):
+        c = one_check(
+            "[[check]]\nid=\"cov\"\nkind=\"fact\"\nseverity=\"block\"\nprimitive=\"numeric_floor\"\n"
+            "scope=[\"**/*.toml\"]\nkey='fail_under\\s*=\\s*([0-9.]+)'\ndirection=\"no_decrease\""
+        )
+        r = repo()
+        lowered = DiffFacts(removed=[("setup.toml", "fail_under = 85")], added=[("setup.toml", "fail_under = 75")])
+        self.assertIsNotNone(numeric_floor(c, lowered, r))   # 85 → 75 blocked
+        raised = DiffFacts(removed=[("setup.toml", "fail_under = 75")], added=[("setup.toml", "fail_under = 85")])
+        self.assertIsNone(numeric_floor(c, raised, r))       # tightening allowed
+        oos = DiffFacts(removed=[("a.py", "fail_under = 85")], added=[("a.py", "fail_under = 75")])
+        self.assertIsNone(numeric_floor(c, oos, r))          # out of scope
+
+    def test_numeric_floor_no_increase(self):
+        c = one_check(
+            "[[check]]\nid=\"retry\"\nkind=\"fact\"\nseverity=\"block\"\nprimitive=\"numeric_floor\"\n"
+            "scope=[\"*.cfg\"]\nkey='retries\\s*=\\s*([0-9]+)'\ndirection=\"no_increase\""
+        )
+        r = repo()
+        raised = DiffFacts(removed=[("a.cfg", "retries = 1")], added=[("a.cfg", "retries = 5")])
+        self.assertIsNotNone(numeric_floor(c, raised, r))    # raising retries blocked
+
+    def test_numeric_floor_absolute_floor(self):
+        c = one_check(
+            "[[check]]\nid=\"cov\"\nkind=\"fact\"\nseverity=\"block\"\nprimitive=\"numeric_floor\"\n"
+            "scope=[\"*.cfg\"]\nkey='cov\\s*=\\s*([0-9.]+)'\ndirection=\"no_decrease\"\nfloor=80"
+        )
+        r = repo()
+        self.assertIsNotNone(numeric_floor(c, DiffFacts(added=[("a.cfg", "cov = 70")]), r))  # new value below floor
+        self.assertIsNone(numeric_floor(c, DiffFacts(added=[("a.cfg", "cov = 85")]), r))     # at/above floor
 
 
 if __name__ == "__main__":

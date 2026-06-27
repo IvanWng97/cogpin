@@ -205,15 +205,18 @@ Every check reads only facts — never your code.
 
 | primitive | kind | decides over |
 |---|---|---|
-| `forbid_command{pattern}` | fact | the agent's command string (agent layer) |
+| `forbid_command{pattern,deny}` | fact | the agent's command string — `deny` matches the **normalized** verb, defeating `git -C/p push` / `cd d && …` / `env X=Y …` wrappers (agent layer) |
 | `forbid_commit_on_branch{branch,ops}` | fact | the live current branch (agent layer) |
 | `secret_scan{forbid_paths,custom}` | fact | added lines vs token shapes + forbidden file globs |
 | `forbid_pattern{pattern,scope,exempt,strip_comments}` | fact | **added** lines under a path scope |
 | `forbid_removal{pattern,scope,exempt,strip_comments}` | fact | **removed** lines under a path scope |
 | `forbid_delete{scope,unless_paired_add,exempt}` | fact | per-file D-status (a deletion under scope) |
+| `scope_lock{allow}` | fact | every A/M/D path must be inside the allowlist (scope creep) |
+| `numeric_floor{key,direction,floor}` | fact | a numeric value's **direction** across the diff (lower coverage / raised retries / shortened timeout) |
 | `path_requires{when,need}` | fact | name-status: if `when` changed, `need` must too |
 | `cooccur{trigger,require}` | fact | if `trigger` appears (diff/PR), `require` must too |
 | `marker_present{marker,when}` | fact | a marker block exists in the PR body |
+| `forbid_in_message{tokens,msg_scope}` | fact | forbidden tokens in a commit/PR message (e.g. `[skip ci]`) |
 | `commit_footer{}` | fact | every commit ends with `[meta].commit_footer` |
 | `protected_path{paths,require_approval}` | fact | gate-defining files changed → need an independent approval |
 | `run{cmd}` | fact\* | shell-out; the exit code is the fact (**`block` only at the change layer**) |

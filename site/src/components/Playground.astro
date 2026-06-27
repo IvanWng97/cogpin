@@ -23,6 +23,7 @@ const base = import.meta.env.BASE_URL;
     <button class="pg-preset" data-preset="strip">strip an assert</button>
     <button class="pg-preset" data-preset="delete">delete the test</button>
     <button class="pg-preset" data-preset="main">commit to main</button>
+    <button class="pg-preset" data-preset="scope">scope creep</button>
     <button class="pg-preset" data-preset="invalid">an un-blockable rule</button>
     <button class="pg-run" data-run>▶ run ratchet</button>
   </div>
@@ -77,6 +78,14 @@ default_branch = "main"
 code = ["src/**/*.py"]
 tests = ["tests/**/*.py"]
 
+# only these paths may change — scope creep blocks (the #1 mined gap)
+[[check]]
+id = "scope-lock"
+kind = "fact"
+severity = "block"
+primitive = "scope_lock"
+allow = ["src/**", "tests/**", "docs/**", "*.md"]
+
 # real-time (agent layer): if on main, branch first
 [[check]]
 id = "branch-first"
@@ -130,6 +139,7 @@ prompt = "is the code good?"
     strip: { toml: STARTER, scen: 'M tests/test_auth.py\n-     assert token.valid()' },
     delete: { toml: STARTER, scen: 'D tests/test_auth.py' },
     main: { toml: STARTER, scen: '$ git commit -m wip\n@ main' },
+    scope: { toml: STARTER, scen: 'M src/app.py\nM infra/deploy.tf' },
     invalid: { toml: INVALID, scen: '' },
   };
 
