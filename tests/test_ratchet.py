@@ -1,7 +1,9 @@
 """Stdlib-only test suite for ratchet (no pytest dependency — `python3 -m unittest`)."""
 
 import os
+import subprocess
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -17,17 +19,21 @@ from ratchet import (  # noqa: E402
     commit_footer,
     cooccur,
     forbid_command,
+    forbid_delete,
     forbid_pattern,
+    forbid_removal,
     has_block,
     marker_present,
     path_requires,
     protected_path,
+    run_branch_gate,
     run_change,
     run_command_gate,
     secret_scan,
     attestation_gaps,
     change_classes,
     push_or_merge,
+    _git_ops,
     _glob_to_re,
     _ticked,
 )
@@ -254,6 +260,67 @@ class TestPrimitives(unittest.TestCase):
         unrelated = DiffFacts(changed=[("M", "src/a.rs")], approvals=[])
         self.assertIsNone(protected_path(c, unrelated))
 
+    def test_forbid_removal_guards_deleted_guard_lines(self):
+        # the '-' twin of forbid_pattern: a REMOVED line matching the guard pattern
+        # under scope blocks — the "silently delete the assert/await/?" class.
+        c = one_check(
+            '[[check]]\nid="keep-guards"\nkind="fact"\nseverity="block"\nprimitive="forbid_removal"\n'
+            'pattern="assert|# nosec"\nscope="code"\nexempt="ratchet:allow"'
+        )
+        r = repo()
+        hit = DiffFacts(removed=[("src/a.py", "    assert x == 1")])
+        self.assertIsNotNone(forbid_removal(c, hit, r))
+        # out of code scope (a removed test line) → not flagged
+        oos = DiffFacts(removed=[("tests/a.py", "    assert y")])
+        self.assertIsNone(forbid_removal(c, oos, r))
+        # no pattern match → pass
+        plain = DiffFacts(removed=[("src/a.py", "    x = 1")])
+        self.assertIsNone(forbid_removal(c, plain, r))
+        # an exempt pragma on the removed line → allowed
+        ex = DiffFacts(removed=[("src/a.py", "    assert x  # ratchet:allow")])
+        self.assertIsNone(forbid_removal(c, ex, r))
+        # added lines are NOT the removed surface → pass even if they match
+        added_only = DiffFacts(added=[("src/a.py", "    assert x == 1")])
+        self.assertIsNone(forbid_removal(c, added_only, r))
+
+    def test_forbid_removal_strip_comments(self):
+        c = one_check(
+            '[[check]]\nid="kr"\nkind="fact"\nseverity="warn"\nprimitive="forbid_removal"\n'
+            'pattern="TODO"\nscope="code"\nstrip_comments=true'
+        )
+        r = repo()
+        in_comment = DiffFacts(removed=[("src/x.py", "x = 1  # TODO later")])
+        self.assertIsNone(forbid_removal(c, in_comment, r))
+        in_code = DiffFacts(removed=[("src/x.py", 'raise Exception("TODO")')])
+        self.assertIsNotNone(forbid_removal(c, in_code, r))
+
+    def test_forbid_delete_guards_file_deletion(self):
+        c = one_check(
+            '[[check]]\nid="no-test-delete"\nkind="fact"\nseverity="block"\nprimitive="forbid_delete"\n'
+            'scope="tests"\nunless_paired_add=true'
+        )
+        r = repo()
+        # delete a test file → block ("delete the failing test to go green")
+        self.assertIsNotNone(forbid_delete(c, DiffFacts(changed=[("D", "tests/a.py")]), r))
+        # editing (M) is not a deletion → pass
+        self.assertIsNone(forbid_delete(c, DiffFacts(changed=[("M", "tests/a.py")]), r))
+        # a deletion out of scope (src) → pass
+        self.assertIsNone(forbid_delete(c, DiffFacts(changed=[("D", "src/a.py")]), r))
+        # unless_paired_add: a paired add under the same scope (rename/replace) → suppressed
+        self.assertIsNone(
+            forbid_delete(c, DiffFacts(changed=[("D", "tests/a.py"), ("A", "tests/b.py")]), r)
+        )
+
+    def test_forbid_delete_without_paired_suppression_still_blocks(self):
+        c = one_check(
+            '[[check]]\nid="nd"\nkind="fact"\nseverity="block"\nprimitive="forbid_delete"\nscope="tests"'
+        )
+        r = repo()
+        # default unless_paired_add=false → a paired add does NOT suppress the delete
+        self.assertIsNotNone(
+            forbid_delete(c, DiffFacts(changed=[("D", "tests/a.py"), ("A", "tests/b.py")]), r)
+        )
+
 
 class TestEngine(unittest.TestCase):
     def cfg(self):
@@ -413,6 +480,119 @@ class TestAgentLayer(unittest.TestCase):
         # an attest check is advisory severity → the schema invariant doesn't reject it,
         # yet the Stop runtime still blocks turn-end on its unticked boxes.
         self.assertEqual(len(Config.parse(self.ATTEST_CFG).checks), 3)
+
+    BRANCH_CFG = """
+        schema = 1
+        [repo]
+        default_branch = "main"
+        [[check]]
+        id = "no-main-commit"
+        kind = "fact"
+        severity = "block"
+        layer = "agent"
+        primitive = "forbid_commit_on_branch"
+        branch = ["main", "release/*"]
+        ops = ["commit", "push"]
+    """
+
+    def test_git_ops_detects_subcommands(self):
+        self.assertEqual(_git_ops("git commit -m x"), {"commit"})
+        self.assertEqual(_git_ops("git add . && git push origin main"), {"add", "push"})
+        self.assertEqual(_git_ops("git -C dir -c k=v push"), {"push"})  # skips opt + value
+        self.assertEqual(_git_ops("ls -la"), set())
+        self.assertEqual(_git_ops("git commit -m 'git push later'"), {"commit"})  # quote-stripped
+
+    def test_forbid_commit_on_branch_denies_on_protected(self):
+        cfg = Config.parse(self.BRANCH_CFG)
+        # commit while on main → one blocking finding
+        f = run_branch_gate(cfg, CommandFacts("git commit -m x"), "main")
+        self.assertTrue(has_block(f))
+        # push while on a release branch (glob match) → block
+        self.assertTrue(has_block(run_branch_gate(cfg, CommandFacts("git push"), "release/1.2")))
+        # on a feature branch → allowed
+        self.assertEqual(run_branch_gate(cfg, CommandFacts("git commit -m x"), "feature/x"), [])
+        # a non-commit/push op on main → allowed (not in ops)
+        self.assertEqual(run_branch_gate(cfg, CommandFacts("git status"), "main"), [])
+        # detached / unknown branch → never blocks (no false positive)
+        self.assertEqual(run_branch_gate(cfg, CommandFacts("git commit -m x"), None), [])
+
+    def test_forbid_commit_on_branch_defaults_to_repo_default_branch(self):
+        cfg = Config.parse(
+            'schema=1\n[repo]\ndefault_branch="trunk"\n'
+            '[[check]]\nid="b"\nkind="fact"\nseverity="block"\nlayer="agent"\n'
+            'primitive="forbid_commit_on_branch"\n'  # no branch/ops → defaults: branch=[default], ops=[commit,push]
+        )
+        self.assertTrue(has_block(run_branch_gate(cfg, CommandFacts("git commit -m x"), "trunk")))
+        self.assertEqual(run_branch_gate(cfg, CommandFacts("git commit -m x"), "main"), [])
+
+    def test_forbid_commit_on_branch_rejects_change_layer(self):
+        # the current branch is a live agent-layer fact; a pure change-layer placement
+        # would silently never fire, so the config must declare it agent/both.
+        bad = (
+            'schema=1\n[repo]\ndefault_branch="main"\n'
+            '[[check]]\nid="b"\nkind="fact"\nseverity="block"\nlayer="change"\n'
+            'primitive="forbid_commit_on_branch"\n'
+        )
+        with self.assertRaises(ConfigError):
+            Config.parse(bad)
+
+
+class TestDiffParsing(unittest.TestCase):
+    """Exercise DiffFacts.from_range against a real git repo so the removed-line
+    fact (and the added-line parser it mirrors) is covered end-to-end."""
+
+    def _git(self, *args):
+        subprocess.run(["git", "-C", self.d, *args], check=True, capture_output=True, text=True)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = self.tmp.dir if hasattr(self.tmp, "dir") else self.tmp.name
+        self._git("init", "-q")
+        self._git("config", "user.email", "t@t")
+        self._git("config", "user.name", "t")
+        self._git("config", "commit.gpgsign", "false")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write(self, rel, text):
+        with open(os.path.join(self.d, rel), "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def test_from_range_captures_added_and_removed(self):
+        self._write("a.py", "keep = 1\nassert x == 1\ndrop_me = 2\n")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "base")
+        base = subprocess.run(
+            ["git", "-C", self.d, "rev-parse", "HEAD"], capture_output=True, text=True
+        ).stdout.strip()
+        # remove the assert + drop_me lines, add a new one
+        self._write("a.py", "keep = 1\nadded_line = 3\n")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "change")
+        facts = DiffFacts.from_range(self.d, base, "HEAD")
+        removed = [line for _, line in facts.removed]
+        added = [line for _, line in facts.added]
+        self.assertIn("assert x == 1", removed)
+        self.assertIn("drop_me = 2", removed)
+        self.assertIn("added_line = 3", added)
+        # removed lines carry the (old) path
+        self.assertTrue(all(p == "a.py" for p, _ in facts.removed))
+
+    def test_from_range_whole_file_delete_records_removed_lines(self):
+        self._write("gone.py", "assert critical\n")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "base")
+        base = subprocess.run(
+            ["git", "-C", self.d, "rev-parse", "HEAD"], capture_output=True, text=True
+        ).stdout.strip()
+        os.remove(os.path.join(self.d, "gone.py"))
+        self._git("add", "-A")
+        self._git("commit", "-qm", "delete file")
+        facts = DiffFacts.from_range(self.d, base, "HEAD")
+        self.assertIn(("D", "gone.py"), facts.changed)
+        # the deleted file's lines surface as removed, tagged with the old path
+        self.assertIn(("gone.py", "assert critical"), facts.removed)
 
 
 if __name__ == "__main__":

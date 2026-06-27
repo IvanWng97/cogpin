@@ -1,0 +1,99 @@
+# ratchet recipe — a Node / TypeScript repo. Lift it, adjust the globs, validate:
+#   python3 .ratchet/ratchet.py validate
+# The one rule: severity="block" REQUIRES kind="fact".
+schema = 1
+
+[repo]
+default_branch = "main"
+code = ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js"]
+tests = ["**/*.test.ts", "**/*.spec.ts", "test/**", "tests/**", "__tests__/**"]
+docs = ["**/*.md", "docs/**"]
+
+[meta]
+base_pinned = true
+bypass_env = "RATCHET_BYPASS"          # agent-layer escape hatch (always logged)
+
+# ── agent layer (real-time PreToolUse) ───────────────────────────────────────
+[[check]]
+id = "no-verify"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "forbid_command"
+pattern = "--no-verify|--no-gpg-sign|HUSKY=0"
+
+# "If on main, branch first."
+[[check]]
+id = "branch-first"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "forbid_commit_on_branch"
+branch = ["main", "master"]
+ops = ["commit", "push"]
+
+# ── change layer (pre-push + CI, authoritative, base-pinned) ─────────────────
+[[check]]
+id = "secret-scan"
+kind = "fact"
+severity = "block"
+primitive = "secret_scan"
+forbid_paths = [".env", ".env.*", "*.env", "*.pem", "*.key", "id_rsa", "*.p12"]
+
+# A focused test (`it.only` / `describe.only`) silently disables the rest of the
+# suite — a committed one is a green-by-doing-less cut. Block it.
+[[check]]
+id = "no-focused-tests"
+kind = "fact"
+severity = "block"
+primitive = "forbid_pattern"
+pattern = '\b(?:describe|it|test)\.only\s*\(|\bfdescribe\b|\bfit\b'
+scope = "tests"
+
+# `debugger;` / a stray console.log left in source.
+[[check]]
+id = "no-debugger"
+kind = "fact"
+severity = "warn"
+primitive = "forbid_pattern"
+pattern = '\bdebugger\b|console\.log\('
+scope = "code"
+strip_comments = true
+
+# "Delete the failing test to go green" — a whole test-file deletion, unless a
+# test file is added in the same change (a rename/reorg).
+[[check]]
+id = "no-test-delete"
+kind = "fact"
+severity = "block"
+primitive = "forbid_delete"
+scope = "tests"
+unless_paired_add = true
+
+# "Strip the assertion / the await" — a REMOVED guard line under the test tree.
+[[check]]
+id = "keep-test-guards"
+kind = "fact"
+severity = "warn"
+primitive = "forbid_removal"
+pattern = '\bexpect\s*\(|\bawait\b|\bassert\b'
+scope = "tests"
+
+# Touch source → touch docs (existence-floor; "right doc?" is judged elsewhere).
+[[check]]
+id = "docs-currency"
+kind = "fact"
+severity = "warn"
+primitive = "path_requires"
+when = "code"
+need = "docs"
+
+# THE teeth: the change layer runs the real lint + test suite from the base-pinned
+# policy. Pin configs (`--config`, isolated) so a head-side edit can't defang them.
+[[check]]
+id = "lint-and-test"
+kind = "fact"
+severity = "block"
+layer = "change"
+primitive = "run"
+cmd = "npm run -s lint && npm test"

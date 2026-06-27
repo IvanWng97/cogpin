@@ -22,6 +22,17 @@ layer = "agent"
 primitive = "forbid_command"
 pattern = "--no-verify|--no-gpg-sign|HUSKY=0|git .*-c core.hooksPath="
 
+# "If on main, branch first." Deny a commit/push on the default branch in real time;
+# the only way past is `git checkout -b`, which is the intended outcome.
+[[check]]
+id = "branch-first"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "forbid_commit_on_branch"
+branch = ["main"]
+ops = ["commit", "push"]
+
 # ── change layer (pre-push + CI, authoritative, base-pinned) ─────────────────
 [[check]]
 id = "secret-scan"
@@ -47,6 +58,26 @@ severity = "warn"
 primitive = "path_requires"
 when = "code"
 need = "tests"
+
+# Don't delete a test to go green. A whole test-file deletion blocks unless a test
+# file is added in the same change (a rename/reorg). Ungameable file D-status fact.
+[[check]]
+id = "no-test-delete"
+kind = "fact"
+severity = "block"
+primitive = "forbid_delete"
+scope = "tests"
+unless_paired_add = true
+
+# Don't silently strip a test. A REMOVED `def test_…` line under tests/ blocks —
+# the '-' twin of forbid_pattern, closing the "delete the assertion" corner-cut.
+[[check]]
+id = "keep-tests"
+kind = "fact"
+severity = "block"
+primitive = "forbid_removal"
+pattern = '^\s*def test_'
+scope = "tests"
 
 # Touch the engine → touch docs.
 [[check]]

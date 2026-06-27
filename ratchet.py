@@ -96,6 +96,9 @@ PRIMITIVES = {
     "secret_scan",
     "forbid_command",
     "forbid_pattern",
+    "forbid_removal",
+    "forbid_delete",
+    "forbid_commit_on_branch",
     "path_requires",
     "cooccur",
     "marker_present",
@@ -159,6 +162,11 @@ class Check:
     forbid_paths: list[str] = field(default_factory=list)
     paths: list[str] = field(default_factory=list)
     require_approval: bool = True
+    # forbid_delete: a paired added file under the same scope (a rename/replace) suppresses
+    unless_paired_add: bool = False
+    # forbid_commit_on_branch: protected branch glob(s) + the git op(s) to deny on them
+    branch: list[str] = field(default_factory=list)
+    ops: list[str] = field(default_factory=list)
     cls: str | None = None  # attestation class: always | feature | public_surface | claude_md
     box: str | None = None  # the attestation checkbox label to look for (defaults to id)
     prompt: str | None = None
@@ -237,6 +245,9 @@ class Config:
                         forbid_paths=_as_list(c.get("forbid_paths")),
                         paths=_as_list(c.get("paths")),
                         require_approval=bool(c.get("require_approval", True)),
+                        unless_paired_add=bool(c.get("unless_paired_add", False)),
+                        branch=_as_list(c.get("branch")),
+                        ops=_as_list(c.get("ops")),
                         cls=c.get("class"),
                         box=c.get("box"),
                         prompt=c.get("prompt"),
@@ -277,6 +288,13 @@ class Config:
                 raise ConfigError(
                     f"check `{c.id}`: a `run` block must live at the change layer, not agent"
                 )
+            # The current branch is a LIVE agent-layer fact (read at the PreToolUse
+            # intercept); a pure change-layer placement would silently never fire.
+            if c.primitive == "forbid_commit_on_branch" and c.layer == "change":
+                raise ConfigError(
+                    f"check `{c.id}`: forbid_commit_on_branch reads the live branch — "
+                    f"declare layer=\"agent\" (or \"both\"), not change"
+                )
 
     @property
     def footer_regex(self) -> str | None:
@@ -292,7 +310,8 @@ ADDED, MODIFIED, DELETED = "A", "M", "D"
 
 @dataclass
 class DiffFacts:
-    added: list[tuple[str, str]] = field(default_factory=list)  # (path, added line)
+    added: list[tuple[str, str]] = field(default_factory=list)  # (new path, added line)
+    removed: list[tuple[str, str]] = field(default_factory=list)  # (old path, removed line)
     changed: list[tuple[str, str]] = field(default_factory=list)  # (status, path)
     # None = no PR context (local pre-push) → PR-body checks skip rather than false-fire.
     # "" = a real but empty PR body (CI) → a missing required marker DOES fail.
@@ -319,12 +338,22 @@ class DiffFacts:
                 f.changed.append((status, parts[-1]))
         diff = _git(cwd, ["diff", "--unified=0", rng])
         if diff:
-            cur = ""
+            # new = +++ b/<path> for added/modified; old = --- a/<path> for the removed
+            # side (the old path also covers whole-file deletes, where +++ is /dev/null).
+            new_path = old_path = ""
             for line in diff.splitlines():
-                if line.startswith("+++ b/"):
-                    cur = line[6:]
-                elif line.startswith("+") and not line.startswith("+++") and cur:
-                    f.added.append((cur, line[1:]))
+                if line.startswith("--- a/"):
+                    old_path = line[6:]
+                elif line.startswith("--- "):
+                    old_path = ""  # /dev/null (added file) → no removed-side path
+                elif line.startswith("+++ b/"):
+                    new_path = line[6:]
+                elif line.startswith("+++ "):
+                    new_path = ""
+                elif line.startswith("+") and not line.startswith("+++") and new_path:
+                    f.added.append((new_path, line[1:]))
+                elif line.startswith("-") and not line.startswith("---") and old_path:
+                    f.removed.append((old_path, line[1:]))
         log = _git(cwd, ["log", "--format=%B%x1e", rng])
         if log:
             f.commit_msgs = [m.strip() for m in log.split("\x1e") if m.strip()]
@@ -436,6 +465,50 @@ def forbid_pattern(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
             continue
         return f"forbidden pattern in {path}: `{line.strip()}`"
     return None
+
+
+def forbid_removal(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
+    """The `-` twin of forbid_pattern: a REMOVED line matching the pattern under
+    scope blocks. Closes the 'silently delete the safety net' class (drop an
+    assert / await / `?` / auth check / `# nosec`) that the added-line surface is
+    blind to. Pure renames produce no removed lines (git rename-detection), so
+    they don't false-fire."""
+    pat = _rx(check.pattern)
+    if not pat:
+        return None
+    scope = _resolve(check.scope, repo) if check.scope else []
+    exempt = _rx(check.exempt)
+    for path, line in facts.removed:
+        if scope and not _path_matches(path, scope):
+            continue
+        hay = _strip_comment(line) if check.strip_comments else line
+        if not pat.search(hay):
+            continue
+        if exempt and (exempt.search(path) or exempt.search(line)):
+            continue
+        return f"forbidden removal in {path}: `{line.strip()}`"
+    return None
+
+
+def forbid_delete(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
+    """File D-status guard: deleting a file under scope blocks ('delete the failing
+    test to go green'). `unless_paired_add` suppresses when an added file exists
+    under the same scope (a coarse rename/replace proxy)."""
+    scope = _resolve(check.scope, repo) if check.scope else []
+    exempt = _rx(check.exempt)
+
+    def in_scope(p: str) -> bool:
+        return not scope or _path_matches(p, scope)
+
+    deleted = [
+        p for st, p in facts.changed
+        if st == DELETED and in_scope(p) and not (exempt and exempt.search(p))
+    ]
+    if not deleted:
+        return None
+    if check.unless_paired_add and any(st == ADDED and in_scope(p) for st, p in facts.changed):
+        return None
+    return f"forbidden deletion of {deleted[0]} (under {check.scope or 'any path'})"
 
 
 def path_requires(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
@@ -555,6 +628,10 @@ def _eval_diff(c: Check, cfg: Config, facts: DiffFacts) -> str | None:
         return secret_scan(c, facts)
     if p == "forbid_pattern":
         return forbid_pattern(c, facts, cfg.repo)
+    if p == "forbid_removal":
+        return forbid_removal(c, facts, cfg.repo)
+    if p == "forbid_delete":
+        return forbid_delete(c, facts, cfg.repo)
     if p == "path_requires":
         return path_requires(c, facts, cfg.repo)
     if p == "cooccur":
@@ -567,7 +644,8 @@ def _eval_diff(c: Check, cfg: Config, facts: DiffFacts) -> str | None:
         return protected_path(c, facts)
     if p == "run":
         return _run_shell(c.cmd or "true")
-    return None  # attest/judge/forbid_command are not diff-evaluated here
+    # attest/judge/forbid_command/forbid_commit_on_branch are agent-layer, not diff-evaluated
+    return None
 
 
 def run_change(cfg: Config, facts: DiffFacts, allow_run: bool = True) -> list[Finding]:
@@ -674,14 +752,13 @@ def _strip_quotes(s: str) -> str:
     return re.sub(r"'[^']*'|\"[^\"]*\"", "", s)
 
 
-def push_or_merge(cmd: str) -> str | None:
-    """"merge" / "push" / None for a shell command. `gh pr merge` (or `gh api …/merge`)
-    → merge; any `git push` across shell-separated segments (tolerating leading git
-    global options + their values) → push. Quote-stripped first so a flag inside a
-    message isn't a false hit."""
+def _git_ops(cmd: str) -> set[str]:
+    """The set of git SUBCOMMANDS invoked across shell-separated segments, tolerating
+    leading git global options + their values (`git -C dir -c k=v push` → {"push"}).
+    Quote-stripped first so a subcommand named inside a message isn't a false hit.
+    Tokenized (not a mega-regex) → ReDoS-immune."""
     c = _strip_quotes(cmd or "")
-    if _MERGE_RE.search(c):
-        return "merge"
+    ops: set[str] = set()
     for seg in _SHELL_SEP.split(c):
         toks = seg.split()
         i = 0
@@ -695,10 +772,44 @@ def push_or_merge(cmd: str) -> str | None:
                 j += 1
                 if opt in _GIT_VALUE_OPTS and j < len(toks):
                     j += 1
-            if j < len(toks) and toks[j] == "push":
-                return "push"
+            if j < len(toks):
+                ops.add(toks[j])
             i = j + 1
-    return None
+    return ops
+
+
+def push_or_merge(cmd: str) -> str | None:
+    """"merge" / "push" / None for a shell command. `gh pr merge` (or `gh api …/merge`)
+    → merge; any `git push` (via the tokenized op scan) → push."""
+    if _MERGE_RE.search(_strip_quotes(cmd or "")):
+        return "merge"
+    return "push" if "push" in _git_ops(cmd) else None
+
+
+def run_branch_gate(cfg: Config, cmd: CommandFacts, current_branch: str | None) -> list[Finding]:
+    """AGENT layer: forbid_commit_on_branch — deny commit/push on a protected branch.
+    The current branch is an ungameable live fact; the only way to satisfy the gate
+    is to branch first (`git checkout -b`), which is the intended outcome. Returns []
+    on a detached/unknown branch so it never false-fires."""
+    out: list[Finding] = []
+    if current_branch is None:
+        return out
+    invoked = _git_ops(cmd.command)
+    for c in cfg.checks:
+        if c.primitive != "forbid_commit_on_branch" or c.layer == "change":
+            continue
+        ops = set(c.ops) or {"commit", "push"}
+        if not (invoked & ops):
+            continue
+        branches = c.branch or [cfg.repo.default_branch]
+        if _path_matches(current_branch, branches):
+            hit = " / ".join(sorted(invoked & ops))
+            out.append(Finding(
+                c.id, c.severity,
+                f"`{c.id}`: {hit} on protected branch `{current_branch}` — branch first "
+                f"(git checkout -b <name>)",
+            ))
+    return out
 
 
 def _local_facts(cwd: str, default_branch: str) -> DiffFacts:
@@ -774,6 +885,17 @@ layer = "agent"
 primitive = "forbid_command"
 pattern = "--no-verify|--no-gpg-sign|HUSKY=0"
 
+# "If on main, branch first." Deny a commit/push on the default branch in real time;
+# the only way past is `git checkout -b` — which is the intended outcome.
+[[check]]
+id = "branch-first"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "forbid_commit_on_branch"
+branch = ["main"]
+ops = ["commit", "push"]
+
 # Never let a credential into the diff.
 [[check]]
 id = "secret-scan"
@@ -790,7 +912,35 @@ severity = "warn"
 primitive = "path_requires"
 when = "code"
 need = "docs"
+
+# Close the two canonical "make CI green by doing less" corner-cuts. Uncomment to arm:
+#
+# "delete the failing test" — a whole test-file deletion (unless a test is added in
+# the same change, i.e. a rename/reorg):
+# [[check]]
+# id = "no-test-delete"
+# kind = "fact"
+# severity = "block"
+# primitive = "forbid_delete"
+# scope = "tests"
+# unless_paired_add = true
+#
+# "strip the assertion" — a REMOVED guard line (the '-' twin of forbid_pattern):
+# [[check]]
+# id = "keep-asserts"
+# kind = "fact"
+# severity = "block"
+# primitive = "forbid_removal"
+# pattern = "assert|expect\\\\(|\\\\bawait\\\\b"
+# scope = "code"
 """
+
+
+def _current_branch(cwd: str) -> str | None:
+    """The live agent-layer branch fact. None on a detached HEAD (`git symbolic-ref`
+    fails) → forbid_commit_on_branch never false-fires there."""
+    out = _git(cwd, ["symbolic-ref", "--short", "-q", "HEAD"])
+    return out.strip() if out and out.strip() else None
 
 
 def _resolve_base(cwd: str, default_branch: str) -> str | None:
@@ -819,8 +969,10 @@ def cmd_gate() -> int:
         cfg = _read_working_config(".")
     except (OSError, ConfigError):
         return 0  # no/invalid config in this repo → never block
-    # 1) hard deny: forbidden command shapes — never bypassable (it skips the hooks)
+    # 1) hard deny: forbidden command shapes + commit/push on a protected branch —
+    #    never bypassable (a forbidden command skips the hooks; branch-first is cheap).
     cmdblocks = run_command_gate(cfg, cmd)
+    cmdblocks += run_branch_gate(cfg, cmd, _current_branch("."))
     if has_block(cmdblocks):
         print(f"ratchet: blocked — {_reasons(cmdblocks)}", file=sys.stderr)
         return 2
