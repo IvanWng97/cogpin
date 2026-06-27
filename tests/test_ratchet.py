@@ -9,12 +9,16 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ratchet import (  # noqa: E402
+    HOUSE_RULE_MAP,
+    SAFE_CORE_IDS,
     Check,
     CommandFacts,
     Config,
     ConfigError,
     DiffFacts,
+    HouseRuleHit,
     RepoCfg,
+    RepoScan,
     _git_ops,
     _glob_to_re,
     _ticked,
@@ -24,13 +28,17 @@ from ratchet import (  # noqa: E402
     change_classes,
     commit_footer,
     cooccur,
+    detect_test_command,
+    draft_lint,
     file_must_contain,
     forbid_command,
     forbid_delete,
     forbid_in_message,
     forbid_pattern,
     forbid_removal,
+    guess_globs,
     has_block,
+    is_bound,
     marker_present,
     max_added_file_bytes,
     numeric_floor,
@@ -38,12 +46,15 @@ from ratchet import (  # noqa: E402
     pattern_requires_approval,
     protected_path,
     push_or_merge,
+    rank_house_rules,
+    render_suggest_toml,
     require_approval_from,
     require_checks_green,
     require_message_pattern,
     run_branch_gate,
     run_change,
     run_command_gate,
+    scan_house_rules,
     scope_lock,
     secret_scan,
     self_protect,
@@ -825,6 +836,390 @@ class TestFullCoverage(unittest.TestCase):
         self.assertIsNone(require_checks_green(c, DiffFacts(checks=[{"name": "ci", "conclusion": "success"}])))
         self.assertIsNotNone(require_checks_green(c, DiffFacts(checks=[{"name": "ci", "conclusion": "failure"}])))
         self.assertIsNotNone(require_checks_green(c, DiffFacts(checks=[{"name": "ci", "conclusion": None}])))  # pending
+
+
+class TestGlobGuessing(unittest.TestCase):
+    """guess_globs — dominant-language detection + keep-only-matching globs."""
+
+    def test_python_repo(self):
+        code, tests, docs = guess_globs(["src/app.py", "tests/test_app.py", "docs/x.md"])
+        self.assertTrue(any(_glob_to_re(g).match("src/app.py") for g in code))
+        self.assertTrue(any(_glob_to_re(g).match("tests/test_app.py") for g in tests))
+        self.assertIn("**/*.md", docs)
+        self.assertIn("docs/**", docs)
+
+    def test_rust_crates_layout(self):
+        code, tests, _ = guess_globs(["crates/x/src/a.rs", "crates/x/tests/b.rs", "Cargo.toml"])
+        self.assertIn("crates/*/src/**/*.rs", code)
+        self.assertNotIn("src/**/*.rs", code)  # no flat leak
+
+    def test_node_ts(self):
+        code, tests, _ = guess_globs(["src/a.ts", "src/a.test.ts", "package.json"])
+        self.assertTrue(any(_glob_to_re(g).match("src/a.ts") for g in code))
+        self.assertIn("**/*.test.ts", tests)
+
+    def test_only_emits_matching_globs(self):
+        code, _, _ = guess_globs(["app.py", "util.py"])
+        self.assertIn("*.py", code)
+        self.assertNotIn("src/**/*.py", code)
+
+    def test_dominant_language_wins(self):
+        code, _, _ = guess_globs(["a.py", "b.py", "c.py", "one.js"])
+        self.assertTrue(any(".py" in g for g in code))
+
+    def test_empty_tree_safe(self):
+        self.assertEqual(guess_globs([]), ([], [], ["**/*.md"]))
+
+
+class TestTestCommand(unittest.TestCase):
+    """detect_test_command — manifest parsed as TEXT, never executed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _w(self, name, text):
+        with open(os.path.join(self.d, name), "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def test_justfile(self):
+        self._w("justfile", "build:\n  cargo build\ntest:\n  pytest\n")
+        self.assertEqual(detect_test_command(self.d), ("just test", "justfile"))
+
+    def test_package_json(self):
+        self._w("package.json", '{"scripts": {"test": "vitest run"}}')
+        self.assertEqual(detect_test_command(self.d), ("npm test", "package.json"))
+
+    def test_package_json_ignores_npm_placeholder(self):
+        self._w("package.json", '{"scripts": {"test": "echo \\"Error: no test specified\\" && exit 1"}}')
+        self.assertEqual(detect_test_command(self.d), (None, None))
+
+    def test_pyproject_pytest(self):
+        self._w("pyproject.toml", "[tool.pytest.ini_options]\naddopts = '-q'\n")
+        self.assertEqual(detect_test_command(self.d), ("python3 -m pytest -q", "pyproject.toml"))
+
+    def test_cargo(self):
+        self._w("Cargo.toml", "[package]\nname = 'x'\n")
+        self.assertEqual(detect_test_command(self.d), ("cargo test", "Cargo.toml"))
+
+    def test_makefile(self):
+        self._w("Makefile", "all:\n\tgo build\ntest:\n\tgo test ./...\n")
+        self.assertEqual(detect_test_command(self.d), ("make test", "Makefile"))
+
+    def test_priority_just_over_make(self):
+        self._w("justfile", "test:\n  pytest\n")
+        self._w("Makefile", "test:\n\tmake-test\n")
+        self.assertEqual(detect_test_command(self.d), ("just test", "justfile"))
+
+    def test_none(self):
+        self.assertEqual(detect_test_command(self.d), (None, None))
+
+    def test_malformed_toml_degrades(self):
+        self._w("pyproject.toml", "this is not = valid = toml [[[")
+        self.assertEqual(detect_test_command(self.d), (None, None))
+
+
+class TestHouseRuleScan(unittest.TestCase):
+    """scan_house_rules / rank_house_rules — CLAUDE.md prose → primitive hits."""
+
+    def _scan(self, text, branch="main", cmd=None):
+        return scan_house_rules(text, source="CLAUDE.md", default_branch=branch, test_cmd=cmd)
+
+    def _ids(self, hits):
+        return {h.suggested_id for h in hits}
+
+    def test_no_verify(self):
+        self.assertIn("no-verify", self._ids(self._scan("Never use --no-verify to skip hooks.")))
+
+    def test_branch_first_uses_default_branch(self):
+        hits = self._scan("If on main, branch first.", branch="trunk")
+        bf = next(h for h in hits if h.suggested_id == "branch-first")
+        self.assertEqual(bf.params["branch"], ["trunk"])
+
+    def test_no_secrets(self):
+        self.assertIn("secret-scan", self._ids(self._scan("Don't commit secrets or .env files.")))
+
+    def test_update_docs(self):
+        self.assertIn("docs-currency", self._ids(self._scan("Keep docs current when you change the API.")))
+
+    def test_two_lens_review(self):
+        self.assertIn("two-lens-review", self._ids(self._scan("Every PR needs a two-lens review before merge.")))
+
+    def test_run_tests_uses_detected_cmd(self):
+        hits = self._scan("Always run the tests before pushing.", cmd="just test")
+        tp = next(h for h in hits if h.suggested_id == "tests-pass")
+        self.assertEqual(tp.params["cmd"], "just test")
+        self.assertEqual(tp.render, "commented")
+        self.assertEqual(tp.confidence, "high")
+
+    def test_run_tests_without_cmd_low_conf(self):
+        tp = next(h for h in self._scan("All tests must pass.") if h.suggested_id == "tests-pass")
+        self.assertEqual(tp.confidence, "low")
+        self.assertIn("TODO", tp.params["cmd"])
+
+    def test_dedup_keeps_first(self):
+        hits = self._scan("no --no-verify here\nand no --no-verify there\n")
+        self.assertEqual(sum(1 for h in hits if h.suggested_id == "no-verify"), 1)
+
+    def test_carries_evidence_line(self):
+        hit = next(h for h in self._scan("  Rule: don't commit secrets.  ") if h.suggested_id == "secret-scan")
+        self.assertEqual(hit.rule_text, "Rule: don't commit secrets.")
+
+    def test_unrelated_prose_yields_nothing(self):
+        self.assertEqual(self._scan("This project renders pixel art in a terminal."), [])
+
+    def test_conventional_commits(self):
+        self.assertIn("conventional-commits", self._ids(self._scan("Use conventional commits.")))
+
+    def test_skip_ci(self):
+        self.assertIn("no-skip-ci", self._ids(self._scan("Don't disable CI with [skip ci].")))
+
+    def test_semantic_maps_to_judge(self):
+        hit = next(h for h in self._scan("Don't loosen an assertion to pass.") if h.suggested_id == "semantic-judge")
+        self.assertEqual(hit.render, "judge")
+        self.assertIn("loosen", hit.params["prompt"])
+
+    def test_ranks_high_before_low(self):
+        # a high-confidence hit (secret-scan) outranks a low one (deferral-has-issue)
+        ranked = rank_house_rules(self._scan("Don't commit secrets.\nTrack every deferred follow-up issue.\n"))
+        ids = [h.suggested_id for h in ranked]
+        self.assertLess(ids.index("secret-scan"), ids.index("deferral-has-issue"))
+
+
+def _scan(rules_text="", branch="main", cmd="just test"):
+    from ratchet import scan_house_rules
+    return RepoScan(
+        default_branch=branch, code=["src/**/*.py"], tests=["tests/**/*.py"], docs=["**/*.md"],
+        test_cmd=cmd, test_cmd_source="justfile", claude_md_paths=["CLAUDE.md"],
+        house_rules=scan_house_rules(rules_text, source="CLAUDE.md", default_branch=branch, test_cmd=cmd),
+    )
+
+
+class TestSuggestRender(unittest.TestCase):
+    """render_suggest_toml — an all-warn (+commented/judge) starter that always parses."""
+
+    def test_render_validates(self):
+        Config.parse(render_suggest_toml(_scan("Run the tests. Two-lens review. Don't loosen an assertion.")))
+
+    def test_render_is_all_warn_except_safe_core(self):
+        cfg = Config.parse(render_suggest_toml(_scan("Use conventional commits. Keep docs current.")))
+        blocks = {c.id for c in cfg.checks if c.severity == "block"}
+        self.assertEqual(blocks, set(SAFE_CORE_IDS))
+
+    def test_render_has_draft_banner_and_todos(self):
+        toml = render_suggest_toml(_scan("Use conventional commits."))
+        self.assertIn("ratchet.toml.draft", toml)
+        self.assertIn("# TODO(ratchet:review)", toml)
+
+    def test_render_commented_blocks_for_run_and_approval(self):
+        toml = render_suggest_toml(_scan("Run the tests. Owner approval from CODEOWNERS. Stay in scope."))
+        # run / require_approval_from / scope_lock render commented-out
+        self.assertIn("# [[check]]", toml)
+        self.assertNotIn('\nid = "tests-pass"', toml)  # only its commented form
+
+    def test_render_includes_repo_and_base_pinned(self):
+        toml = render_suggest_toml(_scan())
+        self.assertIn("base_pinned = true", toml)
+        self.assertIn('default_branch =', toml)
+
+
+class TestDraftLint(unittest.TestCase):
+    """draft_lint — the moat-safety net beyond validate."""
+
+    def _base(self, rules=""):
+        # a render with no markers cleared: strip markers to get a clean armed-or-advisory draft
+        return render_suggest_toml(_scan(rules))
+
+    def _clean(self):
+        # safe-core only, no house-rules → zero markers → clean
+        return render_suggest_toml(_scan(""))
+
+    def _levels(self, text, existing=None, head=None):
+        return [f.level for f in draft_lint(text, existing_cfg=existing, head_facts=head)]
+
+    def test_clean_draft_with_no_markers_passes(self):
+        self.assertNotIn("error", self._levels(self._clean()))
+        self.assertNotIn("todo", self._levels(self._clean()))
+
+    def test_re_error_pattern_rejected(self):
+        bad = self._clean() + '\n[[check]]\nid = "x"\nkind = "fact"\nseverity = "warn"\nprimitive = "forbid_pattern"\npattern = "["\nscope = "src/**/*.py"\n'
+        self.assertIn("error", self._levels(bad))
+
+    def test_match_everything_pattern_rejected(self):
+        bad = self._clean() + '\n[[check]]\nid = "x"\nkind = "fact"\nseverity = "warn"\nprimitive = "forbid_pattern"\npattern = ".*"\nscope = "src/**/*.py"\n'
+        self.assertIn("error", self._levels(bad))
+
+    def test_unknown_key_rejected(self):
+        bad = self._clean() + '\n[[check]]\nid = "x"\nkind = "fact"\nseverity = "warn"\nprimitive = "secret_scan"\nforbid_path = "x"\n'
+        self.assertIn("error", self._levels(bad))
+
+    def test_base_pinned_false_rejected(self):
+        bad = self._clean().replace("base_pinned = true", "base_pinned = false")
+        self.assertIn("error", self._levels(bad))
+
+    def test_missing_safe_core_rejected(self):
+        minimal = 'schema = 1\n[repo]\ndefault_branch = "main"\n[meta]\nbase_pinned = true\n'
+        self.assertIn("error", self._levels(minimal))
+
+    def test_inferred_block_with_marker_rejected(self):
+        bad = self._clean() + '\n# TODO(ratchet:review): from CLAUDE.md\n[[check]]\nid = "x"\nkind = "fact"\nseverity = "block"\nprimitive = "forbid_pattern"\npattern = "foo"\nscope = "src/**/*.py"\n'
+        self.assertIn("error", self._levels(bad))
+
+    def test_weaken_existing_rejected(self):
+        existing = Config.parse('schema = 1\n[repo]\ndefault_branch = "main"\n[[check]]\nid = "keep-me"\nkind = "fact"\nseverity = "block"\nprimitive = "secret_scan"\n')
+        self.assertIn("error", self._levels(self._clean(), existing=existing))  # keep-me dropped
+
+    def test_secret_in_draft_text_rejected(self):
+        bad = self._clean() + '\n# ghp_' + "a" * 36 + "\n"
+        self.assertIn("error", self._levels(bad))
+
+    def test_over_broad_forbid_command_warns(self):
+        bad = self._clean() + '\n[[check]]\nid = "x"\nkind = "fact"\nseverity = "warn"\nlayer = "agent"\nprimitive = "forbid_command"\ndeny = ["git push"]\n'
+        self.assertIn("warn", self._levels(bad))
+
+    def test_todo_markers_force_findings(self):
+        toml = self._base("Use conventional commits. Keep docs current.")
+        self.assertIn("todo", self._levels(toml))
+
+
+class TestGapsBinding(unittest.TestCase):
+    """is_bound — primitive presence + the polymorphic match-token refinement."""
+
+    def _hit(self, primitive, token=None):
+        return HouseRuleHit(suggested_id="x", keyword="", primitive=primitive, params={},
+                            confidence="high", match_token=token)
+
+    def _check(self, toml):
+        return Config.parse(MIN + toml).checks[-1]
+
+    def test_is_bound_primitive_presence(self):
+        c = self._check('[[check]]\nid = "s"\nkind = "fact"\nseverity = "block"\nprimitive = "secret_scan"\n')
+        self.assertTrue(is_bound(self._hit("secret_scan"), [c])[0])
+
+    def test_is_bound_polymorphic_requires_token(self):
+        c = self._check('[[check]]\nid = "p"\nkind = "fact"\nseverity = "warn"\nprimitive = "forbid_pattern"\npattern = "println"\nscope = "src/**/*.rs"\n')
+        self.assertFalse(is_bound(self._hit("forbid_pattern", ".only"), [c])[0])
+        self.assertTrue(is_bound(self._hit("forbid_pattern", "println"), [c])[0])
+
+    def test_is_bound_forbid_command_token(self):
+        c = self._check('[[check]]\nid = "f"\nkind = "fact"\nseverity = "block"\nlayer = "agent"\nprimitive = "forbid_command"\ndeny = ["git push"]\n')
+        self.assertFalse(is_bound(self._hit("forbid_command", "--no-verify"), [c])[0])
+        c2 = self._check('[[check]]\nid = "f2"\nkind = "fact"\nseverity = "block"\nlayer = "agent"\nprimitive = "forbid_command"\npattern = "--no-verify"\n')
+        self.assertTrue(is_bound(self._hit("forbid_command", "--no-verify"), [c2])[0])
+
+
+class TestMoatPreservation(unittest.TestCase):
+    """Pin the moat against future HOUSE_RULE_MAP edits."""
+
+    _FACT_PRIMS = {
+        "forbid_command", "forbid_commit_on_branch", "self_protect", "secret_scan",
+        "forbid_pattern", "forbid_removal", "forbid_delete", "scope_lock", "numeric_floor",
+        "change_budget", "file_must_contain", "max_added_file_bytes", "path_requires",
+        "cooccur", "marker_present", "forbid_in_message", "require_message_pattern",
+        "commit_footer", "protected_path", "require_approval_from", "pattern_requires_approval",
+        "approval_state_depth", "require_checks_green", "run",
+    }
+
+    def test_suggest_introduces_no_nonfact_block(self):
+        cfg = Config.parse(render_suggest_toml(_scan(
+            "Run the tests. Two-lens review. Conventional commits. Don't loosen an assertion. "
+            "Owner approval. Coverage must not drop. No [skip ci]. Keep docs current."
+        )))
+        for c in cfg.checks:
+            if c.severity == "block":
+                self.assertEqual(c.kind, "fact", f"{c.id} blocks but isn't a fact")
+
+    def test_house_rule_map_block_rows_are_all_facts(self):
+        for rule in HOUSE_RULE_MAP:
+            if rule.render == "block":
+                self.assertIn(rule.primitive, self._FACT_PRIMS, f"{rule.rid} renders block on a non-fact")
+
+
+_RATCHET = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ratchet.py")
+
+
+class TestSuggestGapsCLI(unittest.TestCase):
+    """End-to-end via subprocess in a temp git repo (mirrors TestDiffParsing's harness)."""
+
+    def _git(self, *args):
+        subprocess.run(["git", "-C", self.d, *args], check=True, capture_output=True, text=True)
+
+    def _ratchet(self, *args):
+        return subprocess.run([sys.executable, _RATCHET, *args, "--cwd", self.d],
+                              capture_output=True, text=True)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = self.tmp.name
+        self._git("init", "-q")
+        self._git("config", "user.email", "t@t")
+        self._git("config", "user.name", "t")
+        self._git("config", "commit.gpgsign", "false")
+        self._w("src/app.py", "import os\n")
+        self._w("tests/test_app.py", "def test_x():\n    assert True\n")
+        self._w("CLAUDE.md", "If on main, branch first.\nAlways run the tests.\nKeep docs current.\n"
+                             "Don't commit secrets.\nUse conventional commits.\n")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "base")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _w(self, rel, text):
+        p = os.path.join(self.d, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def test_cli_suggest_on_python_repo(self):
+        r = self._ratchet("suggest", "--format", "json")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        import json as _json
+        data = _json.loads(r.stdout)
+        ids = {h["suggested_id"] for h in data["house_rules"]}
+        self.assertIn("branch-first", ids)
+        self.assertIn("tests-pass", ids)
+        self.assertIn("docs-currency", ids)
+        self.assertTrue(any(_glob_to_re(g).match("src/app.py") for g in data["code"]))
+
+    def test_cli_suggest_toml_validates(self):
+        r = self._ratchet("suggest", "--format", "toml")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        draft = os.path.join(self.d, "ratchet.toml.draft")
+        with open(draft, "w", encoding="utf-8") as fh:
+            fh.write(r.stdout)
+        v = subprocess.run([sys.executable, _RATCHET, "validate", "--config", draft],
+                           capture_output=True, text=True)
+        self.assertEqual(v.returncode, 0, v.stdout + v.stderr)
+
+    def test_cli_draft_lint_fails_on_markers(self):
+        r = self._ratchet("suggest", "--format", "toml")
+        with open(os.path.join(self.d, "ratchet.toml.draft"), "w", encoding="utf-8") as fh:
+            fh.write(r.stdout)
+        dl = self._ratchet("draft-lint")
+        self.assertEqual(dl.returncode, 1)  # markers remain
+        self.assertIn("TODO", dl.stdout)
+
+    def test_cli_draft_lint_clean_after_markers_removed(self):
+        r = self._ratchet("suggest", "--format", "toml")
+        cleaned = "\n".join(ln for ln in r.stdout.splitlines()
+                            if not ln.lstrip().startswith("# TODO(ratchet:review)"))
+        with open(os.path.join(self.d, "ratchet.toml.draft"), "w", encoding="utf-8") as fh:
+            fh.write(cleaned)
+        dl = self._ratchet("draft-lint")
+        self.assertEqual(dl.returncode, 0, dl.stdout + dl.stderr)
+
+    def test_cli_gaps_roundtrip(self):
+        r = self._ratchet("suggest", "--format", "toml")
+        cleaned = "\n".join(ln for ln in r.stdout.splitlines()
+                            if not ln.lstrip().startswith("# TODO(ratchet:review)"))
+        with open(os.path.join(self.d, "ratchet.toml"), "w", encoding="utf-8") as fh:
+            fh.write(cleaned)
+        g = self._ratchet("gaps")
+        self.assertEqual(g.returncode, 0, g.stderr)
 
 
 if __name__ == "__main__":
