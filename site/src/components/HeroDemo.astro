@@ -86,6 +86,14 @@
   @keyframes hd-shake { 0%,100%{transform:translateX(0)} 20%{transform:translateX(-4px)} 40%{transform:translateX(4px)} 60%{transform:translateX(-2px)} 80%{transform:translateX(2px)} }
 
   @media (max-width: 480px) { .hd-body { min-height: 270px; font-size: 12.5px; } }
+
+  /* The JS leaves the static frame for reduced-motion; also stop the decorative
+     chrome (rotating glow, pulsing dot, blinking cursor). */
+  @media (prefers-reduced-motion: reduce) {
+    .hd::before,
+    .hd-live i,
+    .hd .cursor::after { animation: none; }
+  }
 </style>
 
 <script>
