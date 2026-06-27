@@ -100,13 +100,22 @@ PRIMITIVES = {
     "forbid_delete",
     "forbid_commit_on_branch",
     "scope_lock",
+    "self_protect",
     "forbid_in_message",
+    "require_message_pattern",
     "numeric_floor",
+    "change_budget",
+    "file_must_contain",
+    "max_added_file_bytes",
     "path_requires",
     "cooccur",
     "marker_present",
     "commit_footer",
     "protected_path",
+    "require_approval_from",
+    "pattern_requires_approval",
+    "approval_state_depth",
+    "require_checks_green",
     "run",
     "attest",
     "judge",
@@ -181,6 +190,25 @@ class Check:
     key: str | None = None
     direction: str | None = None
     floor: float | None = None
+    # change_budget: count ceilings over the diff (None = no cap on that axis)
+    max_added: int | None = None
+    max_removed: int | None = None
+    max_files: int | None = None
+    max_file_added: int | None = None
+    # file_must_contain: the A/M/D status it gates (default "A" = added files only)
+    status: str | None = None
+    # max_added_file_bytes: a per-file byte ceiling (KB) + whether binary blobs are allowed
+    maxkb: int | None = None
+    allow_binary: bool = False
+    # require_approval_from / *_approval: reviewer-identity facts from the PR API
+    approvers: list[str] = field(default_factory=list)
+    exclude_author: bool = False
+    # approval_state_depth: deeper approval-state requirements
+    require_fresh: bool = False
+    no_changes_requested: bool = False
+    disallow_bot: bool = False
+    disallow_author: bool = False
+    min_approvals: int | None = None
     cls: str | None = None  # attestation class: always | feature | public_surface | claude_md
     box: str | None = None  # the attestation checkbox label to look for (defaults to id)
     prompt: str | None = None
@@ -195,6 +223,15 @@ def _as_list(v) -> list[str]:
     if isinstance(v, list):
         return [str(x) for x in v]
     raise ConfigError(f"expected string or list, got {type(v).__name__}")
+
+
+def _as_int(v) -> int | None:
+    """An optional integer field → int or None (a non-int is a hard config error)."""
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, int):
+        raise ConfigError(f"expected integer, got {type(v).__name__}")
+    return v
 
 
 @dataclass
@@ -269,6 +306,20 @@ class Config:
                         key=c.get("key"),
                         direction=c.get("direction"),
                         floor=(float(c["floor"]) if c.get("floor") is not None else None),
+                        max_added=_as_int(c.get("max_added")),
+                        max_removed=_as_int(c.get("max_removed")),
+                        max_files=_as_int(c.get("max_files")),
+                        max_file_added=_as_int(c.get("max_file_added")),
+                        status=c.get("status"),
+                        maxkb=_as_int(c.get("maxkb")),
+                        allow_binary=bool(c.get("allow_binary", False)),
+                        approvers=_as_list(c.get("require_approval_from")),
+                        exclude_author=bool(c.get("exclude_author", False)),
+                        require_fresh=bool(c.get("require_fresh", False)),
+                        no_changes_requested=bool(c.get("no_changes_requested", False)),
+                        disallow_bot=bool(c.get("disallow_bot", False)),
+                        disallow_author=bool(c.get("disallow_author", False)),
+                        min_approvals=_as_int(c.get("min_approvals")),
                         cls=c.get("class"),
                         box=c.get("box"),
                         prompt=c.get("prompt"),
@@ -316,6 +367,14 @@ class Config:
                     f"check `{c.id}`: forbid_commit_on_branch reads the live branch — "
                     f"declare layer=\"agent\" (or \"both\"), not change"
                 )
+            # self_protect reads the LIVE Write/Edit tool_input at the PreToolUse
+            # intercept — same constraint; the change-layer twin is protected_path.
+            if c.primitive == "self_protect" and c.layer == "change":
+                raise ConfigError(
+                    f"check `{c.id}`: self_protect reads the live Write/Edit target — "
+                    f"declare layer=\"agent\" (or \"both\"); the change-layer twin is "
+                    f"protected_path"
+                )
 
     @property
     def footer_regex(self) -> str | None:
@@ -340,6 +399,13 @@ class DiffFacts:
     commit_msgs: list[str] = field(default_factory=list)
     # PR-review facts (None = no PR context → skip approval checks; [] = PR, zero approvals)
     approvals: list[str] | None = None
+    # Structured PR-review API facts (None = no PR context → the reviewer-identity
+    # primitives skip). Each review: {login, state, commit_id, is_bot, author_association}.
+    reviews: list[dict] | None = None
+    head_sha: str | None = None  # PR head commit, for the freshness check
+    pr_author: str | None = None  # to exclude self-approval
+    checks: list[dict] | None = None  # status checks: [{name, conclusion}]
+    file_sizes: dict | None = None  # {path → bytes}; -1 marks a binary blob
 
     def changed_paths(self):
         return (p for _, p in self.changed)
@@ -389,12 +455,22 @@ class CommandFacts:
     def from_pretooluse_json(stdin: str) -> "CommandFacts":
         """PreToolUse delivers a JSON envelope; the Bash command is at
         `.tool_input.command`. Unknown shapes degrade to empty (no false block)."""
-        try:
-            v = json.loads(stdin)
-            cmd = v.get("tool_input", {}).get("command", "")
-        except (json.JSONDecodeError, AttributeError):
-            cmd = ""
+        _name, ti = _pretooluse_tool(stdin)
+        cmd = ti.get("command", "")
         return CommandFacts(command=cmd if isinstance(cmd, str) else "")
+
+
+def _pretooluse_tool(stdin: str) -> tuple[str, dict]:
+    """`(tool_name, tool_input)` from a PreToolUse envelope. Unknown shapes degrade to
+    `("", {})` so the gate never false-blocks on a malformed payload."""
+    try:
+        v = json.loads(stdin)
+        if not isinstance(v, dict):
+            return "", {}
+        ti = v.get("tool_input")
+        return (v.get("tool_name") or "", ti if isinstance(ti, dict) else {})
+    except json.JSONDecodeError:
+        return "", {}
 
 
 def _git(cwd: str, args: list[str]) -> str | None:
@@ -552,7 +628,41 @@ def scope_lock(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
     return None
 
 
+# The agent file-mutating tools whose tool_input carries the target path.
+WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+
+
+def self_protect(check: Check, tool_name: str, file_path: str) -> str | None:
+    """Agent-layer real-time gate: a Write/Edit to a gate-defining file (the
+    `ratchet.toml`, the engine, the hook `settings.json`) is denied at the PreToolUse
+    intercept — the agent can't quietly loosen the gate it's gated by mid-session.
+    The change-layer twin is `protected_path` (which demands an independent PR
+    approval); this is the live forcing function. Non-write tools pass through."""
+    if tool_name not in WRITE_TOOLS or not file_path:
+        return None
+    if _path_or_base_matches(file_path, check.paths):
+        return (
+            f"`{check.id}`: {file_path} is a protected gate-defining file — change it "
+            f"in a reviewed PR, not in-session"
+        )
+    return None
+
+
 _MSG_SCOPES = ("commit_subject", "commit_body", "pr_body")
+
+
+def _msg_targets(facts: DiffFacts, scopes: set[str]) -> list[str]:
+    """The commit/PR message strings selected by `scopes` (commit_subject/body/pr_body)."""
+    out: list[str] = []
+    for msg in facts.commit_msgs:
+        lines = msg.splitlines()
+        if "commit_subject" in scopes and lines:
+            out.append(lines[0])
+        if "commit_body" in scopes and len(lines) > 1:
+            out.append("\n".join(lines[1:]))
+    if "pr_body" in scopes and facts.pr_body:
+        out.append(facts.pr_body)
+    return out
 
 
 def forbid_in_message(check: Check, facts: DiffFacts) -> str | None:
@@ -561,20 +671,24 @@ def forbid_in_message(check: Check, facts: DiffFacts) -> str | None:
     primitives (marker_present/commit_footer) have no forbid-presence inverse."""
     if not check.tokens:
         return None
-    scopes = set(check.msg_scope) or set(_MSG_SCOPES)
-    hay: list[str] = []
-    for msg in facts.commit_msgs:
-        lines = msg.splitlines()
-        if "commit_subject" in scopes and lines:
-            hay.append(lines[0])
-        if "commit_body" in scopes and len(lines) > 1:
-            hay.append("\n".join(lines[1:]))
-    if "pr_body" in scopes and facts.pr_body:
-        hay.append(facts.pr_body)
-    blob = "\n".join(hay).lower()
+    blob = "\n".join(_msg_targets(facts, set(check.msg_scope) or set(_MSG_SCOPES))).lower()
     for t in check.tokens:
         if t.lower() in blob:
             return f"`{check.id}`: forbidden token `{t}` in the commit/PR message"
+    return None
+
+
+def require_message_pattern(check: Check, facts: DiffFacts) -> str | None:
+    """Every selected commit/PR message MUST match a required regex — e.g.
+    Conventional Commits on the subject. The require-presence twin of
+    forbid_in_message. `msg_scope` defaults to `commit_subject` (not all scopes — a
+    body rarely has a single required shape). Skips when there are no messages."""
+    pat = _rx(check.pattern)
+    if not pat:
+        return None
+    for t in _msg_targets(facts, set(check.msg_scope) or {"commit_subject"}):
+        if not pat.search(t):
+            return f"`{check.id}`: message `{t[:50]}` does not match required `{check.pattern}`"
     return None
 
 
@@ -618,6 +732,78 @@ def numeric_floor(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
             weaker = new_val < old_val if direction == "no_decrease" else new_val > old_val
             if weaker:
                 return f"`{check.id}`: {prefix} weakened {old_val:g} → {new_val:g}"
+    return None
+
+
+def change_budget(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
+    """Count ceilings over the diff (optionally scoped): total added/removed lines,
+    changed files, or per-file added lines. A blast-radius cap — the mega-diff /
+    scope-explosion class a reviewer can't eyeball. Usually severity="warn" (a budget
+    is advisory by nature; raise to a hard cap only on a generated/locked tree)."""
+    scope = _resolve(check.scope, repo) if check.scope else []
+
+    def keep(path: str) -> bool:
+        return not scope or _path_matches(path, scope)
+
+    added = [(p, l) for p, l in facts.added if keep(p)]
+    removed = [(p, l) for p, l in facts.removed if keep(p)]
+    files = [p for _st, p in facts.changed if keep(p)]
+    if check.max_added is not None and len(added) > check.max_added:
+        return f"`{check.id}`: {len(added)} added lines exceed the budget {check.max_added}"
+    if check.max_removed is not None and len(removed) > check.max_removed:
+        return f"`{check.id}`: {len(removed)} removed lines exceed the budget {check.max_removed}"
+    if check.max_files is not None and len(files) > check.max_files:
+        return f"`{check.id}`: {len(files)} changed files exceed the budget {check.max_files}"
+    if check.max_file_added is not None:
+        per: dict[str, int] = {}
+        for p, _l in added:
+            per[p] = per.get(p, 0) + 1
+        worst = max(per.items(), key=lambda kv: kv[1], default=None)
+        if worst and worst[1] > check.max_file_added:
+            return f"`{check.id}`: {worst[0]} adds {worst[1]} lines, over the per-file budget {check.max_file_added}"
+    return None
+
+
+def file_must_contain(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
+    """Positive content floor: every changed file matching scope + `status` must add
+    at least one line matching `pattern` (e.g. an SPDX header on each NEW source file,
+    a `@generated` marker). The structural inverse of forbid_pattern. `status`
+    defaults to "A" — gate added files only."""
+    pat = _rx(check.pattern)
+    if not pat:
+        return None
+    scope = _resolve(check.scope, repo) if check.scope else []
+    want = (check.status or ADDED).upper()
+    targets = [p for st, p in facts.changed if st == want and (not scope or _path_matches(p, scope))]
+    if not targets:
+        return None
+    by_path: dict[str, list[str]] = {}
+    for p, l in facts.added:
+        by_path.setdefault(p, []).append(l)
+    for p in targets:
+        if not any(pat.search(l) for l in by_path.get(p, [])):
+            return f"`{check.id}`: {p} must add a line matching `{check.pattern}`"
+    return None
+
+
+def max_added_file_bytes(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
+    """Per-file byte ceiling on added/modified files (the committed-blob / vendored-
+    artifact / accidental-binary class). `file_sizes` maps path → bytes, with -1
+    marking a binary blob. None = no size facts (the agent-layer view, no git) →
+    skip. `allow_binary=false` blocks any binary regardless of size."""
+    if facts.file_sizes is None:
+        return None
+    scope = _resolve(check.scope, repo) if check.scope else []
+    cap = (check.maxkb or 0) * 1024
+    for path, size in facts.file_sizes.items():
+        if scope and not _path_matches(path, scope):
+            continue
+        if size < 0:
+            if not check.allow_binary:
+                return f"`{check.id}`: {path} is a binary blob (keep it out of the diff or set allow_binary)"
+            continue
+        if cap and size > cap:
+            return f"`{check.id}`: {path} is {size} bytes, over the {check.maxkb}KB cap"
     return None
 
 
@@ -700,6 +886,114 @@ def protected_path(check: Check, facts: DiffFacts) -> str | None:
     return None
 
 
+def _approver_logins(facts: DiffFacts, exclude_author: bool) -> set[str]:
+    """The set of logins with a current APPROVED review (the PR author optionally
+    excluded, so a self-approval never satisfies a reviewer-identity gate)."""
+    out: set[str] = set()
+    for rv in facts.reviews or []:
+        if (rv.get("state") or "").upper() != "APPROVED":
+            continue
+        login = rv.get("login") or ""
+        if exclude_author and facts.pr_author and login == facts.pr_author:
+            continue
+        out.add(login)
+    return out
+
+
+def require_approval_from(check: Check, facts: DiffFacts) -> str | None:
+    """CODEOWNERS-lite: if any file under `paths` changed, require an APPROVED review
+    from one of `require_approval_from` (optionally excluding the PR author).
+    reviews=None → no PR context (local pre-push) → skip; CI supplies the reviews."""
+    if facts.reviews is None or not check.paths:
+        return None
+    touched = [p for p in facts.changed_paths() if _path_matches(p, check.paths)]
+    if not touched:
+        return None
+    approvers = _approver_logins(facts, check.exclude_author)
+    allowed = set(check.approvers)
+    if approvers & allowed:
+        return None
+    return (
+        f"`{check.id}`: {touched[0]} requires an approval from {sorted(allowed)} "
+        f"(have: {sorted(approvers) or 'none'})"
+    )
+
+
+def pattern_requires_approval(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
+    """Change-as-trigger gate: if an ADDED line in scope matches `pattern` (a new
+    dependency line, an `unsafe {`, a new `allow(...)` lint-suppression), require a
+    (non-author) approval. reviews=None → skip. The content twin of
+    require_approval_from."""
+    if facts.reviews is None:
+        return None
+    pat = _rx(check.pattern)
+    if not pat:
+        return None
+    scope = _resolve(check.scope, repo) if check.scope else []
+    hit = next(
+        ((p, l) for p, l in facts.added if (not scope or _path_matches(p, scope)) and pat.search(l)),
+        None,
+    )
+    if not hit:
+        return None
+    if _approver_logins(facts, check.exclude_author):
+        return None
+    return f"`{check.id}`: `{hit[1].strip()}` in {hit[0]} requires an independent approval"
+
+
+def approval_state_depth(check: Check, facts: DiffFacts) -> str | None:
+    """Deeper approval-state requirements the bare 'approved' badge can't express:
+    `require_fresh` (the approval is on the current head_sha, not a stale earlier
+    commit), `disallow_author`/`disallow_bot`, `no_changes_requested` (no outstanding
+    CHANGES_REQUESTED), and a `min_approvals` floor. reviews=None → skip."""
+    if facts.reviews is None:
+        return None
+    valid: list[dict] = []
+    outstanding_cr = False
+    for rv in facts.reviews:
+        state = (rv.get("state") or "").upper()
+        login = rv.get("login") or ""
+        if state == "CHANGES_REQUESTED":
+            if check.no_changes_requested:
+                outstanding_cr = True
+            continue
+        if state != "APPROVED":
+            continue
+        if check.disallow_author and facts.pr_author and login == facts.pr_author:
+            continue
+        if check.disallow_bot and rv.get("is_bot"):
+            continue
+        if check.require_fresh and facts.head_sha and rv.get("commit_id") != facts.head_sha:
+            continue
+        valid.append(rv)
+    if check.no_changes_requested and outstanding_cr:
+        return f"`{check.id}`: an outstanding CHANGES_REQUESTED review must be resolved"
+    need = check.min_approvals if check.min_approvals is not None else 1
+    if len(valid) < need:
+        return (
+            f"`{check.id}`: {len(valid)} qualifying approval(s), need {need} "
+            f"(fresh/human/non-author)"
+        )
+    return None
+
+
+def require_checks_green(check: Check, facts: DiffFacts) -> str | None:
+    """Every required status check must have concluded `success`. checks=None → no PR
+    context → skip. A pending check (null/empty conclusion) blocks — the change isn't
+    proven green yet. Optional `need` narrows to specific check names."""
+    if facts.checks is None:
+        return None
+    want = set(check.need)
+    for ck in facts.checks:
+        name = ck.get("name") or ""
+        if want and name not in want:
+            continue
+        concl = (ck.get("conclusion") or "").lower()
+        if concl != "success":
+            return f"`{check.id}`: check `{name}` is `{concl or 'pending'}`, not success"
+    return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # engine
 # ─────────────────────────────────────────────────────────────────────────────
@@ -746,8 +1040,16 @@ def _eval_diff(c: Check, cfg: Config, facts: DiffFacts) -> str | None:
         return scope_lock(c, facts, cfg.repo)
     if p == "forbid_in_message":
         return forbid_in_message(c, facts)
+    if p == "require_message_pattern":
+        return require_message_pattern(c, facts)
     if p == "numeric_floor":
         return numeric_floor(c, facts, cfg.repo)
+    if p == "change_budget":
+        return change_budget(c, facts, cfg.repo)
+    if p == "file_must_contain":
+        return file_must_contain(c, facts, cfg.repo)
+    if p == "max_added_file_bytes":
+        return max_added_file_bytes(c, facts, cfg.repo)
     if p == "path_requires":
         return path_requires(c, facts, cfg.repo)
     if p == "cooccur":
@@ -758,9 +1060,17 @@ def _eval_diff(c: Check, cfg: Config, facts: DiffFacts) -> str | None:
         return commit_footer(cfg.footer_regex, facts)
     if p == "protected_path":
         return protected_path(c, facts)
+    if p == "require_approval_from":
+        return require_approval_from(c, facts)
+    if p == "pattern_requires_approval":
+        return pattern_requires_approval(c, facts, cfg.repo)
+    if p == "approval_state_depth":
+        return approval_state_depth(c, facts)
+    if p == "require_checks_green":
+        return require_checks_green(c, facts)
     if p == "run":
         return _run_shell(c.cmd or "true")
-    # attest/judge/forbid_command/forbid_commit_on_branch are agent-layer, not diff-evaluated
+    # attest/judge/forbid_command/forbid_commit_on_branch/self_protect are agent-layer
     return None
 
 
@@ -790,6 +1100,18 @@ def run_command_gate(cfg: Config, cmd: CommandFacts) -> list[Finding]:
         if c.primitive != "forbid_command":
             continue
         reason = forbid_command(c, cmd)
+        if reason:
+            out.append(Finding(c.id, c.severity, reason))
+    return out
+
+
+def run_self_protect_gate(cfg: Config, tool_name: str, file_path: str) -> list[Finding]:
+    """AGENT layer: self_protect checks decide over a Write/Edit's target path."""
+    out: list[Finding] = []
+    for c in cfg.checks:
+        if c.primitive != "self_protect" or c.layer == "change":
+            continue
+        reason = self_protect(c, tool_name, file_path)
         if reason:
             out.append(Finding(c.id, c.severity, reason))
     return out
@@ -1013,6 +1335,79 @@ def _gh_pr_body(cwd: str) -> str | None:
     return p.stdout if p.returncode == 0 else None
 
 
+def _read_json(path: str):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _load_reviews(path: str) -> list[dict] | None:
+    """Normalize a `gh pr view --json reviews` (or hand-rolled) array into the engine's
+    review shape. Tolerates both the nested `{author:{login,is_bot}}` GitHub form and a
+    flat `{login,is_bot}` form. None on a missing/garbled file (→ checks skip)."""
+    raw = _read_json(path)
+    if not isinstance(raw, list):
+        return None
+    out: list[dict] = []
+    for rv in raw:
+        if not isinstance(rv, dict):
+            continue
+        author = rv.get("author")
+        author = author if isinstance(author, dict) else {}
+        commit = rv.get("commit")
+        commit = commit if isinstance(commit, dict) else {}
+        out.append({
+            "login": rv.get("login") or author.get("login") or "",
+            "state": rv.get("state") or "",
+            "commit_id": rv.get("commit_id") or commit.get("oid") or "",
+            "is_bot": bool(rv.get("is_bot", author.get("is_bot", False))),
+            "author_association": rv.get("author_association") or rv.get("authorAssociation") or "",
+        })
+    return out
+
+
+def _load_checks(path: str) -> list[dict] | None:
+    """Normalize a `gh pr checks --json name,state` (or hand-rolled) array into
+    `[{name, conclusion}]`. `conclusion` falls back to `state`/`status` (gh emits
+    SUCCESS/FAILURE/PENDING under `state`). None on a missing/garbled file (→ skip)."""
+    raw = _read_json(path)
+    if not isinstance(raw, list):
+        return None
+    out: list[dict] = []
+    for ck in raw:
+        if not isinstance(ck, dict):
+            continue
+        concl = ck.get("conclusion")
+        if concl in (None, ""):
+            concl = ck.get("state") or ck.get("status")
+        out.append({"name": ck.get("name") or ck.get("context") or "", "conclusion": concl})
+    return out
+
+
+def _populate_file_sizes(cwd: str, base: str, head: str, facts: DiffFacts) -> None:
+    """Byte size of each added/modified blob at `head` (-1 = binary, per numstat's
+    `-\t-`). Only run when a max_added_file_bytes check exists (N `cat-file` calls)."""
+    sizes: dict[str, int] = {}
+    binary: set[str] = set()
+    numstat = _git(cwd, ["diff", "--numstat", f"{base}..{head}"]) or ""
+    for line in numstat.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 3 and parts[0] == "-" and parts[1] == "-":
+            binary.add(parts[-1])
+    for st, path in facts.changed:
+        if st == DELETED:
+            continue
+        if path in binary:
+            sizes[path] = -1
+            continue
+        s = _git(cwd, ["cat-file", "-s", f"{head}:{path}"])
+        if s and s.strip().isdigit():
+            sizes[path] = int(s.strip())
+    facts.file_sizes = sizes
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1123,11 +1518,22 @@ def cmd_gate() -> int:
     (for a merge, also the two-lens block in the PR body) — bypassable via the
     agent-layer escape hatch, because CI still enforces."""
     buf = sys.stdin.read()
-    cmd = CommandFacts.from_pretooluse_json(buf)
+    tool_name, tool_input = _pretooluse_tool(buf)
     try:
         cfg = _read_working_config(".")
     except (OSError, ConfigError):
         return 0  # no/invalid config in this repo → never block
+    # 0) a Write/Edit to a gate-defining file — a HARD deny (self_protect), so the
+    #    agent can't loosen its own gate mid-session. Routed here when the hook matcher
+    #    fires on a write tool; a Bash payload simply has no write path.
+    if tool_name in WRITE_TOOLS:
+        fp = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+        spblocks = run_self_protect_gate(cfg, tool_name, fp if isinstance(fp, str) else "")
+        if has_block(spblocks):
+            print(f"ratchet: blocked — {_reasons(spblocks)}", file=sys.stderr)
+            return 2
+        return 0
+    cmd = CommandFacts(command=tool_input.get("command", "") if isinstance(tool_input.get("command", ""), str) else "")
     # 1) hard deny: forbidden command shapes + commit/push on a protected branch —
     #    never bypassable (a forbidden command skips the hooks; branch-first is cheap).
     cmdblocks = run_command_gate(cfg, cmd)
@@ -1220,12 +1626,17 @@ def cmd_check(
     allow_run: bool = True,
     pr_body_file: str | None = None,
     approvals: str | None = None,
+    reviews_file: str | None = None,
+    head_sha: str | None = None,
+    pr_author: str | None = None,
+    checks_file: str | None = None,
     allow_bypass: bool = False,
 ) -> int:
     """CHANGE layer: 1 = blocking findings, 0 = clean (warns print, never fail).
 
-    `pr_body_file` / `approvals` supply PR context (CI passes them; local pre-push
-    omits them, so PR-body / approval checks skip rather than false-fire).
+    `pr_body_file` / `approvals` / `reviews_file` / `head_sha` / `pr_author` /
+    `checks_file` supply PR context (CI passes them; local pre-push omits them, so
+    PR-body / reviewer-identity / checks-green checks skip rather than false-fire).
     `allow_bypass` honours the agent-layer escape hatch (pre-push convenience); the
     authoritative CI run never sets it."""
     try:
@@ -1242,7 +1653,8 @@ def cmd_check(
     except (OSError, ConfigError) as e:
         print(f"ratchet: cannot load base-pinned config: {e}", file=sys.stderr)
         return 1
-    facts = DiffFacts.from_range(cwd, base or "HEAD~1")
+    head = "HEAD"
+    facts = DiffFacts.from_range(cwd, base or "HEAD~1", head)
     if pr_body_file:
         try:
             with open(pr_body_file, encoding="utf-8") as fh:
@@ -1251,6 +1663,14 @@ def cmd_check(
             pass  # no body file → stays None (no PR context)
     if approvals is not None:
         facts.approvals = [a.strip() for a in approvals.split(",") if a.strip()]
+    if reviews_file:
+        facts.reviews = _load_reviews(reviews_file)
+    facts.head_sha = head_sha or (_git(cwd, ["rev-parse", head]) or "").strip() or None
+    facts.pr_author = pr_author
+    if checks_file:
+        facts.checks = _load_checks(checks_file)
+    if any(c.primitive == "max_added_file_bytes" for c in cfg.checks):
+        _populate_file_sizes(cwd, base or "HEAD~1", head, facts)
     findings = run_change(cfg, facts, allow_run=allow_run)
     for f in findings:
         tag = "BLOCK" if f.severity == "block" else "warn "
@@ -1309,6 +1729,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     c.add_argument("--pr-body-file", help="file holding the PR body (enables PR-body checks; CI only)")
     c.add_argument("--approvals", help="comma-separated approver logins (enables protected_path; CI only)")
+    c.add_argument("--reviews-file", help="JSON from `gh pr view --json reviews` (reviewer-identity checks; CI only)")
+    c.add_argument("--head-sha", help="PR head commit SHA (freshness for approval_state_depth; CI only)")
+    c.add_argument("--pr-author", help="PR author login (excludes self-approval; CI only)")
+    c.add_argument("--checks-file", help="JSON from `gh pr checks --json name,state` (require_checks_green; CI only)")
     c.add_argument("--allow-bypass", action="store_true", help="honour the agent-layer bypass (pre-push only)")
     j = sub.add_parser("judge", help="emit the advisory LLM-judge prompt(s) to stdout (CI)")
     j.add_argument("--cwd", default=".")
@@ -1329,6 +1753,10 @@ def main(argv: list[str] | None = None) -> int:
             allow_run=not args.no_run,
             pr_body_file=args.pr_body_file,
             approvals=args.approvals,
+            reviews_file=args.reviews_file,
+            head_sha=args.head_sha,
+            pr_author=args.pr_author,
+            checks_file=args.checks_file,
             allow_bypass=args.allow_bypass,
         )
     if args.cmd == "judge":

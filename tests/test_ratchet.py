@@ -8,7 +8,6 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import ratchet  # noqa: E402
 from ratchet import (  # noqa: E402
     Check,
     CommandFacts,
@@ -16,8 +15,16 @@ from ratchet import (  # noqa: E402
     ConfigError,
     DiffFacts,
     RepoCfg,
+    _git_ops,
+    _glob_to_re,
+    _ticked,
+    approval_state_depth,
+    attestation_gaps,
+    change_budget,
+    change_classes,
     commit_footer,
     cooccur,
+    file_must_contain,
     forbid_command,
     forbid_delete,
     forbid_in_message,
@@ -25,20 +32,21 @@ from ratchet import (  # noqa: E402
     forbid_removal,
     has_block,
     marker_present,
+    max_added_file_bytes,
     numeric_floor,
     path_requires,
+    pattern_requires_approval,
     protected_path,
+    push_or_merge,
+    require_approval_from,
+    require_checks_green,
+    require_message_pattern,
     run_branch_gate,
     run_change,
     run_command_gate,
     scope_lock,
     secret_scan,
-    attestation_gaps,
-    change_classes,
-    push_or_merge,
-    _git_ops,
-    _glob_to_re,
-    _ticked,
+    self_protect,
 )
 
 MIN = """
@@ -699,6 +707,124 @@ class TestMinedPrimitives(unittest.TestCase):
         r = repo()
         self.assertIsNotNone(numeric_floor(c, DiffFacts(added=[("a.cfg", "cov = 70")]), r))  # new value below floor
         self.assertIsNone(numeric_floor(c, DiffFacts(added=[("a.cfg", "cov = 85")]), r))     # at/above floor
+
+
+class TestFullCoverage(unittest.TestCase):
+    """The remaining ranked + mined gaps that complete the coverage map: count budgets,
+    positive content, message-require, byte size, self-protect, and the PR-review-API
+    family (reviews/head_sha/pr_author/checks facts)."""
+
+    def test_change_budget(self):
+        c = one_check('[[check]]\nid="cb"\nkind="fact"\nseverity="warn"\nprimitive="change_budget"\nmax_added=5\nmax_files=2')
+        r = repo()
+        self.assertIsNone(change_budget(c, DiffFacts(added=[("a", "x")], changed=[("M", "a")]), r))
+        big = DiffFacts(added=[("a", f"l{i}") for i in range(6)], changed=[("M", "a")])
+        self.assertIsNotNone(change_budget(c, big, r))  # too many added lines
+        many = DiffFacts(changed=[("M", "a"), ("M", "b"), ("M", "c")])
+        self.assertIsNotNone(change_budget(c, many, r))  # too many files
+
+    def test_change_budget_per_file(self):
+        c = one_check('[[check]]\nid="cb"\nkind="fact"\nseverity="warn"\nprimitive="change_budget"\nmax_file_added=3')
+        over = DiffFacts(added=[("a.py", f"l{i}") for i in range(4)], changed=[("M", "a.py")])
+        self.assertIsNotNone(change_budget(c, over, repo()))
+
+    def test_file_must_contain(self):
+        c = one_check(
+            '[[check]]\nid="spdx"\nkind="fact"\nseverity="block"\nprimitive="file_must_contain"\n'
+            'scope=["src/**/*.py"]\npattern="SPDX-License"\nstatus="A"'
+        )
+        r = repo()
+        miss = DiffFacts(added=[("src/a.py", "import os")], changed=[("A", "src/a.py")])
+        self.assertIsNotNone(file_must_contain(c, miss, r))  # added file lacks the line
+        ok = DiffFacts(added=[("src/a.py", "# SPDX-License-Identifier: MIT"), ("src/a.py", "import os")], changed=[("A", "src/a.py")])
+        self.assertIsNone(file_must_contain(c, ok, r))
+        mod = DiffFacts(added=[("src/a.py", "import os")], changed=[("M", "src/a.py")])
+        self.assertIsNone(file_must_contain(c, mod, r))  # status M is not gated when status=A
+
+    def test_require_message_pattern(self):
+        c = one_check(
+            "[[check]]\nid=\"cc\"\nkind=\"fact\"\nseverity=\"block\"\nprimitive=\"require_message_pattern\"\n"
+            "pattern='^(feat|fix|docs|chore)(\\(.+\\))?:'\nmsg_scope=[\"commit_subject\"]"
+        )
+        self.assertIsNone(require_message_pattern(c, DiffFacts(commit_msgs=["feat: add x"])))
+        self.assertIsNotNone(require_message_pattern(c, DiffFacts(commit_msgs=["random subject"])))
+        self.assertIsNone(require_message_pattern(c, DiffFacts()))  # no commits → skip
+
+    def test_max_added_file_bytes(self):
+        c = one_check(
+            '[[check]]\nid="big"\nkind="fact"\nseverity="block"\nprimitive="max_added_file_bytes"\n'
+            'maxkb=500\nallow_binary=false'
+        )
+        r = repo()
+        self.assertIsNone(max_added_file_bytes(c, DiffFacts(changed=[("A", "x")]), r))  # no sizes fact → skip
+        self.assertIsNone(max_added_file_bytes(c, DiffFacts(file_sizes={"a.txt": 1000}), r))
+        self.assertIsNotNone(max_added_file_bytes(c, DiffFacts(file_sizes={"big.bin": 600 * 1024}), r))  # > 500kb
+        self.assertIsNotNone(max_added_file_bytes(c, DiffFacts(file_sizes={"img.png": -1}), r))  # binary, disallowed
+
+    def test_self_protect(self):
+        c = one_check(
+            '[[check]]\nid="sp"\nkind="fact"\nseverity="block"\nlayer="agent"\nprimitive="self_protect"\n'
+            'paths=["ratchet.toml", ".ratchet/**", ".claude/settings.json"]'
+        )
+        self.assertIsNotNone(self_protect(c, "Edit", "ratchet.toml"))
+        self.assertIsNotNone(self_protect(c, "Write", ".ratchet/ratchet.py"))
+        self.assertIsNone(self_protect(c, "Edit", "src/app.py"))    # not a protected path
+        self.assertIsNone(self_protect(c, "Bash", "ratchet.toml"))  # not a Write/Edit tool
+
+    def test_require_approval_from(self):
+        c = one_check(
+            '[[check]]\nid="raf"\nkind="fact"\nseverity="block"\nprimitive="require_approval_from"\n'
+            'paths=["core/**"]\nrequire_approval_from=["alice", "bob"]\nexclude_author=true'
+        )
+        self.assertIsNone(require_approval_from(c, DiffFacts(changed=[("M", "core/x.py")])))  # no PR ctx → skip
+        ok = DiffFacts(changed=[("M", "core/x.py")], pr_author="zoe", reviews=[{"login": "alice", "state": "APPROVED"}])
+        self.assertIsNone(require_approval_from(c, ok))
+        bad = DiffFacts(changed=[("M", "core/x.py")], pr_author="zoe", reviews=[{"login": "carol", "state": "APPROVED"}])
+        self.assertIsNotNone(require_approval_from(c, bad))   # approver not in the list
+        sa = DiffFacts(changed=[("M", "core/x.py")], pr_author="alice", reviews=[{"login": "alice", "state": "APPROVED"}])
+        self.assertIsNotNone(require_approval_from(c, sa))    # listed owner but is the author
+        self.assertIsNone(require_approval_from(c, DiffFacts(changed=[("M", "docs/x.md")], pr_author="zoe", reviews=[])))
+
+    def test_pattern_requires_approval(self):
+        c = one_check(
+            "[[check]]\nid=\"pra\"\nkind=\"fact\"\nseverity=\"block\"\nprimitive=\"pattern_requires_approval\"\n"
+            "pattern='^\\+?\\s*[a-z0-9_-]+ = '\nscope=[\"**/Cargo.toml\"]\nexclude_author=true"
+        )
+        r = repo()
+        dep = [("Cargo.toml", 'serde = "1"')]
+        self.assertIsNone(pattern_requires_approval(c, DiffFacts(added=dep), r))  # no PR ctx → skip
+        bad = DiffFacts(added=dep, pr_author="zoe", reviews=[])
+        self.assertIsNotNone(pattern_requires_approval(c, bad, r))  # dep line, no approval
+        ok = DiffFacts(added=dep, pr_author="zoe", reviews=[{"login": "bob", "state": "APPROVED"}])
+        self.assertIsNone(pattern_requires_approval(c, ok, r))
+        nomatch = DiffFacts(added=[("Cargo.toml", "# just a comment")], pr_author="zoe", reviews=[])
+        self.assertIsNone(pattern_requires_approval(c, nomatch, r))
+
+    def test_approval_state_depth(self):
+        c = one_check(
+            '[[check]]\nid="asd"\nkind="fact"\nseverity="block"\nprimitive="approval_state_depth"\n'
+            'require_fresh=true\nno_changes_requested=true\ndisallow_author=true\ndisallow_bot=true\nmin_approvals=1'
+        )
+        self.assertIsNone(approval_state_depth(c, DiffFacts()))  # no PR ctx → skip
+        ok = DiffFacts(head_sha="abc", pr_author="alice", reviews=[{"login": "bob", "state": "APPROVED", "commit_id": "abc", "is_bot": False}])
+        self.assertIsNone(approval_state_depth(c, ok))
+        stale = DiffFacts(head_sha="abc", pr_author="alice", reviews=[{"login": "bob", "state": "APPROVED", "commit_id": "OLD", "is_bot": False}])
+        self.assertIsNotNone(approval_state_depth(c, stale))  # approval not on head
+        sa = DiffFacts(head_sha="abc", pr_author="alice", reviews=[{"login": "alice", "state": "APPROVED", "commit_id": "abc", "is_bot": False}])
+        self.assertIsNotNone(approval_state_depth(c, sa))     # self-approval
+        cr = DiffFacts(head_sha="abc", pr_author="alice", reviews=[
+            {"login": "bob", "state": "APPROVED", "commit_id": "abc", "is_bot": False},
+            {"login": "carol", "state": "CHANGES_REQUESTED", "commit_id": "abc", "is_bot": False}])
+        self.assertIsNotNone(approval_state_depth(c, cr))     # outstanding changes-requested
+        bot = DiffFacts(head_sha="abc", pr_author="alice", reviews=[{"login": "dependabot", "state": "APPROVED", "commit_id": "abc", "is_bot": True}])
+        self.assertIsNotNone(approval_state_depth(c, bot))    # bot-only approval
+
+    def test_require_checks_green(self):
+        c = one_check('[[check]]\nid="rcg"\nkind="fact"\nseverity="block"\nprimitive="require_checks_green"')
+        self.assertIsNone(require_checks_green(c, DiffFacts()))  # no ctx → skip
+        self.assertIsNone(require_checks_green(c, DiffFacts(checks=[{"name": "ci", "conclusion": "success"}])))
+        self.assertIsNotNone(require_checks_green(c, DiffFacts(checks=[{"name": "ci", "conclusion": "failure"}])))
+        self.assertIsNotNone(require_checks_green(c, DiffFacts(checks=[{"name": "ci", "conclusion": None}])))  # pending
 
 
 if __name__ == "__main__":
