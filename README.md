@@ -152,7 +152,7 @@ jobs:
   ratchet:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }          # base-pinning needs history
       - uses: IvanWng97/ratchet@v1         # rev-pinned engine over your base-pinned config
 ```
