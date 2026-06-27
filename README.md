@@ -269,7 +269,7 @@ Every check reads only facts — never your code.
 | `require_approval_from{paths,require_approval_from,exclude_author}` | fact | a change under `paths` needs an APPROVED review from a named owner (CODEOWNERS-lite; CI) |
 | `pattern_requires_approval{pattern,scope,exclude_author}` | fact | an added line matching `pattern` (a new dep, an `unsafe`) needs an independent approval (CI) |
 | `approval_state_depth{require_fresh,no_changes_requested,disallow_author,disallow_bot,min_approvals}` | fact | the approval is fresh (on head), human, non-author, with no outstanding changes-requested (CI) |
-| `require_checks_green{need}` | fact | every (required) status check concluded `success` (CI) |
+| `require_checks_green{need,ignore}` | fact | every (required) status check concluded `success` (CI); `ignore` excludes ratchet's own same-run job |
 | `run{cmd}` | fact\* | shell-out; the exit code is the fact (**`block` only at the change layer**) |
 | `attest{box,class}` | advisory | a class-gated `Stop`-hook checklist box — blocks turn-end until ticked (forcing function; the change layer is the ungameable gate) |
 | `judge{prompt}` | advisory | an advisory LLM-judge prompt (CI `continue-on-error` substance check) |

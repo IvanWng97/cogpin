@@ -133,7 +133,9 @@ The agent's command string.
 > **Same-workflow race:** when ratchet runs as a job in the *same* workflow it gates, its
 > own check is still pending at query time and a bare `require_checks_green` (no `need`/`ignore`)
 > would self-block. Exclude it with `ignore = ["<ratchet job name>"]`, or `need` only the other
-> checks. `ratchet validate` prints a `note:` when neither is set.
+> checks. `ratchet validate` prints a `note:` when neither is set. Both lists match the **rendered**
+> check name exactly — a matrix job carries its suffix (e.g. `ratchet (ubuntu-latest)`), so use the
+> name as it appears in `gh pr checks`.
 
 These read CI-supplied facts via `ratchet check` flags: `--pr-body-file`,
 `--approvals`, `--reviews-file` (a `gh pr view --json reviews` dump), `--head-sha`,

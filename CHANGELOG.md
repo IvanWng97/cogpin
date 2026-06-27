@@ -19,7 +19,11 @@ config `schema` version is separate and bumps only on a breaking config change.
 - **`_marked_ids` mis-association (#6)** — a `# TODO(ratchet:review)` marker above a
   *commented-out* check no longer binds to a *later* live `[[check]]` (only blank lines may
   intervene now). This also removes a `draft-lint` false-positive that mis-flagged the later check.
-- Dropped the no-op `uninstall --no-hook` flag (uninstall's only action is stripping the hook).
+
+### Removed
+- The no-op `uninstall --no-hook` flag (#6) — uninstall's only action is stripping the hook, so
+  the flag did nothing. `ratchet uninstall --no-hook` now exits non-zero (unrecognized argument)
+  rather than no-op'ing. `install --no-hook` is unaffected.
 
 ## [1.0.0] — 2026-06-27
 
