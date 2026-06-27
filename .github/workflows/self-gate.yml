@@ -20,7 +20,7 @@ jobs:
   definition-of-done:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # need history for the base..HEAD range + base-pinning
       - uses: ./ # the composite action at the repo root; engine=pinned → ./ratchet.py
