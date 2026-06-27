@@ -7,7 +7,10 @@ import starlight from '@astrojs/starlight';
 // import.meta.env.BASE_URL so it resolves under the /ratchet prefix.
 export default defineConfig({
   site: 'https://ivanwng97.github.io',
-  base: '/ratchet',
+  // Trailing slash is load-bearing: import.meta.env.BASE_URL is this value verbatim,
+  // and the .mdx/Playground links concatenate `${base}path` — without it you get
+  // `/ratchetwhat-it-catches` (missing the separator). Keep the slash.
+  base: '/ratchet/',
   trailingSlash: 'ignore',
   integrations: [
     starlight({
