@@ -1,0 +1,38 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (py${{ matrix.python }} · ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # tomllib is stdlib from 3.11 — that's the floor the engine declares.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: byte-compile the engine (stdlib-only, zero deps)
+        run: python -m py_compile ratchet.py
+      - name: unit tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: validate every shipped config
+        shell: bash
+        run: |
+          set -euo pipefail
+          rc=0
+          for f in ratchet.toml examples/*/ratchet.toml; do
+            echo "── $f"
+            python ratchet.py validate --config "$f" || rc=1
+          done
+          exit $rc
