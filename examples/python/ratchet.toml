@@ -89,6 +89,40 @@ primitive = "path_requires"
 when = "code"
 need = "docs"
 
+# Coverage ratchet: a lowered `fail_under` (or a shortened timeout / raised retries)
+# is byte-identical to a raise to a one-side scanner — numeric_floor pairs the number
+# across the −/+ hunks on the same key and blocks a WEAKENING direction.
+[[check]]
+id = "coverage-ratchet"
+kind = "fact"
+severity = "block"
+primitive = "numeric_floor"
+key = 'fail_under\s*=\s*(\d+)'
+direction = "no_decrease"
+scope = ["pyproject.toml", "setup.cfg", ".coveragerc", "tox.ini"]
+
+# Every NEW source file carries an SPDX license header — a positive content floor
+# (the structural inverse of forbid_pattern). status defaults to "A" (added files).
+[[check]]
+id = "spdx-header"
+kind = "fact"
+severity = "warn"
+primitive = "file_must_contain"
+scope = ["src/**/*.py"]
+pattern = 'SPDX-License-Identifier:'
+status = "A"
+
+# A new third-party dependency needs an independent (non-author) approval — the
+# supply-chain cut. SKIPS on local pre-push (no PR context); CI supplies the reviews.
+[[check]]
+id = "deps-need-approval"
+kind = "fact"
+severity = "block"
+primitive = "pattern_requires_approval"
+pattern = '^\s*"[A-Za-z0-9._-]+(?:[=<>!~]=|>=|<=).*"'
+scope = ["pyproject.toml", "requirements*.txt"]
+exclude_author = true
+
 # THE teeth: the change layer runs the real suite from the base-pinned policy.
 # Pin the config (`-c`, isolated) so a head-side pyproject edit can't defang it.
 [[check]]

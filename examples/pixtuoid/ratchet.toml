@@ -49,6 +49,18 @@ primitive = "forbid_commit_on_branch"
 branch = ["main"]
 ops = ["commit", "push"]
 
+# Real-time twin of `protected-gate-files`: deny a Write/Edit to a gate-defining file
+# (the vendored engine, the justfile, the hooks, the CI) the instant the agent reaches
+# for it — it can't quietly loosen its own gate mid-session. The change-layer
+# `protected_path` below stays the authoritative PR-approval backstop.
+[[check]]
+id = "self-protect"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "self_protect"
+paths = ["ratchet.toml", ".ratchet/ratchet.py", "justfile", ".github/workflows/**", ".claude/settings.json", ".githooks/**", ".dod/**"]
+
 # ── change layer (pre-push + CI, authoritative, base-pinned) ─────────────────
 
 # check_dod.py: no_verify_violations() — committed hook-skipping flag in a path

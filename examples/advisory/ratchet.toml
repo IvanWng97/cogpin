@@ -1,0 +1,135 @@
+# ratchet recipe — the ADVISORY library. These catch the *semantic*-weakening cuts a
+# diff fact can't prove: an assertion loosened, a stub passed off as an implementation,
+# a regex relaxed, a guard quietly dropped. They are gameable by the gated agent by
+# construction, so — per the one rule, severity="block" REQUIRES kind="fact" — they
+# are NEVER blocking. They run two ways:
+#
+#   • severity="judge"  → `ratchet judge` emits the prompt; CI pipes it to a model as a
+#                         continue-on-error substance check (a review signal, not a gate).
+#   • severity="warn" + a fact primitive → the *presence* of a suppression marker is an
+#                         ungameable fact; only whether it's justified is advisory.
+#
+# Lift the ones you want into your repo's ratchet.toml (they compose with the blocking
+# facts there). Provenance: the weakening classes below were mined from real AI-authored
+# PR/commit history (assertEqual→assertTrue downgrades, fake-impl-to-match-the-test,
+# regex loosening, guard removal) — see docs/coverage-map.md.
+schema = 1
+
+[repo]
+default_branch = "main"
+code = ["src/**"]
+tests = ["tests/**", "**/*.test.*", "**/*.spec.*", "**/test_*.py"]
+
+[meta]
+base_pinned = true
+
+# ── advisory LLM-judge prompts (substance over existence) ────────────────────────
+# `ratchet judge` concatenates every `prompt` below; the CI step feeds the diff + these
+# to a model and posts the verdict as a comment. continue-on-error — advisory only.
+
+[[check]]
+id = "judge-assertion-strength"
+kind = "advisory"
+severity = "judge"
+layer = "change"
+primitive = "judge"
+prompt = """Assertion-weakening: did any test change REPLACE a specific assertion with a \
+weaker one (assertEqual→assertTrue, toBe→toBeTruthy, an exact match → a substring/regex \
+`contains`, a fixed expected value → `any`/`mock.called`)? Quote the before/after lines. \
+Loosening an assertion to make a failing test pass is a green-by-doing-less cut."""
+
+[[check]]
+id = "judge-fake-implementation"
+kind = "advisory"
+severity = "judge"
+layer = "change"
+primitive = "judge"
+prompt = """Fake implementation: does the new code return a hardcoded/constant value, an \
+empty collection, or a value SUSPICIOUSLY shaped to satisfy exactly the test's expected \
+output (rather than computing it)? A function that returns the literal the test asserts \
+on is a stub masquerading as an implementation."""
+
+[[check]]
+id = "judge-regex-loosening"
+kind = "advisory"
+severity = "judge"
+layer = "change"
+primitive = "judge"
+prompt = """Validation loosening: was a stricter check replaced with a permissive one — a \
+regex anchor (^/$) dropped, a character class widened to `.*`, a allowlist turned into a \
+denylist (or removed), a type/range/length guard deleted? Quote the lines. Relaxing input \
+validation to pass a test (or unblock an input) is a silent weakening."""
+
+[[check]]
+id = "judge-guard-removal"
+kind = "advisory"
+severity = "judge"
+layer = "change"
+primitive = "judge"
+prompt = """Guard removal: was an error-path guard quietly dropped — a removed `?`/`unwrap` \
+→ `unwrap_or_default`, a null/None check deleted, an `if (!ok) throw` removed, a bounds or \
+auth check elided? The happy path still works, so tests stay green while a failure mode goes \
+unhandled. Quote the removed guard."""
+
+[[check]]
+id = "judge-silent-fallback"
+kind = "advisory"
+severity = "judge"
+layer = "change"
+primitive = "judge"
+prompt = """Silent fallback: does a new/changed catch-or-recover path SWALLOW an error and \
+return a default/empty value with no re-raise, log, or signal? A `try: … except: return None` \
+(or `catch { return [] }`) added to make an operation 'succeed' hides the real failure."""
+
+[[check]]
+id = "judge-test-tautology"
+kind = "advisory"
+severity = "judge"
+layer = "change"
+primitive = "judge"
+prompt = """Tautological test: is any new assertion vacuously true — `assert True`, \
+`expect(x).toBe(x)`, asserting a mock equals itself, a test with no assertion at all, or one \
+that re-derives the expected value with the same code under test? It raises the count, not the \
+coverage."""
+
+[[check]]
+id = "judge-scope-drift"
+kind = "advisory"
+severity = "judge"
+layer = "change"
+primitive = "judge"
+prompt = """Scope/spec drift: does the implementation match what was ASKED, or did it solve a \
+narrower/different problem that happens to pass the tests (hardcode the one tested case, handle \
+the example but not the general case, rename without the behavior change requested)?"""
+
+[[check]]
+id = "judge-comment-rot"
+kind = "advisory"
+severity = "judge"
+layer = "change"
+primitive = "judge"
+prompt = """Comment/docstring rot: does any unchanged comment or docstring now CONTRADICT the \
+code next to it after this diff (a stale `@param`, a described invariant the code no longer \
+holds, a 'returns X' that now returns Y)? A misleading comment is worse than none."""
+
+# ── presence-as-fact (the marker is ungameable; the justification is advisory) ──────
+# A suppression marker is a literal fact (forbid_pattern), so these are real warns — but
+# whether the suppression is *warranted* is the judgment, hence WARN not block.
+
+[[check]]
+id = "suppression-added"
+kind = "fact"
+severity = "warn"
+primitive = "forbid_pattern"
+pattern = '#\s*type:\s*ignore|#\s*noqa|eslint-disable|@ts-(?:ignore|expect-error)|#\[allow\(|// *nolint|#\s*nosec'
+scope = "code"
+
+# A test-disabling marker added to silence a failure (skip / xfail / only). The fact is
+# the marker; some skips are legitimate, so WARN + let the judge weigh it.
+[[check]]
+id = "test-skip-added"
+kind = "fact"
+severity = "warn"
+primitive = "forbid_pattern"
+pattern = '@(?:unittest\.skip|pytest\.mark\.(?:skip|xfail))\b|\.skip\s*\(|\bxit\b|\bxdescribe\b|#\[ignore\]'
+scope = "tests"

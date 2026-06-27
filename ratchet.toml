@@ -33,6 +33,17 @@ primitive = "forbid_commit_on_branch"
 branch = ["main"]
 ops = ["commit", "push"]
 
+# Real-time twin of `protected-gate-files`: deny a Write/Edit to a gate-defining file
+# the instant the agent reaches for it, so it can't quietly loosen its own gate. The
+# change-layer `protected_path` (below) is the authoritative PR-approval backstop.
+[[check]]
+id = "self-protect"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "self_protect"
+paths = ["ratchet.toml", "ratchet.py", "hooks/hooks.json", ".github/workflows/**", ".claude-plugin/**"]
+
 # ── change layer (pre-push + CI, authoritative, base-pinned) ─────────────────
 [[check]]
 id = "secret-scan"
@@ -94,6 +105,16 @@ id = "commit-footer"
 kind = "fact"
 severity = "warn"
 primitive = "commit_footer"
+
+# Conventional-Commits subject (warn — the repo follows it; the engine never reads
+# intent, only the literal shape). The require-presence twin of forbid_in_message.
+[[check]]
+id = "conventional-commits"
+kind = "fact"
+severity = "warn"
+primitive = "require_message_pattern"
+pattern = '^(feat|fix|docs|chore|refactor|test|ci|build|perf|style|revert)(\(.+\))?!?: '
+msg_scope = ["commit_subject"]
 
 # THE teeth: the change layer re-runs the real test suite from the base-pinned policy.
 # `run` blocks are change-layer-only (validate enforces it) and skipped by --no-run.
