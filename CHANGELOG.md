@@ -6,6 +6,25 @@ config `schema` version is separate and bumps only on a breaking config change.
 
 ## [Unreleased]
 
+### Fixed (PR #1 two-lens-review follow-ups)
+- **`require_checks_green` self-race (#5)** — when ratchet runs as a job in the same workflow
+  it gates, its own check is still pending and a bare (no-`need`) config self-blocks. Added an
+  `ignore` denylist (the complement of `need`) so you can exclude the ratchet job by name, and
+  `ratchet validate` now prints a non-fatal `note:` when a `require_checks_green` check sets
+  neither `need` nor `ignore`. Documented the race in [`SCHEMA.md`](SCHEMA.md).
+- **`_install_prepush` perms drift (#6)** — appending the managed block to an existing
+  husky / `.githooks` pre-push no longer widens it to `0o755`; it preserves the file's perms and
+  only ensures `+x` (a brand-new ratchet-authored hook is still `0o755`). `uninstall`'s
+  strip-and-keep path shares the same rule.
+- **`_marked_ids` mis-association (#6)** — a `# TODO(ratchet:review)` marker above a
+  *commented-out* check no longer binds to a *later* live `[[check]]` (only blank lines may
+  intervene now). This also removes a `draft-lint` false-positive that mis-flagged the later check.
+
+### Removed
+- The no-op `uninstall --no-hook` flag (#6) — uninstall's only action is stripping the hook, so
+  the flag did nothing. `ratchet uninstall --no-hook` now exits non-zero (unrecognized argument)
+  rather than no-op'ing. `install --no-hook` is unaffected.
+
 ## [1.0.0] — 2026-06-27
 
 First stable release. The `@v1` floating major tag and the `/v1/` raw-engine URL

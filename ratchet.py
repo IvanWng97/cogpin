@@ -165,6 +165,9 @@ class Check:
     strip_comments: bool = False
     when: list[str] = field(default_factory=list)
     need: list[str] = field(default_factory=list)
+    # require_checks_green: check names to EXCLUDE (denylist complement of `need`) — chiefly
+    # ratchet's OWN job, which is still pending while it gates the same workflow run.
+    ignore: list[str] = field(default_factory=list)
     when_marker: str | None = None
     marker: str | None = None
     where: str | None = None
@@ -287,6 +290,7 @@ class Config:
                         strip_comments=bool(c.get("strip_comments", False)),
                         when=_as_list(c.get("when")),
                         need=_as_list(c.get("need")),
+                        ignore=_as_list(c.get("ignore")),
                         when_marker=c.get("when_marker"),
                         marker=c.get("marker"),
                         where=c.get("where"),
@@ -1010,13 +1014,21 @@ def approval_state_depth(check: Check, facts: DiffFacts) -> str | None:
 def require_checks_green(check: Check, facts: DiffFacts) -> str | None:
     """Every required status check must have concluded `success`. checks=None → no PR
     context → skip. A pending check (null/empty conclusion) blocks — the change isn't
-    proven green yet. Optional `need` narrows to specific check names."""
+    proven green yet.
+
+    `need` narrows to an allowlist of check names; `ignore` is the denylist complement
+    (all green EXCEPT these). When ratchet runs as a job in the SAME workflow it gates,
+    its own check is still pending at query time and would self-block — exclude it via
+    `ignore = ["<ratchet job name>"]` (or `need` only the others). See SCHEMA.md."""
     if facts.checks is None:
         return None
     want = set(check.need)
+    skip = set(check.ignore)
     for ck in facts.checks:
         name = ck.get("name") or ""
         if want and name not in want:
+            continue
+        if name in skip:
             continue
         concl = (ck.get("conclusion") or "").lower()
         if concl != "success":
@@ -1750,7 +1762,7 @@ _SAFE_CMD_CORPUS = ("git push origin feat", "git commit -m x", "git status", "np
 # hallucinated/typo'd key that _from_raw would otherwise silently `.get()`-drop.
 _KNOWN_CHECK_KEYS = frozenset({
     "id", "kind", "severity", "primitive", "layer", "pattern", "scope", "exempt", "strip_comments",
-    "when", "need", "when_marker", "marker", "where", "cmd", "trigger", "require", "custom",
+    "when", "need", "ignore", "when_marker", "marker", "where", "cmd", "trigger", "require", "custom",
     "forbid_paths", "paths", "require_approval", "unless_paired_add", "branch", "ops", "allow",
     "tokens", "msg_scope", "deny", "key", "direction", "floor", "max_added", "max_removed",
     "max_files", "max_file_added", "status", "maxkb", "allow_binary", "require_approval_from",
@@ -1876,7 +1888,9 @@ def is_bound(hit: HouseRuleHit, checks: list[Check]) -> tuple[bool, Check | None
 
 def _marked_ids(text: str) -> set[str]:
     """Ids of UNCOMMENTED checks carrying a `# TODO(ratchet:review)` marker directly above
-    (skipping commented/blank lines). A marker before a commented check is not associated."""
+    (only blank lines may intervene). An intervening comment — e.g. a commented-out check —
+    ENDS the association, so a marker above a commented block never binds to a LATER live
+    `[[check]]` (which would mis-flag that check in draft-lint)."""
     lines = text.splitlines()
     marked: set[str] = set()
     for i, line in enumerate(lines):
@@ -1884,7 +1898,7 @@ def _marked_ids(text: str) -> set[str]:
             continue
         for j in range(i + 1, min(i + 12, len(lines))):
             sj = lines[j].strip()
-            if sj.startswith("#") or sj == "":
+            if sj == "":
                 continue
             if sj == "[[check]]":
                 for k in range(j + 1, min(j + 8, len(lines))):
@@ -2255,6 +2269,21 @@ def cmd_check(
     return 0
 
 
+def _config_advisories(cfg: Config) -> list[str]:
+    """Non-fatal config-shape foot-guns: a valid config can still be a trap. Surfaced by
+    `validate` (and never fail it) so the racy shape is caught at author time, not in a
+    blocked PR."""
+    out = []
+    for c in cfg.checks:
+        if c.primitive == "require_checks_green" and not c.need and not c.ignore:
+            out.append(
+                f"`{c.id}` (require_checks_green) sets neither `need` nor `ignore`: run inside "
+                "the workflow it gates, ratchet's own still-pending check self-blocks. Set "
+                '`ignore = ["<ratchet job name>"]`, or `need` only the other checks.'
+            )
+    return out
+
+
 def cmd_validate(path: str) -> int:
     try:
         with open(path, encoding="utf-8") as fh:
@@ -2265,6 +2294,8 @@ def cmd_validate(path: str) -> int:
     print(
         f"ratchet: {path} valid — {len(cfg.checks)} checks, base_pinned={cfg.meta.base_pinned}"
     )
+    for note in _config_advisories(cfg):
+        print(f"ratchet: note: {note}", file=sys.stderr)
     return 0
 
 
@@ -2575,6 +2606,15 @@ def _vendor_engine(root: str) -> str | None:
     return dst
 
 
+def _exec_mode(real: str) -> int:
+    """The mode for an (atomic re-)write of a hook file: PRESERVE an existing file's perms
+    and only ensure +x — appending the managed block must not widen a husky / `.githooks`
+    hook to 0o755. A brand-new hook ratchet authors is 0o755."""
+    if os.path.exists(real):
+        return (os.stat(real).st_mode & 0o777) | 0o111
+    return 0o755
+
+
 def _install_prepush(target_path: str) -> None:
     """Append/replace the managed block in the effective pre-push (write-through a
     symlink to its realpath; chmod +x). Skips the write when already byte-identical."""
@@ -2586,11 +2626,11 @@ def _install_prepush(target_path: str) -> None:
         cur = ""
         new = "#!/bin/sh\n" + PREPUSH_BLOCK
     if new != cur:
-        _atomic_write(target_path, new, mode=0o755)
+        _atomic_write(target_path, new, mode=_exec_mode(real))
         return
     st = os.stat(real)
     if not st.st_mode & 0o111:
-        os.chmod(real, st.st_mode | 0o755)
+        os.chmod(real, (st.st_mode & 0o777) | 0o111)
 
 
 def _write_ci(root: str, branch: str = "main") -> str | None:
@@ -2673,16 +2713,13 @@ def cmd_install(cwd: str = ".", vendor: bool = True, config: bool = True,
     return 0
 
 
-def cmd_uninstall(cwd: str = ".", hook: bool = True) -> int:
+def cmd_uninstall(cwd: str = ".") -> int:
     """Conservative: strip ONLY the local pre-push managed block. Never `git rm`
     committed source (engine / config / workflow) — that is an explicit reviewable change."""
     root = _repo_root(cwd)
     if root is None:
         print("ratchet: not a git repository", file=sys.stderr)
         return 1
-    if not hook:
-        print("ratchet uninstall: nothing to do (--no-hook)")
-        return 0
     action, payload = _effective_hook_target(cwd, root)
     if action != "write":
         msg = (f"hooks managed by {action.split(':', 1)[1]} — remove the ratchet snippet by hand"
@@ -2699,7 +2736,7 @@ def cmd_uninstall(cwd: str = ".", hook: bool = True) -> int:
         os.remove(real)
         print(f"ratchet uninstall: removed the ratchet-authored pre-push hook ({real})")
     else:
-        _atomic_write(payload, stripped, mode=0o755)
+        _atomic_write(payload, stripped, mode=_exec_mode(real))
         print(f"ratchet uninstall: stripped the managed block, kept the rest ({real})")
     print("note: committed .ratchet/ratchet.py, ratchet.toml and the CI workflow are NOT removed "
           "(remove them in a reviewed change)")
@@ -2865,7 +2902,6 @@ def main(argv: list[str] | None = None) -> int:
     ins.add_argument("--no-gitignore", action="store_true", help="skip the .gitignore entry")
     un = sub.add_parser("uninstall", help="strip the local pre-push managed block (never removes committed source)")
     un.add_argument("--cwd", default=".")
-    un.add_argument("--no-hook", action="store_true", help="no-op (reserved)")
     dr = sub.add_parser("doctor", help="diagnose both layers (read-only; exit 1 only on a hard change-layer failure)")
     dr.add_argument("--cwd", default=".")
     dr.add_argument("--json", action="store_true", help="emit the per-check status array")
@@ -2910,7 +2946,7 @@ def main(argv: list[str] | None = None) -> int:
             gitignore=not args.no_gitignore,
         )
     if args.cmd == "uninstall":
-        return cmd_uninstall(args.cwd, hook=not args.no_hook)
+        return cmd_uninstall(args.cwd)
     if args.cmd == "doctor":
         return cmd_doctor(args.cwd, as_json=args.json)
     if args.cmd == "selftest":
