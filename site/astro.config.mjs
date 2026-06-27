@@ -18,6 +18,12 @@ export default defineConfig({
       description:
         'A Definition-of-Done gate for AI coding agents. Blocks the corner-cuts an agent takes to look done — over facts it can never fake.',
       logo: { src: './src/assets/logo.svg', alt: 'ratchet' },
+      // Syntax highlighting for fenced code: a crisp dark/light pair that flips
+      // with the theme, rounded to match the site's cards.
+      expressiveCode: {
+        themes: ['github-dark-default', 'github-light-default'],
+        styleOverrides: { borderRadius: '0.6rem', frames: { shadowColor: 'transparent' } },
+      },
       favicon: '/favicon.svg',
       social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/IvanWng97/ratchet' }],
       customCss: ['./src/styles/custom.css'],
