@@ -64,7 +64,7 @@ behavior.**
 
 | Layer | Fires at | Authority |
 |---|---|---|
-| **agent** | Claude Code `PreToolUse` / `Stop` hook — real time | denies the forbidden command mid-session; bypassable via `[meta].bypass_env` (always logged) |
+| **agent** | Claude Code `PreToolUse` / `Stop` hook — real time | `PreToolUse` denies `--no-verify` (hard) + a `git push`/`gh pr merge` whose DoD fails; `Stop` blocks turn-end on unticked attestation boxes. Bypassable via `[meta].bypass_env` (always logged) |
 | **change** | git pre-push hook + CI | **authoritative** — base-pinned, ignores the bypass env |
 
 ## Install
@@ -130,8 +130,8 @@ Every check reads only facts — never your code.
 | `commit_footer{}` | fact | every commit ends with `[meta].commit_footer` |
 | `protected_path{paths,require_approval}` | fact | gate-defining files changed → need an independent approval |
 | `run{cmd}` | fact* | shell-out; the exit code is the fact (**`block` only at the change layer**) |
-| `attest{prompt,class}` | advisory | a `Stop`-hook checklist box |
-| `judge{prompt}` | advisory | an advisory LLM-judge |
+| `attest{box,class}` | advisory | a class-gated `Stop`-hook checklist box — `ratchet stop` blocks turn-end until it's ticked (forcing function; the change layer is the ungameable gate) |
+| `judge{prompt}` | advisory | an advisory LLM-judge prompt (`ratchet judge` emits it for a CI `continue-on-error` step) |
 
 ## Why it's actually bypass-proof
 

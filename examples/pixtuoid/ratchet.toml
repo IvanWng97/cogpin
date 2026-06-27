@@ -15,11 +15,16 @@ code = ["crates/*/src/**/*.rs"]
 tests = ["crates/*/tests/**/*.rs", "crates/*/src/**/*_tests.rs", "crates/*/src/**/tests.rs"]
 # _DOC_RE — docs-ish tree
 docs = ["**/*.md", "docs/**", "site/**", "**/README.md", "**/CONTRIBUTING.md", "**/CHANGELOG.md"]
+# public_surface() class — cli.rs / config.rs / source/registry.rs
+public_surface = ["crates/*/src/cli.rs", "crates/*/src/config.rs", "crates/*/src/**/source/registry.rs"]
+claude_md = ["**/CLAUDE.md", "**/AGENTS.md"]
 
 [meta]
 base_pinned = true
-bypass_env = "DOD_BYPASS"        # agent-layer escape hatch (CLAUDE.md); CI ignores it
+bypass_env = "DOD_BYPASS"        # agent-layer escape hatch (CLAUDE.md); → DOD-BYPASS: in attestation
 commit_footer = 'Co-Authored-By:'  # every commit carries the footer
+attestation_file = ".dod/attestation.md"  # reuse pixtuoid's existing attestation
+feature_files = 3                  # >=3 changed files (or a new module) = feature-shaped
 
 # ── agent layer (PreToolUse) ─────────────────────────────────────────────────
 # check_dod.py: command_has_no_verify() — the binding PreToolUse deny. A transient
@@ -150,12 +155,13 @@ id = "protected-gate-files"
 kind = "fact"
 severity = "block"
 primitive = "protected_path"
-paths = ["dod.toml", "justfile", ".github/workflows/**", "scripts/check_dod.py", ".dod/**"]
+# post-adoption gate-defining files (check_dod.py is gone; the engine is vendored)
+paths = ["ratchet.toml", ".ratchet/ratchet.py", "justfile", ".github/workflows/**", ".claude/settings.json", ".githooks/**", ".dod/**"]
 
-# ── agent-layer attestation (advisory: the Stop-hook checklist) ──────────────
-# check_dod.py: attestation_gaps() — class-gated DoD boxes. Declared here as the
-# advisory intent; the ratchet Stop-checklist runtime is a follow-up (the engine treats
-# attest/judge as advisory today — they surface, never block).
+# ── agent-layer attestation (the Stop-hook checklist; `ratchet stop` enforces it) ──
+# check_dod.py: attestation_gaps() — class-gated DoD boxes the agent ticks in
+# .dod/attestation.md. `ratchet stop` blocks turn-end on an unticked REQUIRED box.
+# always: TDD + Self-review · feature: + Design + Impl-plan · public_surface: + Docs-currency.
 [[check]]
 id = "attest-tdd"
 kind = "advisory"
@@ -163,6 +169,7 @@ severity = "attest"
 layer = "agent"
 primitive = "attest"
 class = "always"
+box = "TDD"
 prompt = "TDD: a failing test preceded the implementation."
 
 [[check]]
@@ -172,6 +179,7 @@ severity = "attest"
 layer = "agent"
 primitive = "attest"
 class = "always"
+box = "Self-review"
 prompt = "Self-review: you re-read the full diff for bugs/blast-radius."
 
 [[check]]
@@ -181,7 +189,28 @@ severity = "attest"
 layer = "agent"
 primitive = "attest"
 class = "feature"
-prompt = "Design + impl-plan exist for this feature-shaped change."
+box = "Design"
+prompt = "Design exists for this feature-shaped change."
+
+[[check]]
+id = "attest-impl-plan"
+kind = "advisory"
+severity = "attest"
+layer = "agent"
+primitive = "attest"
+class = "feature"
+box = "Impl-plan"
+prompt = "Impl-plan (against .github/prompts/impl-plan.prompt.md) exists."
+
+[[check]]
+id = "attest-docs-currency"
+kind = "advisory"
+severity = "attest"
+layer = "agent"
+primitive = "attest"
+class = "public_surface"
+box = "Docs-currency"
+prompt = "Docs-currency: README + nearest CLAUDE.md updated for the public-surface change."
 
 # check_dod.py: judge_prompt() — the advisory substance-over-existence LLM-judge.
 [[check]]

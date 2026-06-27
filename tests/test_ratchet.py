@@ -25,7 +25,11 @@ from ratchet import (  # noqa: E402
     run_change,
     run_command_gate,
     secret_scan,
+    attestation_gaps,
+    change_classes,
+    push_or_merge,
     _glob_to_re,
+    _ticked,
 )
 
 MIN = """
@@ -311,6 +315,104 @@ class TestEngine(unittest.TestCase):
         self.assertEqual(findings[0].id, "nv")
         self.assertTrue(has_block(findings))
         self.assertEqual(run_command_gate(self.cfg(), CommandFacts("git status")), [])
+
+
+class TestAgentLayer(unittest.TestCase):
+    """The check_dod.py-parity pieces: push/merge detection, change-class gating,
+    and the attestation Stop-gaps."""
+
+    ATTEST_CFG = """
+        schema = 1
+        [repo]
+        default_branch = "main"
+        code = ["crates/*/src/**/*.rs"]
+        public_surface = ["crates/*/src/cli.rs"]
+        [meta]
+        feature_files = 3
+        [[check]]
+        id = "attest-tdd"
+        kind = "advisory"
+        severity = "attest"
+        layer = "agent"
+        primitive = "attest"
+        class = "always"
+        box = "TDD"
+        [[check]]
+        id = "attest-design"
+        kind = "advisory"
+        severity = "attest"
+        layer = "agent"
+        primitive = "attest"
+        class = "feature"
+        box = "Design"
+        [[check]]
+        id = "attest-docs"
+        kind = "advisory"
+        severity = "attest"
+        layer = "agent"
+        primitive = "attest"
+        class = "public_surface"
+        box = "Docs-currency"
+    """
+
+    def test_push_or_merge_detection(self):
+        self.assertEqual(push_or_merge("git push origin main"), "push")
+        self.assertEqual(push_or_merge("git add . && git push"), "push")
+        self.assertEqual(push_or_merge("git -C dir -c k=v push"), "push")  # skips opt + value
+        self.assertEqual(push_or_merge("gh pr merge 7 --squash"), "merge")
+        self.assertEqual(push_or_merge("gh api repos/o/r/pulls/7/merge -X PUT"), "merge")
+        self.assertIsNone(push_or_merge("git status"))
+        self.assertIsNone(push_or_merge("git commit -m 'about to push'"))  # quoted → not a push
+
+    def test_ticked_parsing(self):
+        md = "- [x] TDD\n- [ ] Design\n-[X] Self-review"
+        self.assertTrue(_ticked(md, "TDD"))
+        self.assertTrue(_ticked(md, "Self-review"))
+        self.assertFalse(_ticked(md, "Design"))
+        self.assertFalse(_ticked(md, "Impl-plan"))
+
+    def test_change_classes(self):
+        cfg = Config.parse(self.ATTEST_CFG)
+        # 1 code file, not public → always only
+        c1 = change_classes(cfg, DiffFacts(changed=[("M", "crates/x/src/state.rs")]))
+        self.assertEqual(c1, {"always": True, "feature": False, "public_surface": False, "claude_md": False})
+        # 3 files → feature-shaped
+        c2 = change_classes(cfg, DiffFacts(changed=[("M", f"crates/x/src/{n}.rs") for n in "abc"]))
+        self.assertTrue(c2["feature"])
+        # a new module (status A under code) → feature even with 1 file
+        c3 = change_classes(cfg, DiffFacts(changed=[("A", "crates/x/src/new.rs")]))
+        self.assertTrue(c3["feature"])
+        # public-surface file touched
+        c4 = change_classes(cfg, DiffFacts(changed=[("M", "crates/x/src/cli.rs")]))
+        self.assertTrue(c4["public_surface"])
+        # docs-only → nothing triggers
+        c5 = change_classes(cfg, DiffFacts(changed=[("M", "README.md")]))
+        self.assertFalse(any(c5.values()))
+
+    def test_attestation_gaps_are_class_gated(self):
+        cfg = Config.parse(self.ATTEST_CFG)
+        # a single code file, nothing ticked → only the "always" box (TDD) is required
+        facts1 = DiffFacts(changed=[("M", "crates/x/src/state.rs")])
+        ids = {g.id for g in attestation_gaps(cfg, facts1, md="")}
+        self.assertEqual(ids, {"attest-tdd"})
+        # feature-shaped (3 files) → TDD + Design required
+        facts2 = DiffFacts(changed=[("M", f"crates/x/src/{n}.rs") for n in "abc"])
+        ids2 = {g.id for g in attestation_gaps(cfg, facts2, md="")}
+        self.assertEqual(ids2, {"attest-tdd", "attest-design"})
+        # ticking TDD clears it
+        ids3 = {g.id for g in attestation_gaps(cfg, facts2, md="- [x] TDD")}
+        self.assertEqual(ids3, {"attest-design"})
+        # public surface → adds Docs-currency
+        facts4 = DiffFacts(changed=[("M", "crates/x/src/cli.rs")])
+        ids4 = {g.id for g in attestation_gaps(cfg, facts4, md="- [x] TDD")}
+        self.assertEqual(ids4, {"attest-docs"})
+        # docs-only → no required boxes at all
+        self.assertEqual(attestation_gaps(cfg, DiffFacts(changed=[("M", "README.md")]), md=""), [])
+
+    def test_attest_does_not_violate_block_requires_fact(self):
+        # an attest check is advisory severity → the schema invariant doesn't reject it,
+        # yet the Stop runtime still blocks turn-end on its unticked boxes.
+        self.assertEqual(len(Config.parse(self.ATTEST_CFG).checks), 3)
 
 
 if __name__ == "__main__":
