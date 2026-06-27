@@ -203,22 +203,35 @@ reds a gate it can't edit.
 
 Every check reads only facts — never your code.
 
+23 primitives — full reference in [`SCHEMA.md`](SCHEMA.md); the provenance of each
+(first-principles vs mined from real AI-authored failures) is in
+[`docs/coverage-map.md`](docs/coverage-map.md).
+
 | primitive | kind | decides over |
 |---|---|---|
 | `forbid_command{pattern,deny}` | fact | the agent's command string — `deny` matches the **normalized** verb, defeating `git -C/p push` / `cd d && …` / `env X=Y …` wrappers (agent layer) |
 | `forbid_commit_on_branch{branch,ops}` | fact | the live current branch (agent layer) |
+| `self_protect{paths}` | fact | a live Write/Edit to a gate-defining file — the real-time twin of `protected_path` (agent layer) |
 | `secret_scan{forbid_paths,custom}` | fact | added lines vs token shapes + forbidden file globs |
 | `forbid_pattern{pattern,scope,exempt,strip_comments}` | fact | **added** lines under a path scope |
 | `forbid_removal{pattern,scope,exempt,strip_comments}` | fact | **removed** lines under a path scope |
 | `forbid_delete{scope,unless_paired_add,exempt}` | fact | per-file D-status (a deletion under scope) |
 | `scope_lock{allow}` | fact | every A/M/D path must be inside the allowlist (scope creep) |
 | `numeric_floor{key,direction,floor}` | fact | a numeric value's **direction** across the diff (lower coverage / raised retries / shortened timeout) |
+| `change_budget{max_added,max_removed,max_files,max_file_added,scope}` | fact | count ceilings over the diff (blast radius) |
+| `file_must_contain{scope,pattern,status}` | fact | every added/changed file in scope must add a matching line (e.g. an SPDX header) |
+| `max_added_file_bytes{maxkb,allow_binary,scope}` | fact | per-file byte ceiling on added/modified files (vendored bundles, stray binaries) |
 | `path_requires{when,need}` | fact | name-status: if `when` changed, `need` must too |
 | `cooccur{trigger,require}` | fact | if `trigger` appears (diff/PR), `require` must too |
 | `marker_present{marker,when}` | fact | a marker block exists in the PR body |
 | `forbid_in_message{tokens,msg_scope}` | fact | forbidden tokens in a commit/PR message (e.g. `[skip ci]`) |
+| `require_message_pattern{pattern,msg_scope}` | fact | every commit/PR message must match a shape (e.g. Conventional Commits) |
 | `commit_footer{}` | fact | every commit ends with `[meta].commit_footer` |
 | `protected_path{paths,require_approval}` | fact | gate-defining files changed → need an independent approval |
+| `require_approval_from{paths,require_approval_from,exclude_author}` | fact | a change under `paths` needs an APPROVED review from a named owner (CODEOWNERS-lite; CI) |
+| `pattern_requires_approval{pattern,scope,exclude_author}` | fact | an added line matching `pattern` (a new dep, an `unsafe`) needs an independent approval (CI) |
+| `approval_state_depth{require_fresh,no_changes_requested,disallow_author,disallow_bot,min_approvals}` | fact | the approval is fresh (on head), human, non-author, with no outstanding changes-requested (CI) |
+| `require_checks_green{need}` | fact | every (required) status check concluded `success` (CI) |
 | `run{cmd}` | fact\* | shell-out; the exit code is the fact (**`block` only at the change layer**) |
 | `attest{box,class}` | advisory | a class-gated `Stop`-hook checklist box — blocks turn-end until ticked (forcing function; the change layer is the ungameable gate) |
 | `judge{prompt}` | advisory | an advisory LLM-judge prompt (CI `continue-on-error` substance check) |
@@ -248,16 +261,32 @@ python3 ratchet.py validate   # checks the block-requires-fact invariant + struc
 Ready-to-lift policies:
 
 - [`examples/pixtuoid/ratchet.toml`](examples/pixtuoid/ratchet.toml) — a faithful
-  port of an 890-line bespoke DoD gate (Rust workspace) into 21 declarative checks.
-- [`examples/node-ts/ratchet.toml`](examples/node-ts/ratchet.toml) — a Node/TS repo.
+  port of an 890-line bespoke DoD gate (Rust workspace) into 22 declarative checks.
+- [`examples/node-ts/ratchet.toml`](examples/node-ts/ratchet.toml) — a Node/TS repo,
+  including the team / PR-review layer (CODEOWNERS-lite, fresh-approval, checks-green).
 - [`examples/python/ratchet.toml`](examples/python/ratchet.toml) — a Python repo.
+- [`examples/advisory/ratchet.toml`](examples/advisory/ratchet.toml) — the advisory
+  **judge** library: the eight semantic-weakening prompts (assertion-loosening,
+  fake-impl, regex-relaxing, guard-removal, …) a diff fact can't prove, mined from
+  real AI-authored PR history. Compose them with the blocking facts above.
 
 ratchet dogfoods itself — see [`ratchet.toml`](ratchet.toml): its own change layer
-re-runs its own test suite from the base-pinned policy, and `branch-first` +
-`keep-tests` + `no-test-delete` guard this very repo with the primitives it ships.
+re-runs its own test suite from the base-pinned policy; `self-protect` denies an
+in-session edit to the gate files; `branch-first` + `keep-tests` + `no-test-delete`
+guard this very repo with the primitives it ships.
+
+## Docs
+
+- **Tutorial + live playground** (the real engine in your browser via Pyodide):
+  <https://ivanwng97.github.io/ratchet/>
+- **[`SCHEMA.md`](SCHEMA.md)** — every config key and primitive field.
+- **[`docs/coverage-map.md`](docs/coverage-map.md)** — every corner-cut class, the
+  primitive that gates it, and the real PR/commit evidence behind it.
+- **[`CONTRIBUTING.md`](CONTRIBUTING.md)** · **[`SECURITY.md`](SECURITY.md)** ·
+  **[`CHANGELOG.md`](CHANGELOG.md)** · **[`CLAUDE.md`](CLAUDE.md)** (the dogfood agent guide).
 
 ## Status
 
-v0.1 — engine + Claude Code plugin (agent layer) + `/ratchet-init` repo wiring
-(change layer). Stdlib Python (3.11+), no third-party deps, no package manager.
-MIT.
+v0.1 — engine (23 primitives) + Claude Code plugin (agent layer) + `/ratchet-init`
+repo wiring (change layer) + tutorial site. Stdlib Python (3.11+), no third-party
+deps, no package manager. MIT.

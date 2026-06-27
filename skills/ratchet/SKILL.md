@@ -43,21 +43,27 @@ for a genuine, logged exception, not for avoiding the work.
 ## Authoring a ratchet.toml
 
 1. `python3 .ratchet/ratchet.py init` (or `/ratchet-init`) to scaffold, then edit.
-2. Pick primitives by the fact each reads:
-   - command string → `forbid_command`, `forbid_commit_on_branch` (agent layer)
-   - added lines → `secret_scan`, `forbid_pattern`
+2. Pick primitives by the fact each reads (full reference: `SCHEMA.md`):
+   - command string → `forbid_command{deny}`, `forbid_commit_on_branch` (agent layer)
+   - the live Write/Edit target → `self_protect` (agent layer; protect the gate files)
+   - added lines → `secret_scan`, `forbid_pattern`, `file_must_contain` (positive floor)
    - removed lines → `forbid_removal` (the "delete the safety net" guard)
-   - file D-status → `forbid_delete` (the "delete the failing test" guard)
+   - a value's direction across the diff → `numeric_floor` (lowered coverage/threshold)
+   - the changed-path set → `scope_lock` (allowlist; scope creep), `change_budget` (blast radius)
+   - file D-status / byte size → `forbid_delete`, `max_added_file_bytes`
    - name-status pairing → `path_requires`, `cooccur`
-   - PR/commit metadata → `marker_present`, `commit_footer`
-   - reviewer approvals → `protected_path`
+   - commit/PR message → `forbid_in_message`, `require_message_pattern`, `commit_footer`, `marker_present`
+   - reviewer identity / checks (CI) → `protected_path`, `require_approval_from`,
+     `pattern_requires_approval`, `approval_state_depth`, `require_checks_green`
    - language-specific (lint/test exit code) → `run` (**`block` only at the change layer**)
    - forcing functions → `attest` (Stop checklist), `judge` (advisory LLM prompt)
 3. Keep `base_pinned = true`. Add gate-defining files (`ratchet.toml`,
-   `.ratchet/**`, CI workflows, hook configs) to a `protected_path` check.
+   `.ratchet/**`, CI workflows, hook configs) to a `protected_path` check — and a
+   `self_protect` check for the real-time agent-layer twin.
 4. `python3 .ratchet/ratchet.py validate` before committing.
 5. New primitive blocking real code for the first time? Start it at `warn`, watch
    a few PRs for false positives, then promote to `block`.
 
-See `README.md` for the full primitive table and the bypass-proof proof, and
-`examples/{pixtuoid,node-ts,python}/ratchet.toml` for ready-to-lift policies.
+See `README.md` for the full primitive table, `SCHEMA.md` for every field,
+`docs/coverage-map.md` for why each primitive exists, and
+`examples/{pixtuoid,node-ts,python,advisory}/ratchet.toml` for ready-to-lift policies.
