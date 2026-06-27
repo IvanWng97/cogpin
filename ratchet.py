@@ -871,20 +871,49 @@ def commit_footer(footer_rx: str | None, facts: DiffFacts) -> str | None:
     return None
 
 
+def _qualifying_approvers(facts: DiffFacts) -> set[str]:
+    """APPROVED reviewers that may satisfy gate-file protection: non-author, non-bot,
+    and — when the review's commit and the head are both known — ON the current head.
+    A stale approval (left before a later malicious commit) or a bot rubber-stamp is
+    NOT qualifying; that is what stops the 'approve-benign-then-push-malicious' bypass."""
+    out: set[str] = set()
+    for rv in facts.reviews or []:
+        if (rv.get("state") or "").upper() != "APPROVED":
+            continue
+        login = rv.get("login") or ""
+        if facts.pr_author and login == facts.pr_author:
+            continue
+        if rv.get("is_bot"):
+            continue
+        if facts.head_sha and rv.get("commit_id") and rv.get("commit_id") != facts.head_sha:
+            continue
+        out.add(login)
+    return out
+
+
 def protected_path(check: Check, facts: DiffFacts) -> str | None:
-    """Any change to gate-defining files needs an independent approval. Only
-    evaluated in a PR context (approvals is not None); skipped on local pre-push."""
-    if facts.approvals is None:
+    """Any change to gate-defining files needs an independent approval. Only evaluated
+    in a PR context; skipped on local pre-push. When the richer `reviews` fact is present
+    (CI), the approval must be FRESH + human + non-author (`_qualifying_approvers`); the
+    flat `approvals` list is only a degraded fallback when no review metadata is supplied."""
+    if facts.reviews is None and facts.approvals is None:
         return None  # no PR context → defer to the CI run of this same check
     touched = [p for p in facts.changed_paths() if _path_matches(p, check.paths)]
-    if not touched:
+    if not touched or not check.require_approval:
         return None
-    if check.require_approval and not facts.approvals:
+    if facts.reviews is not None:
+        if _qualifying_approvers(facts):
+            return None
         return (
-            f"`{check.id}`: gate-defining file(s) changed ({touched[0]}…) "
-            f"without an independent approval"
+            f"`{check.id}`: gate-defining file(s) changed ({touched[0]}…) without a "
+            f"fresh independent approval (non-author, non-bot, on the current head)"
         )
-    return None
+    if facts.approvals:  # degraded: a flat approvals list with no metadata to verify freshness
+        return None
+    return (
+        f"`{check.id}`: gate-defining file(s) changed ({touched[0]}…) "
+        f"without an independent approval"
+    )
 
 
 def _approver_logins(facts: DiffFacts, exclude_author: bool) -> set[str]:
@@ -1770,7 +1799,13 @@ def _safe_core_block(branch: str) -> str:
         _render_check("secret-scan", "fact", "block", "secret_scan",
                       {"forbid_paths": [".env", ".env.*", "*.pem", "*.key", "id_rsa", "*.p12"]}),
         _render_check("self-protect", "fact", "block", "self_protect", {"paths": paths}, layer="agent"),
-        _render_check("protected-gate-files", "fact", "block", "protected_path", {"paths": paths}),
+        # Born `warn`: requires an INDEPENDENT approver, which a solo repo has none of — a hard
+        # block would be unclearable. Promote to severity="block" once a second reviewer /
+        # CODEOWNERS exists (then it's the bypass-proof keystone; the engine demands a fresh,
+        # non-bot, non-author approval). The agent-layer `self-protect` above already hard-blocks
+        # in-session edits regardless.
+        "# promote to severity=\"block\" once you have an independent reviewer (see README)\n"
+        + _render_check("protected-gate-files", "fact", "warn", "protected_path", {"paths": paths}),
     ])
 
 
@@ -1895,11 +1930,19 @@ def draft_lint(text: str, *, existing_cfg: Config | None,
     # 4 — base_pinned must be true
     if not cfg.meta.base_pinned:
         findings.append(LintFinding("error", None, "base_pinned must be true"))
-    # 5 — the safe-core five present at block
+    # 5 — the safe-core ids present. Four are solo-satisfiable facts → must be block. The
+    # fifth, `protected-gate-files`, needs an INDEPENDENT approver no solo repo has, so it is
+    # born `warn` (loud, not an unclearable wall) and promoted to block once a reviewer/
+    # CODEOWNERS exists — present at warn-or-block, never absent.
     by_id = {c.id: c for c in cfg.checks}
     for sid in SAFE_CORE_IDS:
         sc = by_id.get(sid)
-        if sc is None or sc.severity != "block":
+        if sc is None:
+            findings.append(LintFinding("error", sid, f"safe-core `{sid}` must be present"))
+        elif sid == "protected-gate-files":
+            if sc.severity not in ("warn", "block"):
+                findings.append(LintFinding("error", sid, "`protected-gate-files` must be warn or block"))
+        elif sc.severity != "block":
             findings.append(LintFinding("error", sid, f"safe-core `{sid}` must be present at severity=block"))
     # 6 — born-warn: a marked check cannot be block (arming = deleting the marker)
     marked = _marked_ids(text)
@@ -2410,11 +2453,17 @@ def _is_within(path: str, root: str) -> bool:
     return rp == rr or rp.startswith(rr + os.sep)
 
 
-def _atomic_write(path: str, text: str, *, mode: int = 0o644) -> None:
+def _atomic_write(path: str, text: str, *, mode: int = 0o644, confine: str | None = None) -> None:
     """Write `text` to `path` atomically, WRITING THROUGH a symlink to its realpath
     target (stow-safe — never replaces the symlink with a regular file): mkstemp in
-    the real directory + os.replace onto the real file."""
+    the real directory + os.replace onto the real file. `confine` (when set) refuses a
+    write whose realpath escapes that root — for committed gate files (engine/config) a
+    repo that ships `.ratchet/ratchet.py` as a symlink to `../../etc/…` must NOT make
+    `install` clobber an arbitrary path on a victim's clone; the pre-push hook write
+    deliberately omits `confine` because a stow-symlinked hook is intended."""
     real = os.path.realpath(path)
+    if confine is not None and not _is_within(real, confine):
+        raise OSError(f"refusing to write {path}: resolves outside the repo ({real})")
     d = os.path.dirname(real) or "."
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".ratchet-", suffix=".tmp")
@@ -2470,7 +2519,7 @@ def _ensure_gitignore(root: str) -> None:
     if line in {ln.strip() for ln in cur.splitlines()}:
         return
     sep = "" if (not cur or cur.endswith("\n")) else "\n"
-    _atomic_write(p, cur + sep + line + "\n")
+    _atomic_write(p, cur + sep + line + "\n", confine=root)
 
 
 def _detect_hook_manager(root: str) -> str | None:
@@ -2522,7 +2571,7 @@ def _vendor_engine(root: str) -> str | None:
     dst = os.path.join(root, ".ratchet", "ratchet.py")
     if os.path.realpath(dst) == src:
         return None
-    _atomic_write(dst, _slurp(src), mode=0o644)
+    _atomic_write(dst, _slurp(src), mode=0o644, confine=root)
     return dst
 
 
@@ -2544,22 +2593,38 @@ def _install_prepush(target_path: str) -> None:
         os.chmod(real, st.st_mode | 0o755)
 
 
-def _write_ci(root: str) -> str | None:
-    """Scaffold the change-layer CI workflow IF ABSENT (non-clobber)."""
+def _write_ci(root: str, branch: str = "main") -> str | None:
+    """Scaffold the change-layer CI workflow IF ABSENT (non-clobber), with the push-trigger
+    branch set to the repo's real default branch."""
     p = os.path.join(root, ".github", "workflows", "ratchet.yml")
     if os.path.exists(p):
         return None
-    _atomic_write(p, CI_WORKFLOW, mode=0o644)
+    _atomic_write(p, CI_WORKFLOW.replace("branches: [main]", f"branches: [{branch}]"), mode=0o644, confine=root)
     return p
 
 
+def _scaffold_config(branch: str) -> str:
+    """The starter `ratchet.toml`, with the detected default branch substituted for the
+    `main` default (so base-pinning + branch-first are correct on master/trunk repos)."""
+    if branch == "main":
+        return INIT_TEMPLATE
+    return (INIT_TEMPLATE
+            .replace('default_branch = "main"', f'default_branch = "{branch}"')
+            .replace('branch = ["main"]', f'branch = ["{branch}"]'))
+
+
 def _protects_gate_files(cfg: Config) -> bool:
-    """True iff some protected_path/self_protect check's globs cover BOTH the vendored
-    engine and `ratchet.toml` (doctor #8 — the engine-neuter defense for non-GitHub paths)."""
+    """True iff some protected_path/self_protect check's globs cover the engine, `ratchet.toml`,
+    AND the CI workflow (doctor #8 — the engine-neuter defense). The engine is matched at the
+    vendored `.ratchet/ratchet.py` OR a root `ratchet.py` (ratchet's own repo)."""
     for c in cfg.checks:
-        if c.primitive in ("protected_path", "self_protect") and c.paths:
-            if _path_matches(".ratchet/ratchet.py", c.paths) and _path_matches("ratchet.toml", c.paths):
-                return True
+        if c.primitive not in ("protected_path", "self_protect") or not c.paths:
+            continue
+        covers_engine = _path_matches(".ratchet/ratchet.py", c.paths) or _path_matches("ratchet.py", c.paths)
+        covers_config = _path_matches("ratchet.toml", c.paths)
+        covers_ci = _path_matches(".github/workflows/ratchet.yml", c.paths)
+        if covers_engine and covers_config and covers_ci:
+            return True
     return False
 
 
@@ -2572,6 +2637,7 @@ def cmd_install(cwd: str = ".", vendor: bool = True, config: bool = True,
     if root is None:
         print("ratchet: not a git repository — run `git init` first", file=sys.stderr)
         return 1
+    branch = _detect_default_branch(cwd)
     did: list[str] = []
     if vendor:
         dst = _vendor_engine(root)
@@ -2581,8 +2647,8 @@ def cmd_install(cwd: str = ".", vendor: bool = True, config: bool = True,
         if os.path.exists(cfg_path):
             did.append("ratchet.toml exists — left untouched")
         else:
-            _atomic_write(cfg_path, INIT_TEMPLATE)
-            did.append("wrote starter ratchet.toml")
+            _atomic_write(cfg_path, _scaffold_config(branch), confine=root)
+            did.append(f"wrote starter ratchet.toml (default_branch={branch})")
     if gitignore:
         _ensure_gitignore(root)
         did.append("ensured .gitignore covers .ratchet/.state")
@@ -2596,7 +2662,7 @@ def cmd_install(cwd: str = ".", vendor: bool = True, config: bool = True,
         else:
             did.append(f"pre-push skipped — {payload}")
     if ci:
-        did.append("scaffolded .github/workflows/ratchet.yml" if _write_ci(root)
+        did.append("scaffolded .github/workflows/ratchet.yml" if _write_ci(root, branch)
                    else ".github/workflows/ratchet.yml exists — left untouched")
     print("ratchet install:")
     for d in did:

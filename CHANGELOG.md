@@ -6,6 +6,33 @@ config `schema` version is separate and bumps only on a breaking config change.
 
 ## [Unreleased]
 
+### Security / hardening (two-lens review of the adoption arc)
+- **`protected_path` now requires a FRESH, human, non-author approval** when the `reviews`
+  fact is present (CI). Previously it accepted any non-empty approvals list, so an approval
+  of an earlier benign commit (with GitHub's stale-approval dismissal off by default) — or a
+  bot rubber-stamp — could cover a later malicious edit to a gate-defining file, defeating
+  base-pinning's "a same-PR edit can't disarm the gate" guarantee. The composite action's
+  `approvals` derivation is likewise filtered to `commit_id == head_sha`, non-bot, non-author.
+- **`require_checks_green` no longer fails open in `action.yml`**: `gh pr checks` exits
+  non-zero on failing/pending checks while still emitting JSON; the old `|| echo '[]'` replaced
+  that with an empty array → a vacuous pass. Now it preserves the real JSON and falls back to
+  `[]` only on genuinely empty output.
+- The action **refuses `engine: vendored` under `pull_request_target`** (it would run
+  untrusted PR-head code with a privileged token).
+- `install` writes (engine / config / CI / gitignore) are **confined to the repo root** — a
+  committed gate file shipped as a symlink escaping the tree can no longer make `install`
+  clobber an arbitrary path on a victim's clone (the pre-push hook write still follows symlinks
+  for stow). `doctor`'s gate-file self-protection check now also requires CI-workflow coverage.
+
+### Changed — solo-repo policy
+- The scaffold (and ratchet's own dogfood) now ships `protected-gate-files` at **`warn`**, not
+  `block`: it needs an independent approver no solo repo has, so a hard block would be
+  unclearable on every gate-touching PR. Promote to `block` once a second reviewer / CODEOWNERS
+  exists; `draft-lint` accepts it at warn-or-block while the other four safe-core ids stay
+  block. The agent-layer `self_protect` still hard-blocks in-session edits.
+- `install` substitutes the repo's detected default branch into the scaffolded `ratchet.toml`
+  and CI `push:` trigger (no longer hardcodes `main`).
+
 ### Added — seamless adoption (install / config-gen / CI action)
 - `ratchet install` / `uninstall` / `doctor` — one-command, idempotent, non-clobbering
   wiring of the change layer. `install` vendors the engine to `.ratchet/ratchet.py`

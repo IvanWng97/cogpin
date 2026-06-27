@@ -29,6 +29,7 @@ from ratchet import (  # noqa: E402
     _ensure_gitignore,
     _git_ops,
     _glob_to_re,
+    _protects_gate_files,
     _replace_or_append_block,
     _strip_block,
     _ticked,
@@ -294,6 +295,29 @@ class TestPrimitives(unittest.TestCase):
         # PR context, no gate file touched → pass
         unrelated = DiffFacts(changed=[("M", "src/a.rs")], approvals=[])
         self.assertIsNone(protected_path(c, unrelated))
+
+    def test_protected_path_requires_fresh_human_nonauthor_approval(self):
+        # The keystone: with the reviews fact present, a stale / bot / self approval must
+        # NOT satisfy gate-file protection (the approve-benign-then-push-malicious bypass).
+        c = one_check(
+            '[[check]]\nid="pp"\nkind="fact"\nseverity="block"\nprimitive="protected_path"\n'
+            'paths=["ratchet.toml"]'
+        )
+        touched = [("M", "ratchet.toml")]
+        fresh = DiffFacts(changed=touched, head_sha="HEAD2", pr_author="alice",
+                          reviews=[{"login": "bob", "state": "APPROVED", "commit_id": "HEAD2"}])
+        self.assertIsNone(protected_path(c, fresh))  # fresh human non-author → pass
+        stale = DiffFacts(changed=touched, head_sha="HEAD2", pr_author="alice",
+                          reviews=[{"login": "bob", "state": "APPROVED", "commit_id": "HEAD1"}])
+        self.assertIsNotNone(protected_path(c, stale))  # approval on an earlier commit → block
+        bot = DiffFacts(changed=touched, head_sha="HEAD2", pr_author="alice",
+                        reviews=[{"login": "rubber[bot]", "state": "APPROVED", "commit_id": "HEAD2", "is_bot": True}])
+        self.assertIsNotNone(protected_path(c, bot))  # bot rubber-stamp → block
+        selfapp = DiffFacts(changed=touched, head_sha="HEAD2", pr_author="alice",
+                            reviews=[{"login": "alice", "state": "APPROVED", "commit_id": "HEAD2"}])
+        self.assertIsNotNone(protected_path(c, selfapp))  # author self-approval → block
+        none_yet = DiffFacts(changed=touched, head_sha="HEAD2", pr_author="alice", reviews=[])
+        self.assertIsNotNone(protected_path(c, none_yet))  # reviews present but empty → block
 
     def test_forbid_removal_guards_deleted_guard_lines(self):
         # the '-' twin of forbid_pattern: a REMOVED line matching the guard pattern
@@ -1023,8 +1047,13 @@ class TestSuggestRender(unittest.TestCase):
 
     def test_render_is_all_warn_except_safe_core(self):
         cfg = Config.parse(render_suggest_toml(_scan("Use conventional commits. Keep docs current.")))
+        by_id = {c.id: c for c in cfg.checks}
         blocks = {c.id for c in cfg.checks if c.severity == "block"}
-        self.assertEqual(blocks, set(SAFE_CORE_IDS))
+        # protected-gate-files is born warn (solo repos have no independent approver); the
+        # other four safe-core ids are solo-satisfiable facts → born block.
+        self.assertEqual(blocks, set(SAFE_CORE_IDS) - {"protected-gate-files"})
+        self.assertEqual(by_id["protected-gate-files"].severity, "warn")
+        self.assertEqual(by_id["protected-gate-files"].primitive, "protected_path")
 
     def test_render_has_draft_banner_and_todos(self):
         toml = render_suggest_toml(_scan("Use conventional commits."))
@@ -1080,6 +1109,21 @@ class TestDraftLint(unittest.TestCase):
     def test_missing_safe_core_rejected(self):
         minimal = 'schema = 1\n[repo]\ndefault_branch = "main"\n[meta]\nbase_pinned = true\n'
         self.assertIn("error", self._levels(minimal))
+
+    def test_protected_gate_files_may_be_warn_or_block(self):
+        # the chosen solo policy: protected-gate-files born warn lints clean; promoting it to
+        # block also lints clean (a team with a reviewer); the other four must stay block.
+        warn_draft = self._clean()
+        self.assertNotIn("error", self._levels(warn_draft))
+        block_draft = warn_draft.replace(
+            'id = \'protected-gate-files\'\nkind = \'fact\'\nseverity = \'warn\'',
+            'id = \'protected-gate-files\'\nkind = \'fact\'\nseverity = \'block\'')
+        self.assertNotIn("error", self._levels(block_draft))
+        # demoting a different safe-core id (secret-scan) to warn is still rejected
+        weakened = warn_draft.replace(
+            'id = \'secret-scan\'\nkind = \'fact\'\nseverity = \'block\'',
+            'id = \'secret-scan\'\nkind = \'fact\'\nseverity = \'warn\'')
+        self.assertIn("error", self._levels(weakened))
 
     def test_inferred_block_with_marker_rejected(self):
         bad = self._clean() + '\n# TODO(ratchet:review): from CLAUDE.md\n[[check]]\nid = "x"\nkind = "fact"\nseverity = "block"\nprimitive = "forbid_pattern"\npattern = "foo"\nscope = "src/**/*.py"\n'
@@ -1309,6 +1353,23 @@ class TestAtomicWrite(unittest.TestCase):
         _atomic_write(p, "#!/bin/sh\n", mode=0o755)
         self.assertTrue(os.stat(p).st_mode & 0o111)
 
+    def test_confine_refuses_escaping_symlink(self):
+        # a committed gate file shipped as a symlink escaping the repo must NOT be written
+        # through (it would clobber an arbitrary path on a victim's `install`).
+        outside = os.path.join(self.d, "outside.txt")
+        with open(outside, "w") as fh:
+            fh.write("victim\n")
+        repo = os.path.join(self.d, "repo")
+        os.makedirs(repo)
+        link = os.path.join(repo, "engine.py")
+        os.symlink(outside, link)  # escapes `repo`
+        with self.assertRaises(OSError):
+            _atomic_write(link, "payload\n", confine=repo)
+        with open(outside) as fh:
+            self.assertEqual(fh.read(), "victim\n")  # untouched
+        # an in-repo target is fine
+        _atomic_write(os.path.join(repo, "ok.py"), "x\n", confine=repo)
+
 
 class _GitRepo(unittest.TestCase):
     """Shared git-temp harness for the wiring tests."""
@@ -1472,6 +1533,13 @@ class TestInstall(_GitRepo):
         rc, _ = _quiet(cmd_install, nong)
         self.assertEqual(rc, 1)
 
+    def test_install_substitutes_default_branch(self):
+        self._git("checkout", "-q", "-b", "trunk")  # non-main default
+        _quiet(cmd_install, self.d)
+        self.assertIn('default_branch = "trunk"', self._read("ratchet.toml"))
+        self.assertIn('branch = ["trunk"]', self._read("ratchet.toml"))
+        self.assertIn("branches: [trunk]", self._read(".github/workflows/ratchet.yml"))
+
 
 class TestUninstall(_GitRepo):
     def test_strips_only_block_keeps_rest(self):
@@ -1527,6 +1595,21 @@ class TestDoctor(_GitRepo):
         import json as _json
         data = _json.loads(out)
         self.assertTrue(all({"status", "label", "fix"} <= set(r) for r in data))
+
+
+class TestProtectsGateFiles(unittest.TestCase):
+    def _cfg(self, paths):
+        plist = ", ".join(f'"{p}"' for p in paths)
+        return Config.parse('schema = 1\n[repo]\ndefault_branch="main"\n[[check]]\n'
+                            f'id="pp"\nkind="fact"\nseverity="warn"\nprimitive="protected_path"\npaths=[{plist}]\n')
+
+    def test_requires_engine_config_and_ci(self):
+        # engine + config but NO workflow coverage → not fully protected (the engine-neuter hole)
+        self.assertFalse(_protects_gate_files(self._cfg([".ratchet/**", "ratchet.toml"])))
+        # all three covered → protected
+        self.assertTrue(_protects_gate_files(self._cfg([".ratchet/**", "ratchet.toml", ".github/workflows/**"])))
+        # ratchet's own repo shape (root engine, not vendored) also counts
+        self.assertTrue(_protects_gate_files(self._cfg(["ratchet.py", "ratchet.toml", ".github/workflows/**"])))
 
 
 if __name__ == "__main__":

@@ -192,7 +192,12 @@ diff it's being gated on**.
    the pinned base ref, never the PR head. A same-PR edit that relaxes a check is
    evaluated against the *old* policy, so it can't disarm itself.
 2. **`protected_path`** — changing those gate-defining files needs an independent
-   approval, or the gate refuses.
+   approval that is **fresh** (on the current head, so an approval of an earlier
+   benign commit can't cover a later malicious one), **human**, and **not the
+   author**, or the gate refuses. (On a solo repo it ships as `warn`, since there's
+   no independent approver to satisfy it — promote to `block` once a second
+   reviewer/CODEOWNERS exists; the agent-layer `self_protect` blocks in-session edits
+   regardless.)
 3. **Isolated `run`** — invoke tools isolated (`ruff --isolated`, a pinned
    `pytest -c …`) so head-side config can't defang the teeth.
 
@@ -260,7 +265,7 @@ Every check reads only facts — never your code.
 | `forbid_in_message{tokens,msg_scope}` | fact | forbidden tokens in a commit/PR message (e.g. `[skip ci]`) |
 | `require_message_pattern{pattern,msg_scope}` | fact | every commit/PR message must match a shape (e.g. Conventional Commits) |
 | `commit_footer{}` | fact | every commit ends with `[meta].commit_footer` |
-| `protected_path{paths,require_approval}` | fact | gate-defining files changed → need an independent approval |
+| `protected_path{paths,require_approval}` | fact | gate-defining files changed → need a **fresh, human, non-author** approval (CI; `warn` by default on solo repos, promote to `block` with a reviewer) |
 | `require_approval_from{paths,require_approval_from,exclude_author}` | fact | a change under `paths` needs an APPROVED review from a named owner (CODEOWNERS-lite; CI) |
 | `pattern_requires_approval{pattern,scope,exclude_author}` | fact | an added line matching `pattern` (a new dep, an `unsafe`) needs an independent approval (CI) |
 | `approval_state_depth{require_fresh,no_changes_requested,disallow_author,disallow_bot,min_approvals}` | fact | the approval is fresh (on head), human, non-author, with no outstanding changes-requested (CI) |

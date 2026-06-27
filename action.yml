@@ -43,6 +43,10 @@ runs:
       run: |
         set -euo pipefail
         if [ "$ENGINE_INPUT" = "vendored" ]; then
+          if [ "${{ github.event_name }}" = "pull_request_target" ]; then
+            echo "::error::engine=vendored under pull_request_target executes untrusted PR-head code with a privileged token. Use engine=pinned (default), or the pull_request trigger."
+            exit 1
+          fi
           engine="$CONFIG_DIR/.ratchet/ratchet.py"
         else
           engine="$ACTION_PATH/ratchet.py"
@@ -88,9 +92,16 @@ runs:
                   login: .author.login, state: .state, commit_id: .commit.oid,
                   is_bot: (.author.__typename=="Bot"), author_association: .authorAssociation }]' \
           > "$reviews" || echo '[]' > "$reviews"
-        gh pr checks "$PR" --json name,state > "$checks" 2>/dev/null || echo '[]' > "$checks"
-        # protected_path consumes the flat approvals list; the *_approval primitives consume reviews — pass both.
-        approvals="$(jq -r '[.[] | select(.state=="APPROVED") | .login] | unique | join(",")' "$reviews")"
+        # Fail CLOSED: `gh pr checks` exits non-zero when checks are failing/pending but still
+        # writes the JSON — keep it; fall back to [] only when the output is genuinely empty
+        # (no checks configured), never conflating "red/pending" with "none" (that would let
+        # require_checks_green pass vacuously).
+        gh pr checks "$PR" --json name,state > "$checks" 2>/dev/null || true
+        [ -s "$checks" ] || echo '[]' > "$checks"
+        # The flat approvals list must already be FRESH (on head), human, and non-author so a
+        # stale or bot approval can't satisfy protected_path. The engine re-verifies via reviews.
+        approvals="$(jq -r --arg head "$HEAD_SHA" --arg author "$PR_AUTHOR" \
+          '[.[] | select(.state=="APPROVED" and (.is_bot|not) and .login!=$author and .commit_id==$head) | .login] | unique | join(",")' "$reviews")"
         python3 "$ENGINE" check --cwd "$CONFIG_DIR" \
           --pr-body-file "$body" \
           --reviews-file "$reviews" \

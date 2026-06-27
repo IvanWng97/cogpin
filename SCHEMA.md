@@ -124,7 +124,7 @@ The agent's command string.
 
 | primitive | params | blocks when |
 |---|---|---|
-| `protected_path` | `paths`, `require_approval` | a gate-defining file changed without an independent approval |
+| `protected_path` | `paths`, `require_approval` | a gate-defining file changed without a **fresh, human, non-author** approval — when the `reviews` fact is present (CI), the approval must be on the current `head_sha`, not a bot, and not the author, so an approval of an earlier benign commit can't cover a later one (a flat `--approvals` list with no review metadata is only a degraded fallback). Born `warn` in the scaffold for solo repos (no independent approver); promote to `block` with a reviewer |
 | `require_approval_from` | `paths`, `require_approval_from` (logins), `exclude_author` | a change under `paths` has no APPROVED review from a listed owner |
 | `pattern_requires_approval` | `pattern`, `scope`, `exclude_author` | an added line in scope matches `pattern` but has no independent approval |
 | `approval_state_depth` | `require_fresh`, `no_changes_requested`, `disallow_author`, `disallow_bot`, `min_approvals` | the qualifying-approval count is below `min_approvals`, or an outstanding `CHANGES_REQUESTED` remains |
@@ -192,4 +192,7 @@ a fresh clone. The composite GitHub Action (`uses: IvanWng97/ratchet@v1`) runs i
 (`engine: pinned`), so neither the judge (engine) nor the policy (config) is read
 from the PR head — a PR can't self-neuter the gate. `engine: vendored` runs the
 consumer's HEAD `.ratchet/ratchet.py` instead, for teams that pin `.ratchet/**` via
-`protected_path` + branch protection.
+`protected_path` + branch protection — the action **refuses `engine: vendored` under
+`pull_request_target`** (it would execute untrusted PR-head code with a privileged
+token). Pin the action to a release SHA (`uses: IvanWng97/ratchet@<sha>`) for a
+fully reproducible engine; the `@v1` floating major tag is convenience, not a pin.

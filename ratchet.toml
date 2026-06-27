@@ -52,12 +52,16 @@ severity = "block"
 primitive = "secret_scan"
 forbid_paths = [".env", ".env.*", "*.env", "*.pem", "*.key", "id_rsa", "*.p12"]
 
-# Gate-defining files can't change without an independent approval (PR context only;
-# local pre-push skips, CI populates approvals). This is the bypass-proof keystone.
+# Gate-defining files can't change without a FRESH, non-bot, non-author approval (PR
+# context only; local pre-push skips, CI populates reviews). The bypass-proof keystone.
+# severity=warn because this repo is solo: GitHub forbids self-approval, so a `block`
+# here would be unclearable on every gate-touching PR. Promote to "block" the day a
+# second maintainer / CODEOWNERS reviewer exists. The agent-layer `self-protect` above
+# already hard-blocks in-session edits, and base-pinning still reads policy from base.
 [[check]]
 id = "protected-gate-files"
 kind = "fact"
-severity = "block"
+severity = "warn"
 primitive = "protected_path"
 paths = ["ratchet.toml", "ratchet.py", "action.yml", "hooks/hooks.json", ".github/workflows/**", ".claude-plugin/**"]
 
