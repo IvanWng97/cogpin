@@ -24,11 +24,14 @@ from ratchet import (  # noqa: E402
     RepoCfg,
     RepoScan,
     _atomic_write,
+    _config_advisories,
     _detect_hook_manager,
     _effective_hook_target,
     _ensure_gitignore,
     _git_ops,
     _glob_to_re,
+    _install_prepush,
+    _marked_ids,
     _protects_gate_files,
     _replace_or_append_block,
     _strip_block,
@@ -874,6 +877,30 @@ class TestFullCoverage(unittest.TestCase):
         self.assertIsNotNone(require_checks_green(c, DiffFacts(checks=[{"name": "ci", "conclusion": "failure"}])))
         self.assertIsNotNone(require_checks_green(c, DiffFacts(checks=[{"name": "ci", "conclusion": None}])))  # pending
 
+    def test_require_checks_green_ignore_excludes_self(self):
+        """#5: ratchet's own job is pending while it gates the same run; `ignore` drops it
+        from the all-green requirement so the gate doesn't self-block."""
+        pending_self = [{"name": "ci", "conclusion": "success"},
+                        {"name": "ratchet", "conclusion": None}]  # its own job, pending
+        racy = one_check('[[check]]\nid="rcg"\nkind="fact"\nseverity="block"\nprimitive="require_checks_green"')
+        self.assertIsNotNone(require_checks_green(racy, DiffFacts(checks=pending_self)))  # self-blocks
+        guarded = one_check('[[check]]\nid="rcg"\nkind="fact"\nseverity="block"\n'
+                            'primitive="require_checks_green"\nignore=["ratchet"]')
+        self.assertIsNone(require_checks_green(guarded, DiffFacts(checks=pending_self)))  # excluded → green
+        # ignore does NOT mask a genuinely failing OTHER check
+        pending_self[0] = {"name": "ci", "conclusion": "failure"}
+        self.assertIsNotNone(require_checks_green(guarded, DiffFacts(checks=pending_self)))
+
+    def test_require_checks_green_advisory(self):
+        """#5: validate surfaces the racy unconstrained shape (neither need nor ignore) but
+        does not flag a guarded one."""
+        racy = Config.parse('schema=1\n[repo]\ndefault_branch="main"\n[[check]]\nid="rcg"\n'
+                            'kind="fact"\nseverity="block"\nprimitive="require_checks_green"')
+        self.assertTrue(any("require_checks_green" in n for n in _config_advisories(racy)))
+        guarded = Config.parse('schema=1\n[repo]\ndefault_branch="main"\n[[check]]\nid="rcg"\n'
+                               'kind="fact"\nseverity="block"\nprimitive="require_checks_green"\nignore=["ratchet"]')
+        self.assertEqual(_config_advisories(guarded), [])
+
 
 class TestGlobGuessing(unittest.TestCase):
     """guess_globs — dominant-language detection + keep-only-matching globs."""
@@ -1101,6 +1128,21 @@ class TestDraftLint(unittest.TestCase):
     def test_unknown_key_rejected(self):
         bad = self._clean() + '\n[[check]]\nid = "x"\nkind = "fact"\nseverity = "warn"\nprimitive = "secret_scan"\nforbid_path = "x"\n'
         self.assertIn("error", self._levels(bad))
+
+    def test_marker_skips_blanks_not_comments(self):
+        """#6: only blank lines may sit between a marker and its [[check]]. A marker above a
+        commented-out check must NOT bind to a LATER live check (which would mis-flag it)."""
+        bound = '# TODO(ratchet:review)\n\n[[check]]\nid = "near"\nkind="fact"\nseverity="warn"\nprimitive="secret_scan"\n'
+        self.assertEqual(_marked_ids(bound), {"near"})  # blank line still skipped
+        spaced = (
+            '# TODO(ratchet:review)\n'
+            '# [[check]]\n'
+            '# id = "commented"\n'
+            '[[check]]\n'
+            'id = "live"\n'
+            'kind="fact"\nseverity="block"\nprimitive="secret_scan"\n'
+        )
+        self.assertEqual(_marked_ids(spaced), set())  # comment ends the association
 
     def test_base_pinned_false_rejected(self):
         bad = self._clean().replace("base_pinned = true", "base_pinned = false")
@@ -1516,6 +1558,25 @@ class TestInstall(_GitRepo):
         self._w("lefthook.yml", "pre-commit:\n")
         _quiet(cmd_install, self.d)
         self.assertFalse(os.path.exists(self._prepush()))
+
+    def test_prepush_append_preserves_existing_perms(self):
+        """#6: appending the managed block keeps the existing hook's perms (only ensures +x),
+        never widening an existing husky/.githooks file to 0o755."""
+        pp = self._prepush()
+        os.makedirs(os.path.dirname(pp), exist_ok=True)
+        with open(pp, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\necho custom\n")
+        os.chmod(pp, 0o640)  # rw-r----- : non-exec, narrower than 0o755
+        _install_prepush(pp)
+        self.assertEqual(os.stat(pp).st_mode & 0o777, 0o751)  # preserved 0o640 + ensured +x
+        self.assertIn(RATCHET_BEGIN, self._read(".git/hooks/pre-push"))
+
+    def test_prepush_new_hook_is_executable(self):
+        """A hook ratchet authors from scratch is 0o755."""
+        pp = self._prepush()
+        os.makedirs(os.path.dirname(pp), exist_ok=True)
+        _install_prepush(pp)
+        self.assertEqual(os.stat(pp).st_mode & 0o777, 0o755)
 
     def test_self_vendor_short_circuits(self):
         """Running install FROM the already-vendored copy must not truncate it."""

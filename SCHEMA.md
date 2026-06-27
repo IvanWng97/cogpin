@@ -128,7 +128,12 @@ The agent's command string.
 | `require_approval_from` | `paths`, `require_approval_from` (logins), `exclude_author` | a change under `paths` has no APPROVED review from a listed owner |
 | `pattern_requires_approval` | `pattern`, `scope`, `exclude_author` | an added line in scope matches `pattern` but has no independent approval |
 | `approval_state_depth` | `require_fresh`, `no_changes_requested`, `disallow_author`, `disallow_bot`, `min_approvals` | the qualifying-approval count is below `min_approvals`, or an outstanding `CHANGES_REQUESTED` remains |
-| `require_checks_green` | `need` (check names; empty = all) | a required status check did not conclude `success` |
+| `require_checks_green` | `need` (allowlist of check names; empty = all), `ignore` (denylist) | a required status check did not conclude `success` |
+
+> **Same-workflow race:** when ratchet runs as a job in the *same* workflow it gates, its
+> own check is still pending at query time and a bare `require_checks_green` (no `need`/`ignore`)
+> would self-block. Exclude it with `ignore = ["<ratchet job name>"]`, or `need` only the other
+> checks. `ratchet validate` prints a `note:` when neither is set.
 
 These read CI-supplied facts via `ratchet check` flags: `--pr-body-file`,
 `--approvals`, `--reviews-file` (a `gh pr view --json reviews` dump), `--head-sha`,
