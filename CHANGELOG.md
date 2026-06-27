@@ -6,6 +6,13 @@ config `schema` version is separate and bumps only on a breaking config change.
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-06-27
+
+First stable release. The `@v1` floating major tag and the `/v1/` raw-engine URL
+now resolve; `IvanWng97/ratchet@v1` and the curl install are live. SemVer applies
+to the v1 surface from here — features and fixes ship as v1.x; a breaking change
+goes to `v2`. The config `schema` version (currently `1`) is a separate lever.
+
 ### Security / hardening (two-lens review of the adoption arc)
 - **`protected_path` now requires a FRESH, human, non-author approval** when the `reviews`
   fact is present (CI). Previously it accepted any non-empty approvals list, so an approval
