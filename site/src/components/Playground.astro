@@ -1,8 +1,12 @@
 ---
-// Interactive playground: loads Pyodide (CPython in WASM), writes the REAL shipped
+// Interactive playground: loads Pyodide (CPython in WASM), drops the REAL shipped
 // ratchet.py + glue.py into its virtual FS, and runs the engine against a DiffFacts
-// built from the editor's mini-diff — no git, no server, the actual engine judging
-// live in the browser. The same glue is unit-tested under local python3.
+// built from the mini-diff editor — no git, no server, the actual engine judging in
+// the browser. The same glue is unit-tested under local python3.
+//
+// Each editor is a transparent <textarea> over a highlighted <pre> mirror (kept in
+// sync on input + scroll), so you type plain text but see it syntax-highlighted. The
+// whole widget is a fixed-dark console in both light and dark themes, like the hero.
 const base = import.meta.env.BASE_URL;
 ---
 
@@ -10,11 +14,17 @@ const base = import.meta.env.BASE_URL;
   <div class="pg-grid">
     <div class="pg-pane">
       <label class="pg-h" for="pg-toml">ratchet.toml <span>— your policy</span></label>
-      <textarea id="pg-toml" class="pg-edit" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+      <div class="pg-ed">
+        <pre class="pg-hl" aria-hidden="true"><code data-hl="pg-toml"></code></pre>
+        <textarea id="pg-toml" class="pg-edit" data-lang="toml" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
+      </div>
     </div>
     <div class="pg-pane">
       <label class="pg-h" for="pg-scen">change <span>— what the agent did</span></label>
-      <textarea id="pg-scen" class="pg-edit" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+      <div class="pg-ed">
+        <pre class="pg-hl" aria-hidden="true"><code data-hl="pg-scen"></code></pre>
+        <textarea id="pg-scen" class="pg-edit" data-lang="diff" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
+      </div>
       <p class="pg-legend"><code>A/M/D path</code> file · <code>+ line</code> added · <code>- line</code> removed · <code>$ cmd</code> command · <code>@ branch</code> · <code>write&gt; path</code> · <code>commit&gt; msg</code></p>
     </div>
   </div>
@@ -33,47 +43,215 @@ const base = import.meta.env.BASE_URL;
 </div>
 
 <style>
-  .pg { border: 1px solid var(--sl-color-gray-5); border-radius: 12px; overflow: hidden; background: var(--sl-color-black); }
-  .pg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--sl-color-gray-5); }
-  @media (max-width: 640px) { .pg-grid { grid-template-columns: 1fr; } }
-  .pg-pane { background: var(--sl-color-black); display: flex; flex-direction: column; }
-  .pg-h { font-size: 12px; padding: 9px 12px 5px; color: var(--sl-color-white); font-weight: 600; }
-  .pg-h span { color: var(--sl-color-gray-3); font-weight: 400; }
+  /* A self-contained dark console — fixed palette so it reads the same in light
+     and dark themes (like an embedded editor), instead of fighting Starlight's
+     theme tokens. */
+  .pg {
+    --c-bg: #0d1117;
+    --c-bg2: #161b22;
+    --c-bd: #283039;
+    --c-fg: #c9d1d9;
+    --c-dim: #8b949e;
+    --c-key: #79c0ff;
+    --c-str: #a5d6ff;
+    --c-num: #d2a8ff;
+    --c-bool: #ff7b72;
+    --c-sec: #ffa657;
+    --c-add: #7ee787;
+    --c-del: #ffa198;
+    --c-cmd: #79c0ff;
+    --c-br: #e3b341;
+    --c-meta: #d2a8ff;
+    --c-accent: #2f81f7;
+    overflow: hidden;
+    border: 1px solid var(--c-bd);
+    border-radius: 12px;
+    background: var(--c-bg);
+    color: var(--c-fg);
+    font-family: var(--__sl-font-mono, ui-monospace, "SF Mono", Menlo, monospace);
+  }
+  .pg-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: var(--c-bd);
+  }
+  @media (max-width: 640px) {
+    .pg-grid { grid-template-columns: 1fr; }
+  }
+  .pg-pane { display: flex; flex-direction: column; background: var(--c-bg); }
+  .pg-h { padding: 9px 12px 6px; color: var(--c-fg); font-size: 12px; font-weight: 600; }
+  .pg-h span { color: var(--c-dim); font-weight: 400; }
+
+  /* The editor stack: highlighted <pre> behind a transparent <textarea>.
+     Both layers MUST share every metric so the glyphs land on top of each other. */
+  .pg-ed { position: relative; display: flex; flex: 1; }
+  .pg-edit,
+  .pg-hl {
+    margin: 0;
+    padding: 4px 12px 12px;
+    border: 0;
+    font: inherit;
+    font-size: 13px;
+    line-height: 1.55;
+    tab-size: 2;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
   .pg-edit {
-    flex: 1; min-height: 232px; resize: vertical; border: 0; outline: 0;
-    background: var(--sl-color-black); color: var(--sl-color-gray-1);
-    font-family: var(--__sl-font-mono, ui-monospace, Menlo, monospace); font-size: 13px; line-height: 1.55;
-    padding: 4px 12px 12px; tab-size: 2;
+    flex: 1;
+    min-height: 230px;
+    resize: none;
+    outline: 0;
+    background: transparent;
+    color: transparent;
+    caret-color: var(--c-fg);
   }
-  .pg-legend { margin: 0; padding: 7px 12px; font-size: 11px; color: var(--sl-color-gray-3); border-top: 1px solid var(--sl-color-gray-6); }
-  .pg-legend code { font-size: 11px; }
-  .pg-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 11px 12px; border-top: 1px solid var(--sl-color-gray-5); }
-  .pg-presets { color: var(--sl-color-gray-3); font-size: 13px; }
+  .pg-hl {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+    color: var(--c-fg);
+  }
+  .pg-hl code { font: inherit; }
+
+  /* token colors */
+  .t-cm, .d-cm { color: var(--c-dim); font-style: italic; }
+  .t-sec { color: var(--c-sec); font-weight: 600; }
+  .t-key { color: var(--c-key); }
+  .t-str { color: var(--c-str); }
+  .t-num { color: var(--c-num); }
+  .t-bool { color: var(--c-bool); }
+  .t-pun { color: var(--c-dim); }
+  .d-A { color: var(--c-add); } .d-M { color: var(--c-br); } .d-D { color: var(--c-del); }
+  .d-add { color: var(--c-add); } .d-del { color: var(--c-del); }
+  .d-cmd { color: var(--c-cmd); } .d-br { color: var(--c-br); } .d-meta { color: var(--c-meta); }
+
+  .pg-legend { margin: 0; padding: 7px 12px; border-top: 1px solid var(--c-bd); color: var(--c-dim); font-size: 11px; }
+  .pg-legend code { background: var(--c-bg2); color: var(--c-fg); font-size: 11px; padding: 1px 4px; border-radius: 4px; }
+
+  .pg-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 11px 12px;
+    border-top: 1px solid var(--c-bd);
+    background: var(--c-bg2);
+  }
+  .pg-presets { color: var(--c-dim); font-size: 13px; }
   .pg-preset {
-    font-size: 12.5px; padding: 4px 11px; border-radius: 999px; cursor: pointer;
-    border: 1px solid var(--sl-color-gray-5); background: var(--sl-color-gray-6); color: var(--sl-color-white);
+    padding: 4px 11px;
+    border: 1px solid var(--c-bd);
+    border-radius: 999px;
+    background: var(--c-bg);
+    color: var(--c-fg);
+    font-size: 12.5px;
+    cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease;
   }
-  .pg-preset:hover { border-color: var(--sl-color-accent); }
+  .pg-preset:hover { border-color: var(--c-accent); color: #fff; }
   .pg-run {
-    margin-left: auto; font-size: 13.5px; font-weight: 600; padding: 6px 16px; border-radius: 8px; cursor: pointer;
-    border: 1px solid var(--sl-color-accent); background: var(--sl-color-accent); color: var(--sl-color-accent-low);
+    margin-left: auto;
+    padding: 6px 16px;
+    border: 1px solid var(--c-accent);
+    border-radius: 8px;
+    background: var(--c-accent);
+    color: #fff;
+    font-size: 13.5px;
+    font-weight: 600;
+    cursor: pointer;
   }
-  .pg-run[disabled] { opacity: .55; cursor: progress; }
-  .pg-out { padding: 14px; min-height: 84px; font-family: var(--__sl-font-mono, ui-monospace, Menlo, monospace); font-size: 13px; border-top: 1px solid var(--sl-color-gray-5); }
-  .pg-boot { color: var(--sl-color-gray-3); }
+  .pg-run[disabled] { opacity: 0.55; cursor: progress; }
+
+  .pg-out {
+    padding: 14px;
+    min-height: 84px;
+    border-top: 1px solid var(--c-bd);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .pg-boot { color: var(--c-dim); }
   .pg-boot::before { content: "⏳ "; }
-  .pg-status { display: inline-block; font-weight: 700; padding: 3px 10px; border-radius: 7px; margin-bottom: 10px; }
+  .pg-status { display: inline-block; margin-bottom: 10px; padding: 3px 10px; border-radius: 7px; font-weight: 700; }
   .pg-status.bad { background: #2a1014; color: #ff7a85; border: 1px solid #5b2026; }
   .pg-status.good { background: #0e2417; color: #4ade80; border: 1px solid #1f5236; }
-  .pg-group { color: var(--sl-color-gray-3); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin: 10px 0 4px; }
-  .pg-f { margin: 3px 0; padding-left: 2px; }
-  .pg-f .tag { font-weight: 700; margin-right: 7px; }
-  .pg-f.block .tag { color: #ff7a85; } .pg-f.warn .tag { color: #febc2e; }
-  .pg-f .id { color: var(--sl-color-white); } .pg-f .why { color: var(--sl-color-gray-2); }
-  .pg-err { color: #ff7a85; white-space: pre-wrap; }
+  .pg-group { margin: 12px 0 4px; color: var(--c-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .pg-f { margin: 3px 0; }
+  .pg-f .tag { margin-right: 7px; font-weight: 700; }
+  .pg-f.block .tag { color: var(--c-del); } .pg-f.warn .tag { color: var(--c-br); }
+  .pg-f .id { color: var(--c-fg); } .pg-f .why { color: var(--c-dim); }
+  .pg-err { color: var(--c-del); white-space: pre-wrap; }
 </style>
 
 <script>
+  // ---- syntax highlighting (mirror layer) -------------------------------------
+  const esc = (s: string) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]!);
+
+  function hlValue(v: string): string {
+    const re = /("(?:[^"\\]|\\.)*")|(\b(?:true|false)\b)|(-?\d+\.?\d*)|([[\],])|([^"\d[\]]+)/g;
+    let out = '', m: RegExpExecArray | null;
+    while ((m = re.exec(v))) {
+      if (m[1]) out += `<span class="t-str">${esc(m[1])}</span>`;
+      else if (m[2]) out += `<span class="t-bool">${esc(m[2])}</span>`;
+      else if (m[3]) out += `<span class="t-num">${esc(m[3])}</span>`;
+      else if (m[4]) out += `<span class="t-pun">${esc(m[4])}</span>`;
+      else out += esc(m[0]);
+    }
+    return out;
+  }
+
+  function hlToml(src: string): string {
+    return src.split('\n').map((line) => {
+      // split off a trailing comment (a '#' outside any string)
+      let inStr = false, ci = -1;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"') inStr = !inStr;
+        else if (ch === '#' && !inStr) { ci = i; break; }
+      }
+      const code = ci >= 0 ? line.slice(0, ci) : line;
+      const comment = ci >= 0 ? `<span class="t-cm">${esc(line.slice(ci))}</span>` : '';
+      const trimmed = code.trimStart();
+      let body: string;
+      if (/^\[\[?.*\]?\]\s*$/.test(trimmed)) {
+        body = `<span class="t-sec">${esc(code)}</span>`;
+      } else {
+        const eq = code.indexOf('=');
+        body = eq >= 0
+          ? `<span class="t-key">${esc(code.slice(0, eq))}</span>=${hlValue(code.slice(eq + 1))}`
+          : esc(code);
+      }
+      return body + comment;
+    }).join('\n');
+  }
+
+  function hlDiff(src: string): string {
+    return src.split('\n').map((line) => {
+      const t = line.trimStart();
+      const cls =
+        /^[AMD]\s/.test(t) ? 'd-' + t[0] :
+        t.startsWith('+') ? 'd-add' :
+        t.startsWith('-') ? 'd-del' :
+        t.startsWith('$') ? 'd-cmd' :
+        t.startsWith('@') ? 'd-br' :
+        /^(?:write|commit)>/.test(t) ? 'd-meta' :
+        t.startsWith('#') ? 'd-cm' : '';
+      return cls ? `<span class="${cls}">${esc(line)}</span>` : esc(line);
+    }).join('\n');
+  }
+
+  function paint(ta: HTMLTextAreaElement) {
+    const code = ta.parentElement!.querySelector<HTMLElement>('.pg-hl code')!;
+    const hl = ta.dataset.lang === 'toml' ? hlToml(ta.value) : hlDiff(ta.value);
+    code.innerHTML = hl + '\n'; // trailing newline keeps the last line in view
+    const pre = code.parentElement!;
+    pre.scrollTop = ta.scrollTop;
+    pre.scrollLeft = ta.scrollLeft;
+  }
+
+  // ---- the engine -------------------------------------------------------------
   const STARTER = `schema = 1
 [repo]
 default_branch = "main"
@@ -190,10 +368,6 @@ prompt = "is the code good?"
     return pyodide;
   }
 
-  function esc(s: string) {
-    return s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]!);
-  }
-
   function render(out: HTMLElement, res: any) {
     if (!res.ok) {
       out.innerHTML = `<div class="pg-status bad">config invalid</div><div class="pg-err">${esc(res.error || '')}</div>`;
@@ -226,8 +400,14 @@ prompt = "is the code good?"
     const out = pg.querySelector<HTMLElement>('[data-out]')!;
     const runBtn = pg.querySelector<HTMLButtonElement>('[data-run]')!;
 
-    toml.value = PRESETS.strip.toml;
-    scen.value = PRESETS.strip.scen;
+    for (const ta of [toml, scen]) {
+      ta.addEventListener('input', () => paint(ta));
+      ta.addEventListener('scroll', () => paint(ta));
+    }
+    const setVal = (ta: HTMLTextAreaElement, v: string) => { ta.value = v; paint(ta); };
+
+    setVal(toml, PRESETS.strip.toml);
+    setVal(scen, PRESETS.strip.scen);
 
     async function run() {
       runBtn.disabled = true;
@@ -248,8 +428,8 @@ prompt = "is the code good?"
     pg.querySelectorAll<HTMLButtonElement>('.pg-preset').forEach((b) =>
       b.addEventListener('click', () => {
         const p = PRESETS[b.dataset.preset!];
-        toml.value = p.toml;
-        scen.value = p.scen;
+        setVal(toml, p.toml);
+        setVal(scen, p.scen);
         run();
       })
     );
