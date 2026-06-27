@@ -103,10 +103,19 @@ const base = import.meta.env.BASE_URL;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     word-break: break-word;
+    /* Pin text inflation on BOTH layers: iOS can auto-inflate a <textarea> and a
+       <pre> by different ratios on rotation, which would desync the glyphs even
+       though every other metric matches. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
   }
   .pg-edit {
     display: block;
     width: 100%;
+    /* No max-height: capping the height makes the textarea scroll internally,
+       which reserves a scrollbar gutter the gutterless mirror doesn't — and the
+       two layers wrap at different widths again (the exact bug this auto-grow
+       fixes). If a cap is ever needed, reserve the gutter on BOTH layers. */
     min-height: 7em;
     height: auto;
     resize: none;
@@ -420,7 +429,13 @@ prompt = "is the code good?"
       ta.addEventListener('input', () => paint(ta));
     }
     // Re-fit after a width change (rewrap changes height) and after fonts settle.
-    const refit = () => { fit(toml); fit(scen); };
+    // Coalesce into one rAF so a resize/rotation storm doesn't thrash layout (each
+    // fit() forces a write→read→write; rotation fires resize continuously).
+    let raf = 0;
+    const refit = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => { raf = 0; fit(toml); fit(scen); });
+    };
     window.addEventListener('resize', refit);
     window.addEventListener('load', refit);
     const setVal = (ta: HTMLTextAreaElement, v: string) => { ta.value = v; paint(ta); };
