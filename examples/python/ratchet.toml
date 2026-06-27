@@ -1,0 +1,134 @@
+# ratchet recipe — a Python repo. Lift it, adjust the globs, validate:
+#   python3 .ratchet/ratchet.py validate
+# The one rule: severity="block" REQUIRES kind="fact".
+schema = 1
+
+[repo]
+default_branch = "main"
+code = ["src/**/*.py", "*.py"]
+tests = ["tests/**/*.py", "**/test_*.py", "**/*_test.py"]
+docs = ["**/*.md", "docs/**"]
+
+[meta]
+base_pinned = true
+bypass_env = "RATCHET_BYPASS"          # agent-layer escape hatch (always logged)
+
+# ── agent layer (real-time PreToolUse) ───────────────────────────────────────
+[[check]]
+id = "no-verify"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "forbid_command"
+pattern = "--no-verify|--no-gpg-sign"
+
+# "If on main, branch first."
+[[check]]
+id = "branch-first"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "forbid_commit_on_branch"
+branch = ["main", "master"]
+ops = ["commit", "push"]
+
+# ── change layer (pre-push + CI, authoritative, base-pinned) ─────────────────
+[[check]]
+id = "secret-scan"
+kind = "fact"
+severity = "block"
+primitive = "secret_scan"
+forbid_paths = [".env", ".env.*", "*.env", "*.pem", "*.key", "id_rsa", "*.p12"]
+
+# A stray debugger left in committed code.
+[[check]]
+id = "no-debugger"
+kind = "fact"
+severity = "block"
+primitive = "forbid_pattern"
+pattern = '\bbreakpoint\s*\(|\bpdb\.set_trace\b|\bimport\s+pdb\b'
+scope = "code"
+strip_comments = true
+
+# Test-disabling markers added to silence a failure (skip / xfail) — a fact, and a
+# canonical "make it green by doing less" cut. WARN: some skips are legitimate.
+[[check]]
+id = "no-test-skips"
+kind = "fact"
+severity = "warn"
+primitive = "forbid_pattern"
+pattern = '@(?:unittest\.skip|pytest\.mark\.(?:skip|xfail))\b|\bself\.skipTest\b'
+scope = "tests"
+
+# "Delete the failing test to go green" — a whole test-file deletion, unless a
+# test file is added in the same change (a rename/reorg).
+[[check]]
+id = "no-test-delete"
+kind = "fact"
+severity = "block"
+primitive = "forbid_delete"
+scope = "tests"
+unless_paired_add = true
+
+# "Strip the assertion" — a REMOVED assert under the test tree (the '-' twin of
+# forbid_pattern). Closes the silent-weakening cut a content scanner can't see.
+[[check]]
+id = "keep-asserts"
+kind = "fact"
+severity = "block"
+primitive = "forbid_removal"
+pattern = '\bassert\b|\bself\.assert'
+scope = "tests"
+
+# Touch source → touch docs (existence-floor; "right doc?" is judged elsewhere).
+[[check]]
+id = "docs-currency"
+kind = "fact"
+severity = "warn"
+primitive = "path_requires"
+when = "code"
+need = "docs"
+
+# Coverage ratchet: a lowered `fail_under` (or a shortened timeout / raised retries)
+# is byte-identical to a raise to a one-side scanner — numeric_floor pairs the number
+# across the −/+ hunks on the same key and blocks a WEAKENING direction.
+[[check]]
+id = "coverage-ratchet"
+kind = "fact"
+severity = "block"
+primitive = "numeric_floor"
+key = 'fail_under\s*=\s*(\d+)'
+direction = "no_decrease"
+scope = ["pyproject.toml", "setup.cfg", ".coveragerc", "tox.ini"]
+
+# Every NEW source file carries an SPDX license header — a positive content floor
+# (the structural inverse of forbid_pattern). status defaults to "A" (added files).
+[[check]]
+id = "spdx-header"
+kind = "fact"
+severity = "warn"
+primitive = "file_must_contain"
+scope = ["src/**/*.py"]
+pattern = 'SPDX-License-Identifier:'
+status = "A"
+
+# A new third-party dependency needs an independent (non-author) approval — the
+# supply-chain cut. SKIPS on local pre-push (no PR context); CI supplies the reviews.
+[[check]]
+id = "deps-need-approval"
+kind = "fact"
+severity = "block"
+primitive = "pattern_requires_approval"
+pattern = '^\s*"[A-Za-z0-9._-]+(?:[=<>!~]=|>=|<=).*"'
+scope = ["pyproject.toml", "requirements*.txt"]
+exclude_author = true
+
+# THE teeth: the change layer runs the real suite from the base-pinned policy.
+# Pin the config (`-c`, isolated) so a head-side pyproject edit can't defang it.
+[[check]]
+id = "tests-pass"
+kind = "fact"
+severity = "block"
+layer = "change"
+primitive = "run"
+cmd = "python3 -m pytest -q"

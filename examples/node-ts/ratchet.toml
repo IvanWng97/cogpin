@@ -1,0 +1,188 @@
+# ratchet recipe — a Node / TypeScript repo. Lift it, adjust the globs, validate:
+#   python3 .ratchet/ratchet.py validate
+# The one rule: severity="block" REQUIRES kind="fact".
+schema = 1
+
+[repo]
+default_branch = "main"
+code = ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js"]
+tests = ["**/*.test.ts", "**/*.spec.ts", "test/**", "tests/**", "__tests__/**"]
+docs = ["**/*.md", "docs/**"]
+
+[meta]
+base_pinned = true
+bypass_env = "RATCHET_BYPASS"          # agent-layer escape hatch (always logged)
+
+# ── agent layer (real-time PreToolUse) ───────────────────────────────────────
+[[check]]
+id = "no-verify"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "forbid_command"
+pattern = "--no-verify|--no-gpg-sign|HUSKY=0"
+
+# "If on main, branch first."
+[[check]]
+id = "branch-first"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "forbid_commit_on_branch"
+branch = ["main", "master"]
+ops = ["commit", "push"]
+
+# Real-time deny of a Write/Edit to a gate-defining file (the agent can't loosen its
+# own gate mid-session). The change-layer `require-owner-approval` below is the
+# authoritative PR backstop.
+[[check]]
+id = "self-protect"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "self_protect"
+paths = ["ratchet.toml", ".ratchet/**", ".github/workflows/**", ".husky/**", "package.json"]
+
+# ── change layer (pre-push + CI, authoritative, base-pinned) ─────────────────
+[[check]]
+id = "secret-scan"
+kind = "fact"
+severity = "block"
+primitive = "secret_scan"
+forbid_paths = [".env", ".env.*", "*.env", "*.pem", "*.key", "id_rsa", "*.p12"]
+
+# A focused test (`it.only` / `describe.only`) silently disables the rest of the
+# suite — a committed one is a green-by-doing-less cut. Block it.
+[[check]]
+id = "no-focused-tests"
+kind = "fact"
+severity = "block"
+primitive = "forbid_pattern"
+pattern = '\b(?:describe|it|test)\.only\s*\(|\bfdescribe\b|\bfit\b'
+scope = "tests"
+
+# `debugger;` / a stray console.log left in source.
+[[check]]
+id = "no-debugger"
+kind = "fact"
+severity = "warn"
+primitive = "forbid_pattern"
+pattern = '\bdebugger\b|console\.log\('
+scope = "code"
+strip_comments = true
+
+# "Delete the failing test to go green" — a whole test-file deletion, unless a
+# test file is added in the same change (a rename/reorg).
+[[check]]
+id = "no-test-delete"
+kind = "fact"
+severity = "block"
+primitive = "forbid_delete"
+scope = "tests"
+unless_paired_add = true
+
+# "Strip the assertion / the await" — a REMOVED guard line under the test tree.
+[[check]]
+id = "keep-test-guards"
+kind = "fact"
+severity = "warn"
+primitive = "forbid_removal"
+pattern = '\bexpect\s*\(|\bawait\b|\bassert\b'
+scope = "tests"
+
+# Touch source → touch docs (existence-floor; "right doc?" is judged elsewhere).
+[[check]]
+id = "docs-currency"
+kind = "fact"
+severity = "warn"
+primitive = "path_requires"
+when = "code"
+need = "docs"
+
+# Conventional-Commits subject (the literal shape — never the intent).
+[[check]]
+id = "conventional-commits"
+kind = "fact"
+severity = "warn"
+primitive = "require_message_pattern"
+pattern = '^(feat|fix|docs|chore|refactor|test|ci|build|perf|style|revert)(\(.+\))?!?: '
+msg_scope = ["commit_subject"]
+
+# Blast-radius budget — a 500+-line or 40+-file diff is past honest review. WARN: a
+# budget is advisory by nature (a big-but-legit refactor shouldn't hard-block).
+[[check]]
+id = "diff-budget"
+kind = "fact"
+severity = "warn"
+primitive = "change_budget"
+max_added = 500
+max_files = 40
+
+# No committed build artifact / vendored bundle / stray binary over 256KB (scope it
+# to keep designed assets out — point it at the dirs that should stay source-only).
+[[check]]
+id = "no-fat-blobs"
+kind = "fact"
+severity = "warn"
+primitive = "max_added_file_bytes"
+scope = ["src/**", "dist/**", "build/**"]
+maxkb = 256
+allow_binary = false
+
+# ── team / PR-review layer (CI supplies --reviews-file / --checks-file / --pr-author;
+#    every check below SKIPS on local pre-push, where there is no PR context) ─────────
+
+# A new dependency line in package.json needs an independent (non-author) approval —
+# the supply-chain corner-cut (slip a dep past review). The content twin of CODEOWNERS.
+[[check]]
+id = "deps-need-approval"
+kind = "fact"
+severity = "block"
+primitive = "pattern_requires_approval"
+pattern = '^\s*"[^"]+"\s*:\s*"[^"]+"'
+scope = ["**/package.json"]
+exclude_author = true
+
+# CODEOWNERS-lite: a change under a sensitive tree requires an APPROVED review from a
+# named owner (and never the author's own approval).
+[[check]]
+id = "require-owner-approval"
+kind = "fact"
+severity = "block"
+primitive = "require_approval_from"
+paths = ["src/auth/**", "**/migrations/**", ".github/workflows/**", "ratchet.toml"]
+require_approval_from = ["security-lead", "tech-lead"]
+exclude_author = true
+
+# The 'approved' badge alone is gameable (stale approval on an old commit, a bot
+# rubber-stamp, a self-approval, an unresolved CHANGES_REQUESTED). Require the
+# approval to be FRESH (on the head commit), human, non-author, with no outstanding
+# changes-requested.
+[[check]]
+id = "approval-is-fresh"
+kind = "fact"
+severity = "block"
+primitive = "approval_state_depth"
+require_fresh = true
+no_changes_requested = true
+disallow_author = true
+disallow_bot = true
+min_approvals = 1
+
+# Don't accept a red (or still-pending) tree. Every required status check must have
+# concluded `success`.
+[[check]]
+id = "checks-green"
+kind = "fact"
+severity = "block"
+primitive = "require_checks_green"
+
+# THE teeth: the change layer runs the real lint + test suite from the base-pinned
+# policy. Pin configs (`--config`, isolated) so a head-side edit can't defang them.
+[[check]]
+id = "lint-and-test"
+kind = "fact"
+severity = "block"
+layer = "change"
+primitive = "run"
+cmd = "npm run -s lint && npm test"

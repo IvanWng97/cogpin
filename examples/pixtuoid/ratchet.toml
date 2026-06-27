@@ -37,6 +37,30 @@ layer = "agent"
 primitive = "forbid_command"
 pattern = '--no-verify\b|\bSKIP_PREFLIGHT=1\b|\bgit\s+commit\b[^|&;]*\s-\w*n\b'
 
+# CLAUDE.md house rule: "if on main, branch first" + never commit straight to the
+# shared checkout. The current branch is a live agent-layer fact; deny commit/push
+# on main in real time (the fix is `git checkout -b` / a worktree).
+[[check]]
+id = "branch-first"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "forbid_commit_on_branch"
+branch = ["main"]
+ops = ["commit", "push"]
+
+# Real-time twin of `protected-gate-files`: deny a Write/Edit to a gate-defining file
+# (the vendored engine, the justfile, the hooks, the CI) the instant the agent reaches
+# for it — it can't quietly loosen its own gate mid-session. The change-layer
+# `protected_path` below stays the authoritative PR-approval backstop.
+[[check]]
+id = "self-protect"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "self_protect"
+paths = ["ratchet.toml", ".ratchet/ratchet.py", "justfile", ".github/workflows/**", ".claude/settings.json", ".githooks/**", ".dod/**"]
+
 # ── change layer (pre-push + CI, authoritative, base-pinned) ─────────────────
 
 # check_dod.py: no_verify_violations() — committed hook-skipping flag in a path
@@ -157,6 +181,28 @@ severity = "block"
 primitive = "protected_path"
 # post-adoption gate-defining files (check_dod.py is gone; the engine is vendored)
 paths = ["ratchet.toml", ".ratchet/ratchet.py", "justfile", ".github/workflows/**", ".claude/settings.json", ".githooks/**", ".dod/**"]
+
+# "Don't delete a test to go green." WARN (not block) here: pixtuoid reorganizes its
+# 8 test binaries often, and `unless_paired_add` already suppresses a paired
+# rename/reorg — so a surviving hit is a genuinely unpaired test deletion worth a look.
+[[check]]
+id = "no-test-delete"
+kind = "fact"
+severity = "warn"
+primitive = "forbid_delete"
+scope = "tests"
+unless_paired_add = true
+
+# "Don't silently strip the safety net." A REMOVED `#[test]` / proptest / assertion
+# line under the test tree — the '-' twin of forbid_pattern. WARN until a fresh
+# 0-false-block dry-run promotes it (the same caution that kept the port at 0 blocks).
+[[check]]
+id = "keep-test-assertions"
+kind = "fact"
+severity = "warn"
+primitive = "forbid_removal"
+pattern = '#\[test\]|proptest!|\bassert(?:_eq|_ne|_matches)?!'
+scope = "tests"
 
 # ── agent-layer attestation (the Stop-hook checklist; `ratchet stop` enforces it) ──
 # check_dod.py: attestation_gaps() — class-gated DoD boxes the agent ticks in

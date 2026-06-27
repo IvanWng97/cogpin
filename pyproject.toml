@@ -1,0 +1,22 @@
+# Dev-tooling config ONLY. ratchet ships as a SINGLE stdlib-only `ratchet.py` with
+# ZERO runtime dependencies — this file configures the linters, it is NOT a package
+# manifest and `pip install ratchet` is deliberately not a thing. The product is a
+# Claude Code plugin: the repo IS the install. (See README → "Why one file, no deps".)
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+# E501 long-line + E741 `l`=line in tiny comprehensions are intentional in a
+# hand-formatted single-file engine with long regex / template literals.
+ignore = ["E501", "E741"]
+
+[tool.ruff.lint.per-file-ignores]
+# the tests prepend the repo root to sys.path before importing the engine.
+"tests/*" = ["E402"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true

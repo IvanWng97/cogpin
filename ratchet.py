@@ -31,6 +31,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import tomllib
 from dataclasses import dataclass, field
 
@@ -96,11 +97,26 @@ PRIMITIVES = {
     "secret_scan",
     "forbid_command",
     "forbid_pattern",
+    "forbid_removal",
+    "forbid_delete",
+    "forbid_commit_on_branch",
+    "scope_lock",
+    "self_protect",
+    "forbid_in_message",
+    "require_message_pattern",
+    "numeric_floor",
+    "change_budget",
+    "file_must_contain",
+    "max_added_file_bytes",
     "path_requires",
     "cooccur",
     "marker_present",
     "commit_footer",
     "protected_path",
+    "require_approval_from",
+    "pattern_requires_approval",
+    "approval_state_depth",
+    "require_checks_green",
     "run",
     "attest",
     "judge",
@@ -159,6 +175,41 @@ class Check:
     forbid_paths: list[str] = field(default_factory=list)
     paths: list[str] = field(default_factory=list)
     require_approval: bool = True
+    # forbid_delete: a paired added file under the same scope (a rename/replace) suppresses
+    unless_paired_add: bool = False
+    # forbid_commit_on_branch: protected branch glob(s) + the git op(s) to deny on them
+    branch: list[str] = field(default_factory=list)
+    ops: list[str] = field(default_factory=list)
+    # scope_lock: the ONLY path globs a change may touch (a positive allowlist)
+    allow: list[str] = field(default_factory=list)
+    # forbid_in_message: literal tokens forbidden in commit/PR message text
+    tokens: list[str] = field(default_factory=list)
+    msg_scope: list[str] = field(default_factory=list)  # commit_subject|commit_body|pr_body (default all)
+    # forbid_command: a normalized-verb deny-list (defeats git -C/cd &&/env wrappers)
+    deny: list[str] = field(default_factory=list)
+    # numeric_floor: a key regex (group 1 = value) + a direction; optional absolute floor
+    key: str | None = None
+    direction: str | None = None
+    floor: float | None = None
+    # change_budget: count ceilings over the diff (None = no cap on that axis)
+    max_added: int | None = None
+    max_removed: int | None = None
+    max_files: int | None = None
+    max_file_added: int | None = None
+    # file_must_contain: the A/M/D status it gates (default "A" = added files only)
+    status: str | None = None
+    # max_added_file_bytes: a per-file byte ceiling (KB) + whether binary blobs are allowed
+    maxkb: int | None = None
+    allow_binary: bool = False
+    # require_approval_from / *_approval: reviewer-identity facts from the PR API
+    approvers: list[str] = field(default_factory=list)
+    exclude_author: bool = False
+    # approval_state_depth: deeper approval-state requirements
+    require_fresh: bool = False
+    no_changes_requested: bool = False
+    disallow_bot: bool = False
+    disallow_author: bool = False
+    min_approvals: int | None = None
     cls: str | None = None  # attestation class: always | feature | public_surface | claude_md
     box: str | None = None  # the attestation checkbox label to look for (defaults to id)
     prompt: str | None = None
@@ -173,6 +224,15 @@ def _as_list(v) -> list[str]:
     if isinstance(v, list):
         return [str(x) for x in v]
     raise ConfigError(f"expected string or list, got {type(v).__name__}")
+
+
+def _as_int(v) -> int | None:
+    """An optional integer field → int or None (a non-int is a hard config error)."""
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, int):
+        raise ConfigError(f"expected integer, got {type(v).__name__}")
+    return v
 
 
 @dataclass
@@ -237,6 +297,30 @@ class Config:
                         forbid_paths=_as_list(c.get("forbid_paths")),
                         paths=_as_list(c.get("paths")),
                         require_approval=bool(c.get("require_approval", True)),
+                        unless_paired_add=bool(c.get("unless_paired_add", False)),
+                        branch=_as_list(c.get("branch")),
+                        ops=_as_list(c.get("ops")),
+                        allow=_as_list(c.get("allow")),
+                        tokens=_as_list(c.get("tokens")),
+                        msg_scope=_as_list(c.get("msg_scope")),
+                        deny=_as_list(c.get("deny")),
+                        key=c.get("key"),
+                        direction=c.get("direction"),
+                        floor=(float(c["floor"]) if c.get("floor") is not None else None),
+                        max_added=_as_int(c.get("max_added")),
+                        max_removed=_as_int(c.get("max_removed")),
+                        max_files=_as_int(c.get("max_files")),
+                        max_file_added=_as_int(c.get("max_file_added")),
+                        status=c.get("status"),
+                        maxkb=_as_int(c.get("maxkb")),
+                        allow_binary=bool(c.get("allow_binary", False)),
+                        approvers=_as_list(c.get("require_approval_from")),
+                        exclude_author=bool(c.get("exclude_author", False)),
+                        require_fresh=bool(c.get("require_fresh", False)),
+                        no_changes_requested=bool(c.get("no_changes_requested", False)),
+                        disallow_bot=bool(c.get("disallow_bot", False)),
+                        disallow_author=bool(c.get("disallow_author", False)),
+                        min_approvals=_as_int(c.get("min_approvals")),
                         cls=c.get("class"),
                         box=c.get("box"),
                         prompt=c.get("prompt"),
@@ -277,6 +361,21 @@ class Config:
                 raise ConfigError(
                     f"check `{c.id}`: a `run` block must live at the change layer, not agent"
                 )
+            # The current branch is a LIVE agent-layer fact (read at the PreToolUse
+            # intercept); a pure change-layer placement would silently never fire.
+            if c.primitive == "forbid_commit_on_branch" and c.layer == "change":
+                raise ConfigError(
+                    f"check `{c.id}`: forbid_commit_on_branch reads the live branch — "
+                    f"declare layer=\"agent\" (or \"both\"), not change"
+                )
+            # self_protect reads the LIVE Write/Edit tool_input at the PreToolUse
+            # intercept — same constraint; the change-layer twin is protected_path.
+            if c.primitive == "self_protect" and c.layer == "change":
+                raise ConfigError(
+                    f"check `{c.id}`: self_protect reads the live Write/Edit target — "
+                    f"declare layer=\"agent\" (or \"both\"); the change-layer twin is "
+                    f"protected_path"
+                )
 
     @property
     def footer_regex(self) -> str | None:
@@ -292,7 +391,8 @@ ADDED, MODIFIED, DELETED = "A", "M", "D"
 
 @dataclass
 class DiffFacts:
-    added: list[tuple[str, str]] = field(default_factory=list)  # (path, added line)
+    added: list[tuple[str, str]] = field(default_factory=list)  # (new path, added line)
+    removed: list[tuple[str, str]] = field(default_factory=list)  # (old path, removed line)
     changed: list[tuple[str, str]] = field(default_factory=list)  # (status, path)
     # None = no PR context (local pre-push) → PR-body checks skip rather than false-fire.
     # "" = a real but empty PR body (CI) → a missing required marker DOES fail.
@@ -300,6 +400,13 @@ class DiffFacts:
     commit_msgs: list[str] = field(default_factory=list)
     # PR-review facts (None = no PR context → skip approval checks; [] = PR, zero approvals)
     approvals: list[str] | None = None
+    # Structured PR-review API facts (None = no PR context → the reviewer-identity
+    # primitives skip). Each review: {login, state, commit_id, is_bot, author_association}.
+    reviews: list[dict] | None = None
+    head_sha: str | None = None  # PR head commit, for the freshness check
+    pr_author: str | None = None  # to exclude self-approval
+    checks: list[dict] | None = None  # status checks: [{name, conclusion}]
+    file_sizes: dict | None = None  # {path → bytes}; -1 marks a binary blob
 
     def changed_paths(self):
         return (p for _, p in self.changed)
@@ -319,12 +426,22 @@ class DiffFacts:
                 f.changed.append((status, parts[-1]))
         diff = _git(cwd, ["diff", "--unified=0", rng])
         if diff:
-            cur = ""
+            # new = +++ b/<path> for added/modified; old = --- a/<path> for the removed
+            # side (the old path also covers whole-file deletes, where +++ is /dev/null).
+            new_path = old_path = ""
             for line in diff.splitlines():
-                if line.startswith("+++ b/"):
-                    cur = line[6:]
-                elif line.startswith("+") and not line.startswith("+++") and cur:
-                    f.added.append((cur, line[1:]))
+                if line.startswith("--- a/"):
+                    old_path = line[6:]
+                elif line.startswith("--- "):
+                    old_path = ""  # /dev/null (added file) → no removed-side path
+                elif line.startswith("+++ b/"):
+                    new_path = line[6:]
+                elif line.startswith("+++ "):
+                    new_path = ""
+                elif line.startswith("+") and not line.startswith("+++") and new_path:
+                    f.added.append((new_path, line[1:]))
+                elif line.startswith("-") and not line.startswith("---") and old_path:
+                    f.removed.append((old_path, line[1:]))
         log = _git(cwd, ["log", "--format=%B%x1e", rng])
         if log:
             f.commit_msgs = [m.strip() for m in log.split("\x1e") if m.strip()]
@@ -339,12 +456,22 @@ class CommandFacts:
     def from_pretooluse_json(stdin: str) -> "CommandFacts":
         """PreToolUse delivers a JSON envelope; the Bash command is at
         `.tool_input.command`. Unknown shapes degrade to empty (no false block)."""
-        try:
-            v = json.loads(stdin)
-            cmd = v.get("tool_input", {}).get("command", "")
-        except (json.JSONDecodeError, AttributeError):
-            cmd = ""
+        _name, ti = _pretooluse_tool(stdin)
+        cmd = ti.get("command", "")
         return CommandFacts(command=cmd if isinstance(cmd, str) else "")
+
+
+def _pretooluse_tool(stdin: str) -> tuple[str, dict]:
+    """`(tool_name, tool_input)` from a PreToolUse envelope. Unknown shapes degrade to
+    `("", {})` so the gate never false-blocks on a malformed payload."""
+    try:
+        v = json.loads(stdin)
+        if not isinstance(v, dict):
+            return "", {}
+        ti = v.get("tool_input")
+        return (v.get("tool_name") or "", ti if isinstance(ti, dict) else {})
+    except json.JSONDecodeError:
+        return "", {}
 
 
 def _git(cwd: str, args: list[str]) -> str | None:
@@ -400,9 +527,16 @@ def _strip_comment(line: str) -> str:
 
 
 def forbid_command(check: Check, facts: CommandFacts) -> str | None:
+    # legacy `pattern`: a raw regex matched anywhere (catches --no-verify in any position)
     pat = _rx(check.pattern)
     if pat and pat.search(facts.command):
         return f"command matches forbidden pattern for `{check.id}`"
+    # `deny`: a NORMALIZED verb match — strips `git -C`/`-c k=v`, `cd d &&`, `env X=Y`,
+    # `sudo` wrappers so the gated verb can't be smuggled past prefix matching (#66176).
+    if check.deny:
+        hit = _deny_hit(facts.command, check.deny)
+        if hit:
+            return f"`{check.id}`: forbidden command `{hit}`"
     return None
 
 
@@ -435,6 +569,242 @@ def forbid_pattern(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
         if exempt and (exempt.search(path) or exempt.search(line)):
             continue
         return f"forbidden pattern in {path}: `{line.strip()}`"
+    return None
+
+
+def forbid_removal(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
+    """The `-` twin of forbid_pattern: a REMOVED line matching the pattern under
+    scope blocks. Closes the 'silently delete the safety net' class (drop an
+    assert / await / `?` / auth check / `# nosec`) that the added-line surface is
+    blind to. Pure renames produce no removed lines (git rename-detection), so
+    they don't false-fire."""
+    pat = _rx(check.pattern)
+    if not pat:
+        return None
+    scope = _resolve(check.scope, repo) if check.scope else []
+    exempt = _rx(check.exempt)
+    for path, line in facts.removed:
+        if scope and not _path_matches(path, scope):
+            continue
+        hay = _strip_comment(line) if check.strip_comments else line
+        if not pat.search(hay):
+            continue
+        if exempt and (exempt.search(path) or exempt.search(line)):
+            continue
+        return f"forbidden removal in {path}: `{line.strip()}`"
+    return None
+
+
+def forbid_delete(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
+    """File D-status guard: deleting a file under scope blocks ('delete the failing
+    test to go green'). `unless_paired_add` suppresses when an added file exists
+    under the same scope (a coarse rename/replace proxy)."""
+    scope = _resolve(check.scope, repo) if check.scope else []
+    exempt = _rx(check.exempt)
+
+    def in_scope(p: str) -> bool:
+        return not scope or _path_matches(p, scope)
+
+    deleted = [
+        p for st, p in facts.changed
+        if st == DELETED and in_scope(p) and not (exempt and exempt.search(p))
+    ]
+    if not deleted:
+        return None
+    if check.unless_paired_add and any(st == ADDED and in_scope(p) for st, p in facts.changed):
+        return None
+    return f"forbidden deletion of {deleted[0]} (under {check.scope or 'any path'})"
+
+
+def scope_lock(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
+    """Positive allowlist — the structural inverse of the denylist path family. Every
+    A/M/D path must fall inside `allow`; any file outside the declared scope blocks
+    (the scope-creep / unauthorized-out-of-scope-edit class). An empty allow is inert."""
+    if not check.allow:
+        return None
+    allow = _resolve(check.allow, repo)
+    for _st, path in facts.changed:
+        if not _path_matches(path, allow):
+            return f"`{check.id}`: {path} is outside the declared scope {check.allow}"
+    return None
+
+
+# The agent file-mutating tools whose tool_input carries the target path.
+WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+
+
+def self_protect(check: Check, tool_name: str, file_path: str) -> str | None:
+    """Agent-layer real-time gate: a Write/Edit to a gate-defining file (the
+    `ratchet.toml`, the engine, the hook `settings.json`) is denied at the PreToolUse
+    intercept — the agent can't quietly loosen the gate it's gated by mid-session.
+    The change-layer twin is `protected_path` (which demands an independent PR
+    approval); this is the live forcing function. Non-write tools pass through."""
+    if tool_name not in WRITE_TOOLS or not file_path:
+        return None
+    if _path_or_base_matches(file_path, check.paths):
+        return (
+            f"`{check.id}`: {file_path} is a protected gate-defining file — change it "
+            f"in a reviewed PR, not in-session"
+        )
+    return None
+
+
+_MSG_SCOPES = ("commit_subject", "commit_body", "pr_body")
+
+
+def _msg_targets(facts: DiffFacts, scopes: set[str]) -> list[str]:
+    """The commit/PR message strings selected by `scopes` (commit_subject/body/pr_body)."""
+    out: list[str] = []
+    for msg in facts.commit_msgs:
+        lines = msg.splitlines()
+        if "commit_subject" in scopes and lines:
+            out.append(lines[0])
+        if "commit_body" in scopes and len(lines) > 1:
+            out.append("\n".join(lines[1:]))
+    if "pr_body" in scopes and facts.pr_body:
+        out.append(facts.pr_body)
+    return out
+
+
+def forbid_in_message(check: Check, facts: DiffFacts) -> str | None:
+    """Forbid literal tokens (case-insensitive) in commit/PR message text — e.g. a
+    `[skip ci]` that disarms the change layer's own CI host. The require-presence
+    primitives (marker_present/commit_footer) have no forbid-presence inverse."""
+    if not check.tokens:
+        return None
+    blob = "\n".join(_msg_targets(facts, set(check.msg_scope) or set(_MSG_SCOPES))).lower()
+    for t in check.tokens:
+        if t.lower() in blob:
+            return f"`{check.id}`: forbidden token `{t}` in the commit/PR message"
+    return None
+
+
+def require_message_pattern(check: Check, facts: DiffFacts) -> str | None:
+    """Every selected commit/PR message MUST match a required regex — e.g.
+    Conventional Commits on the subject. The require-presence twin of
+    forbid_in_message. `msg_scope` defaults to `commit_subject` (not all scopes — a
+    body rarely has a single required shape). Skips when there are no messages."""
+    pat = _rx(check.pattern)
+    if not pat:
+        return None
+    for t in _msg_targets(facts, set(check.msg_scope) or {"commit_subject"}):
+        if not pat.search(t):
+            return f"`{check.id}`: message `{t[:50]}` does not match required `{check.pattern}`"
+    return None
+
+
+def _num_hits(lines: list[tuple[str, str]], scope: list[str], key_rx: re.Pattern[str]) -> dict[str, float]:
+    """{key-prefix → value} for lines (in scope) whose key regex captures a number in
+    group 1. The prefix (text before the value) is the pairing identity across hunks."""
+    out: dict[str, float] = {}
+    for path, line in lines:
+        if scope and not _path_matches(path, scope):
+            continue
+        m = key_rx.search(line)
+        if not m:
+            continue
+        try:
+            out[line[: m.start(1)].strip()] = float(m.group(1))
+        except (ValueError, IndexError):
+            continue
+    return out
+
+
+def numeric_floor(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
+    """The namesake ratchet: pair a numeric token across the remove/add hunks on the
+    SAME key and block a weakening direction (lower coverage / raised retries), plus an
+    optional absolute floor. forbid_removal/forbid_pattern see one side only — neither
+    computes direction (85→75 is byte-identical to 75→85)."""
+    key_rx = _rx(check.key)
+    if not key_rx:
+        return None
+    scope = _resolve(check.scope, repo) if check.scope else []
+    direction = check.direction or "no_decrease"
+    olds = _num_hits(facts.removed, scope, key_rx)
+    news = _num_hits(facts.added, scope, key_rx)
+    for prefix, new_val in news.items():
+        if check.floor is not None:
+            if direction == "no_decrease" and new_val < check.floor:
+                return f"`{check.id}`: {prefix} {new_val:g} is below the floor {check.floor:g}"
+            if direction == "no_increase" and new_val > check.floor:
+                return f"`{check.id}`: {prefix} {new_val:g} is above the ceiling {check.floor:g}"
+        if prefix in olds:
+            old_val = olds[prefix]
+            weaker = new_val < old_val if direction == "no_decrease" else new_val > old_val
+            if weaker:
+                return f"`{check.id}`: {prefix} weakened {old_val:g} → {new_val:g}"
+    return None
+
+
+def change_budget(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
+    """Count ceilings over the diff (optionally scoped): total added/removed lines,
+    changed files, or per-file added lines. A blast-radius cap — the mega-diff /
+    scope-explosion class a reviewer can't eyeball. Usually severity="warn" (a budget
+    is advisory by nature; raise to a hard cap only on a generated/locked tree)."""
+    scope = _resolve(check.scope, repo) if check.scope else []
+
+    def keep(path: str) -> bool:
+        return not scope or _path_matches(path, scope)
+
+    added = [(p, l) for p, l in facts.added if keep(p)]
+    removed = [(p, l) for p, l in facts.removed if keep(p)]
+    files = [p for _st, p in facts.changed if keep(p)]
+    if check.max_added is not None and len(added) > check.max_added:
+        return f"`{check.id}`: {len(added)} added lines exceed the budget {check.max_added}"
+    if check.max_removed is not None and len(removed) > check.max_removed:
+        return f"`{check.id}`: {len(removed)} removed lines exceed the budget {check.max_removed}"
+    if check.max_files is not None and len(files) > check.max_files:
+        return f"`{check.id}`: {len(files)} changed files exceed the budget {check.max_files}"
+    if check.max_file_added is not None:
+        per: dict[str, int] = {}
+        for p, _l in added:
+            per[p] = per.get(p, 0) + 1
+        worst = max(per.items(), key=lambda kv: kv[1], default=None)
+        if worst and worst[1] > check.max_file_added:
+            return f"`{check.id}`: {worst[0]} adds {worst[1]} lines, over the per-file budget {check.max_file_added}"
+    return None
+
+
+def file_must_contain(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
+    """Positive content floor: every changed file matching scope + `status` must add
+    at least one line matching `pattern` (e.g. an SPDX header on each NEW source file,
+    a `@generated` marker). The structural inverse of forbid_pattern. `status`
+    defaults to "A" — gate added files only."""
+    pat = _rx(check.pattern)
+    if not pat:
+        return None
+    scope = _resolve(check.scope, repo) if check.scope else []
+    want = (check.status or ADDED).upper()
+    targets = [p for st, p in facts.changed if st == want and (not scope or _path_matches(p, scope))]
+    if not targets:
+        return None
+    by_path: dict[str, list[str]] = {}
+    for p, l in facts.added:
+        by_path.setdefault(p, []).append(l)
+    for p in targets:
+        if not any(pat.search(l) for l in by_path.get(p, [])):
+            return f"`{check.id}`: {p} must add a line matching `{check.pattern}`"
+    return None
+
+
+def max_added_file_bytes(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
+    """Per-file byte ceiling on added/modified files (the committed-blob / vendored-
+    artifact / accidental-binary class). `file_sizes` maps path → bytes, with -1
+    marking a binary blob. None = no size facts (the agent-layer view, no git) →
+    skip. `allow_binary=false` blocks any binary regardless of size."""
+    if facts.file_sizes is None:
+        return None
+    scope = _resolve(check.scope, repo) if check.scope else []
+    cap = (check.maxkb or 0) * 1024
+    for path, size in facts.file_sizes.items():
+        if scope and not _path_matches(path, scope):
+            continue
+        if size < 0:
+            if not check.allow_binary:
+                return f"`{check.id}`: {path} is a binary blob (keep it out of the diff or set allow_binary)"
+            continue
+        if cap and size > cap:
+            return f"`{check.id}`: {path} is {size} bytes, over the {check.maxkb}KB cap"
     return None
 
 
@@ -501,19 +871,156 @@ def commit_footer(footer_rx: str | None, facts: DiffFacts) -> str | None:
     return None
 
 
+def _qualifying_approvers(facts: DiffFacts) -> set[str]:
+    """APPROVED reviewers that may satisfy gate-file protection: non-author, non-bot,
+    and — when the review's commit and the head are both known — ON the current head.
+    A stale approval (left before a later malicious commit) or a bot rubber-stamp is
+    NOT qualifying; that is what stops the 'approve-benign-then-push-malicious' bypass."""
+    out: set[str] = set()
+    for rv in facts.reviews or []:
+        if (rv.get("state") or "").upper() != "APPROVED":
+            continue
+        login = rv.get("login") or ""
+        if facts.pr_author and login == facts.pr_author:
+            continue
+        if rv.get("is_bot"):
+            continue
+        if facts.head_sha and rv.get("commit_id") and rv.get("commit_id") != facts.head_sha:
+            continue
+        out.add(login)
+    return out
+
+
 def protected_path(check: Check, facts: DiffFacts) -> str | None:
-    """Any change to gate-defining files needs an independent approval. Only
-    evaluated in a PR context (approvals is not None); skipped on local pre-push."""
-    if facts.approvals is None:
+    """Any change to gate-defining files needs an independent approval. Only evaluated
+    in a PR context; skipped on local pre-push. When the richer `reviews` fact is present
+    (CI), the approval must be FRESH + human + non-author (`_qualifying_approvers`); the
+    flat `approvals` list is only a degraded fallback when no review metadata is supplied."""
+    if facts.reviews is None and facts.approvals is None:
         return None  # no PR context → defer to the CI run of this same check
+    touched = [p for p in facts.changed_paths() if _path_matches(p, check.paths)]
+    if not touched or not check.require_approval:
+        return None
+    if facts.reviews is not None:
+        if _qualifying_approvers(facts):
+            return None
+        return (
+            f"`{check.id}`: gate-defining file(s) changed ({touched[0]}…) without a "
+            f"fresh independent approval (non-author, non-bot, on the current head)"
+        )
+    if facts.approvals:  # degraded: a flat approvals list with no metadata to verify freshness
+        return None
+    return (
+        f"`{check.id}`: gate-defining file(s) changed ({touched[0]}…) "
+        f"without an independent approval"
+    )
+
+
+def _approver_logins(facts: DiffFacts, exclude_author: bool) -> set[str]:
+    """The set of logins with a current APPROVED review (the PR author optionally
+    excluded, so a self-approval never satisfies a reviewer-identity gate)."""
+    out: set[str] = set()
+    for rv in facts.reviews or []:
+        if (rv.get("state") or "").upper() != "APPROVED":
+            continue
+        login = rv.get("login") or ""
+        if exclude_author and facts.pr_author and login == facts.pr_author:
+            continue
+        out.add(login)
+    return out
+
+
+def require_approval_from(check: Check, facts: DiffFacts) -> str | None:
+    """CODEOWNERS-lite: if any file under `paths` changed, require an APPROVED review
+    from one of `require_approval_from` (optionally excluding the PR author).
+    reviews=None → no PR context (local pre-push) → skip; CI supplies the reviews."""
+    if facts.reviews is None or not check.paths:
+        return None
     touched = [p for p in facts.changed_paths() if _path_matches(p, check.paths)]
     if not touched:
         return None
-    if check.require_approval and not facts.approvals:
+    approvers = _approver_logins(facts, check.exclude_author)
+    allowed = set(check.approvers)
+    if approvers & allowed:
+        return None
+    return (
+        f"`{check.id}`: {touched[0]} requires an approval from {sorted(allowed)} "
+        f"(have: {sorted(approvers) or 'none'})"
+    )
+
+
+def pattern_requires_approval(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
+    """Change-as-trigger gate: if an ADDED line in scope matches `pattern` (a new
+    dependency line, an `unsafe {`, a new `allow(...)` lint-suppression), require a
+    (non-author) approval. reviews=None → skip. The content twin of
+    require_approval_from."""
+    if facts.reviews is None:
+        return None
+    pat = _rx(check.pattern)
+    if not pat:
+        return None
+    scope = _resolve(check.scope, repo) if check.scope else []
+    hit = next(
+        ((p, l) for p, l in facts.added if (not scope or _path_matches(p, scope)) and pat.search(l)),
+        None,
+    )
+    if not hit:
+        return None
+    if _approver_logins(facts, check.exclude_author):
+        return None
+    return f"`{check.id}`: `{hit[1].strip()}` in {hit[0]} requires an independent approval"
+
+
+def approval_state_depth(check: Check, facts: DiffFacts) -> str | None:
+    """Deeper approval-state requirements the bare 'approved' badge can't express:
+    `require_fresh` (the approval is on the current head_sha, not a stale earlier
+    commit), `disallow_author`/`disallow_bot`, `no_changes_requested` (no outstanding
+    CHANGES_REQUESTED), and a `min_approvals` floor. reviews=None → skip."""
+    if facts.reviews is None:
+        return None
+    valid: list[dict] = []
+    outstanding_cr = False
+    for rv in facts.reviews:
+        state = (rv.get("state") or "").upper()
+        login = rv.get("login") or ""
+        if state == "CHANGES_REQUESTED":
+            if check.no_changes_requested:
+                outstanding_cr = True
+            continue
+        if state != "APPROVED":
+            continue
+        if check.disallow_author and facts.pr_author and login == facts.pr_author:
+            continue
+        if check.disallow_bot and rv.get("is_bot"):
+            continue
+        if check.require_fresh and facts.head_sha and rv.get("commit_id") != facts.head_sha:
+            continue
+        valid.append(rv)
+    if check.no_changes_requested and outstanding_cr:
+        return f"`{check.id}`: an outstanding CHANGES_REQUESTED review must be resolved"
+    need = check.min_approvals if check.min_approvals is not None else 1
+    if len(valid) < need:
         return (
-            f"`{check.id}`: gate-defining file(s) changed ({touched[0]}…) "
-            f"without an independent approval"
+            f"`{check.id}`: {len(valid)} qualifying approval(s), need {need} "
+            f"(fresh/human/non-author)"
         )
+    return None
+
+
+def require_checks_green(check: Check, facts: DiffFacts) -> str | None:
+    """Every required status check must have concluded `success`. checks=None → no PR
+    context → skip. A pending check (null/empty conclusion) blocks — the change isn't
+    proven green yet. Optional `need` narrows to specific check names."""
+    if facts.checks is None:
+        return None
+    want = set(check.need)
+    for ck in facts.checks:
+        name = ck.get("name") or ""
+        if want and name not in want:
+            continue
+        concl = (ck.get("conclusion") or "").lower()
+        if concl != "success":
+            return f"`{check.id}`: check `{name}` is `{concl or 'pending'}`, not success"
     return None
 
 
@@ -555,6 +1062,24 @@ def _eval_diff(c: Check, cfg: Config, facts: DiffFacts) -> str | None:
         return secret_scan(c, facts)
     if p == "forbid_pattern":
         return forbid_pattern(c, facts, cfg.repo)
+    if p == "forbid_removal":
+        return forbid_removal(c, facts, cfg.repo)
+    if p == "forbid_delete":
+        return forbid_delete(c, facts, cfg.repo)
+    if p == "scope_lock":
+        return scope_lock(c, facts, cfg.repo)
+    if p == "forbid_in_message":
+        return forbid_in_message(c, facts)
+    if p == "require_message_pattern":
+        return require_message_pattern(c, facts)
+    if p == "numeric_floor":
+        return numeric_floor(c, facts, cfg.repo)
+    if p == "change_budget":
+        return change_budget(c, facts, cfg.repo)
+    if p == "file_must_contain":
+        return file_must_contain(c, facts, cfg.repo)
+    if p == "max_added_file_bytes":
+        return max_added_file_bytes(c, facts, cfg.repo)
     if p == "path_requires":
         return path_requires(c, facts, cfg.repo)
     if p == "cooccur":
@@ -565,9 +1090,18 @@ def _eval_diff(c: Check, cfg: Config, facts: DiffFacts) -> str | None:
         return commit_footer(cfg.footer_regex, facts)
     if p == "protected_path":
         return protected_path(c, facts)
+    if p == "require_approval_from":
+        return require_approval_from(c, facts)
+    if p == "pattern_requires_approval":
+        return pattern_requires_approval(c, facts, cfg.repo)
+    if p == "approval_state_depth":
+        return approval_state_depth(c, facts)
+    if p == "require_checks_green":
+        return require_checks_green(c, facts)
     if p == "run":
         return _run_shell(c.cmd or "true")
-    return None  # attest/judge/forbid_command are not diff-evaluated here
+    # attest/judge/forbid_command/forbid_commit_on_branch/self_protect are agent-layer
+    return None
 
 
 def run_change(cfg: Config, facts: DiffFacts, allow_run: bool = True) -> list[Finding]:
@@ -596,6 +1130,18 @@ def run_command_gate(cfg: Config, cmd: CommandFacts) -> list[Finding]:
         if c.primitive != "forbid_command":
             continue
         reason = forbid_command(c, cmd)
+        if reason:
+            out.append(Finding(c.id, c.severity, reason))
+    return out
+
+
+def run_self_protect_gate(cfg: Config, tool_name: str, file_path: str) -> list[Finding]:
+    """AGENT layer: self_protect checks decide over a Write/Edit's target path."""
+    out: list[Finding] = []
+    for c in cfg.checks:
+        if c.primitive != "self_protect" or c.layer == "change":
+            continue
+        reason = self_protect(c, tool_name, file_path)
         if reason:
             out.append(Finding(c.id, c.severity, reason))
     return out
@@ -674,14 +1220,13 @@ def _strip_quotes(s: str) -> str:
     return re.sub(r"'[^']*'|\"[^\"]*\"", "", s)
 
 
-def push_or_merge(cmd: str) -> str | None:
-    """"merge" / "push" / None for a shell command. `gh pr merge` (or `gh api …/merge`)
-    → merge; any `git push` across shell-separated segments (tolerating leading git
-    global options + their values) → push. Quote-stripped first so a flag inside a
-    message isn't a false hit."""
+def _git_ops(cmd: str) -> set[str]:
+    """The set of git SUBCOMMANDS invoked across shell-separated segments, tolerating
+    leading git global options + their values (`git -C dir -c k=v push` → {"push"}).
+    Quote-stripped first so a subcommand named inside a message isn't a false hit.
+    Tokenized (not a mega-regex) → ReDoS-immune."""
     c = _strip_quotes(cmd or "")
-    if _MERGE_RE.search(c):
-        return "merge"
+    ops: set[str] = set()
     for seg in _SHELL_SEP.split(c):
         toks = seg.split()
         i = 0
@@ -695,10 +1240,87 @@ def push_or_merge(cmd: str) -> str | None:
                 j += 1
                 if opt in _GIT_VALUE_OPTS and j < len(toks):
                     j += 1
-            if j < len(toks) and toks[j] == "push":
-                return "push"
+            if j < len(toks):
+                ops.add(toks[j])
             i = j + 1
+    return ops
+
+
+def push_or_merge(cmd: str) -> str | None:
+    """"merge" / "push" / None for a shell command. `gh pr merge` (or `gh api …/merge`)
+    → merge; any `git push` (via the tokenized op scan) → push."""
+    if _MERGE_RE.search(_strip_quotes(cmd or "")):
+        return "merge"
+    return "push" if "push" in _git_ops(cmd) else None
+
+
+_ENV_ASSIGN = re.compile(r"^\w+=")
+
+
+def _normalize_command_segments(cmd: str) -> list[list[str]]:
+    """Shell-split, then per segment strip leading `sudo` + `VAR=val` assignments and,
+    for a git invocation, drop global options (+ their values) so the gated verb sits at
+    the front. Quote-stripped first. Defeats the `git -C/path`, `cd d &&`, `env X=Y`,
+    `git -c k=v` evasions that prefix matching misses (#66176)."""
+    segs: list[list[str]] = []
+    for seg in _SHELL_SEP.split(_strip_quotes(cmd or "")):
+        toks = seg.split()
+        i = 0
+        while i < len(toks) and (toks[i] == "sudo" or _ENV_ASSIGN.match(toks[i])):
+            i += 1
+        toks = toks[i:]
+        if toks and toks[0] == "git":
+            j = 1
+            while j < len(toks) and toks[j].startswith("-"):
+                opt = toks[j]
+                j += 1
+                if opt in _GIT_VALUE_OPTS and j < len(toks):
+                    j += 1
+            toks = ["git"] + toks[j:]
+        if toks:
+            segs.append(toks)
+    return segs
+
+
+def _deny_hit(cmd: str, deny: list[str]) -> str | None:
+    """The first deny phrase whose tokens appear as a contiguous run in any normalized
+    segment (token-equality, so `git push` never matches `git push-mirror`)."""
+    norm = _normalize_command_segments(cmd)
+    for phrase in deny:
+        pt = phrase.split()
+        if not pt:
+            continue
+        for toks in norm:
+            for s in range(len(toks) - len(pt) + 1):
+                if toks[s : s + len(pt)] == pt:
+                    return phrase
     return None
+
+
+def run_branch_gate(cfg: Config, cmd: CommandFacts, current_branch: str | None) -> list[Finding]:
+    """AGENT layer: forbid_commit_on_branch — deny commit/push on a protected branch.
+    The current branch is an ungameable live fact; the only way to satisfy the gate
+    is to branch first (`git checkout -b`), which is the intended outcome. Returns []
+    on a detached/unknown branch so it never false-fires."""
+    out: list[Finding] = []
+    if current_branch is None:
+        return out
+    invoked = _git_ops(cmd.command)
+    for c in cfg.checks:
+        if c.primitive != "forbid_commit_on_branch" or c.layer == "change":
+            continue
+        ops = set(c.ops) or {"commit", "push"}
+        if not (invoked & ops):
+            continue
+        branches = c.branch or [cfg.repo.default_branch]
+        if _path_matches(current_branch, branches):
+            hit = " / ".join(sorted(invoked & ops))
+            out.append(Finding(
+                c.id, c.severity,
+                f"`{c.id}`: {hit} on protected branch `{current_branch}` — branch first "
+                f"(git checkout -b <name>)",
+            ))
+    return out
 
 
 def _local_facts(cwd: str, default_branch: str) -> DiffFacts:
@@ -743,6 +1365,621 @@ def _gh_pr_body(cwd: str) -> str | None:
     return p.stdout if p.returncode == 0 else None
 
 
+def _read_json(path: str):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _load_reviews(path: str) -> list[dict] | None:
+    """Normalize a `gh pr view --json reviews` (or hand-rolled) array into the engine's
+    review shape. Tolerates both the nested `{author:{login,is_bot}}` GitHub form and a
+    flat `{login,is_bot}` form. None on a missing/garbled file (→ checks skip)."""
+    raw = _read_json(path)
+    if not isinstance(raw, list):
+        return None
+    out: list[dict] = []
+    for rv in raw:
+        if not isinstance(rv, dict):
+            continue
+        author = rv.get("author")
+        author = author if isinstance(author, dict) else {}
+        commit = rv.get("commit")
+        commit = commit if isinstance(commit, dict) else {}
+        out.append({
+            "login": rv.get("login") or author.get("login") or "",
+            "state": rv.get("state") or "",
+            "commit_id": rv.get("commit_id") or commit.get("oid") or "",
+            "is_bot": bool(rv.get("is_bot", author.get("is_bot", False))),
+            "author_association": rv.get("author_association") or rv.get("authorAssociation") or "",
+        })
+    return out
+
+
+def _load_checks(path: str) -> list[dict] | None:
+    """Normalize a `gh pr checks --json name,state` (or hand-rolled) array into
+    `[{name, conclusion}]`. `conclusion` falls back to `state`/`status` (gh emits
+    SUCCESS/FAILURE/PENDING under `state`). None on a missing/garbled file (→ skip)."""
+    raw = _read_json(path)
+    if not isinstance(raw, list):
+        return None
+    out: list[dict] = []
+    for ck in raw:
+        if not isinstance(ck, dict):
+            continue
+        concl = ck.get("conclusion")
+        if concl in (None, ""):
+            concl = ck.get("state") or ck.get("status")
+        out.append({"name": ck.get("name") or ck.get("context") or "", "conclusion": concl})
+    return out
+
+
+def _populate_file_sizes(cwd: str, base: str, head: str, facts: DiffFacts) -> None:
+    """Byte size of each added/modified blob at `head` (-1 = binary, per numstat's
+    `-\t-`). Only run when a max_added_file_bytes check exists (N `cat-file` calls)."""
+    sizes: dict[str, int] = {}
+    binary: set[str] = set()
+    numstat = _git(cwd, ["diff", "--numstat", f"{base}..{head}"]) or ""
+    for line in numstat.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 3 and parts[0] == "-" and parts[1] == "-":
+            binary.add(parts[-1])
+    for st, path in facts.changed:
+        if st == DELETED:
+            continue
+        if path in binary:
+            sizes[path] = -1
+            continue
+        s = _git(cwd, ["cat-file", "-s", f"{head}:{path}"])
+        if s and s.strip().isdigit():
+            sizes[path] = int(s.strip())
+    facts.file_sizes = sizes
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# repo introspection  (suggest / gaps / draft-lint — the AI-assisted `init` surface)
+#
+# The DETERMINISTIC half of config authoring: extract ungameable repo facts (tracked
+# paths → globs, the test command, the default branch) + scan CLAUDE.md/AGENTS.md for
+# house-rules that map to primitives. The engine NEVER writes the live config and makes
+# NO judgments — the host agent does generation (selecting + tuning from these facts),
+# the human arms it. Pure functions + a thin acquisition layer, same split as
+# DiffFacts.from_range. No model, no network. (Full design: docs/coverage-map.md.)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class Lang:
+    name: str
+    exts: tuple[str, ...]
+    code_globs: tuple[str, ...]  # most-specific first; guess_globs keeps only matchers
+    test_globs: tuple[str, ...]
+
+
+# Order is the tie-break for `guess_globs` (a repo with equal counts picks the earlier).
+_LANG_PROFILES: tuple[Lang, ...] = (
+    Lang("rust", (".rs",), ("crates/*/src/**/*.rs", "src/**/*.rs"),
+         ("crates/*/tests/**/*.rs", "tests/**/*.rs", "crates/*/src/**/*_tests.rs")),
+    Lang("python", (".py",), ("src/**/*.py", "*.py"),
+         ("tests/**/*.py", "**/test_*.py", "**/*_test.py")),
+    Lang("node", (".ts", ".tsx", ".js", ".jsx"),
+         ("src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "*.ts", "*.js"),
+         ("**/*.test.ts", "**/*.spec.ts", "**/*.test.js", "test/**", "tests/**")),
+    Lang("go", (".go",), ("*.go", "cmd/**/*.go", "internal/**/*.go", "pkg/**/*.go"),
+         ("**/*_test.go",)),
+    Lang("ruby", (".rb",), ("lib/**/*.rb", "app/**/*.rb", "*.rb"),
+         ("spec/**/*.rb", "test/**/*.rb")),
+    Lang("java", (".java",), ("src/main/**/*.java",), ("src/test/**/*.java",)),
+)
+
+
+def guess_globs(paths: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """(code, tests, docs) globs for a tracked-path list. Picks the dominant language by
+    code-extension file count (ties by `_LANG_PROFILES` order), then keeps ONLY the globs
+    that actually match ≥1 path via the engine's own `_glob_to_re` (so a flat repo emits
+    `*.py`, not `src/**/*.py`). docs default `["**/*.md"]`, plus `docs/**` iff a docs/ path
+    exists. Empty/garbled tree → ([], [], ["**/*.md"]) — never raises."""
+    docs = ["**/*.md"]
+    if any(p.startswith("docs/") for p in paths):
+        docs.append("docs/**")
+    if not paths:
+        return ([], [], docs)
+    best: Lang | None = None
+    best_n = 0
+    for lang in _LANG_PROFILES:
+        n = sum(1 for p in paths if p.endswith(lang.exts))
+        if n > best_n:
+            best_n, best = n, lang
+    if not best:
+        return ([], [], docs)
+
+    def keep(globs: tuple[str, ...]) -> list[str]:
+        return [g for g in globs if any(_glob_to_re(g).match(p) for p in paths)]
+
+    code = keep(best.code_globs) or [f"**/*{best.exts[0]}"]
+    tests = keep(best.test_globs)
+    return (code, tests, docs)
+
+
+def detect_test_command(cwd: str) -> tuple[str | None, str | None]:
+    """(cmd, source). Manifests are parsed as TEXT, NEVER executed. Priority: justfile >
+    package.json > pyproject > Makefile > Cargo.toml. A malformed manifest degrades to the
+    next source (never raises)."""
+    def rd(name: str) -> str | None:
+        try:
+            with open(os.path.join(cwd, name), encoding="utf-8") as fh:
+                return fh.read()
+        except OSError:
+            return None
+
+    for jf in ("justfile", "Justfile", ".justfile"):
+        t = rd(jf)
+        if t and re.search(r"^test\b[^\n]*:", t, re.M):
+            return ("just test", jf)
+    pj = rd("package.json")
+    if pj:
+        try:
+            ts = (json.loads(pj).get("scripts") or {}).get("test")
+            if ts and "no test specified" not in ts:
+                return ("npm test", "package.json")
+        except (json.JSONDecodeError, AttributeError):
+            pass
+    pp = rd("pyproject.toml")
+    if pp:
+        try:
+            tool = tomllib.loads(pp).get("tool", {})
+            if any(k.startswith("pytest") for k in tool) or "poetry" in tool:
+                return ("python3 -m pytest -q", "pyproject.toml")
+        except tomllib.TOMLDecodeError:
+            pass
+    for mk in ("Makefile", "makefile", "GNUmakefile"):
+        t = rd(mk)
+        if t and re.search(r"^test:", t, re.M):
+            return ("make test", mk)
+    if rd("Cargo.toml") is not None:
+        return ("cargo test", "Cargo.toml")
+    return (None, None)
+
+
+def _tracked_paths(cwd: str) -> list[str]:
+    """`git ls-files`; fallback to a bounded os.walk (skipping the usual build/vendor dirs)
+    if not a git repo. Always slash-separated. Never raises."""
+    out = _git(cwd, ["ls-files"])
+    if out is not None:
+        return [ln for ln in out.splitlines() if ln]
+    skip = {".git", "node_modules", "target", ".venv", "venv", "dist", "build", "__pycache__", ".mypy_cache"}
+    paths: list[str] = []
+    for root, dirs, files in os.walk(cwd):
+        dirs[:] = [d for d in dirs if d not in skip]
+        for f in files:
+            paths.append(os.path.relpath(os.path.join(root, f), cwd).replace(os.sep, "/"))
+    return paths
+
+
+def _detect_default_branch(cwd: str) -> str:
+    """`refs/remotes/origin/HEAD` → strip `origin/`; else the current branch if it's a
+    conventional default; else "main"."""
+    out = _git(cwd, ["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"])
+    if out and out.strip():
+        return out.strip().split("/", 1)[-1]
+    cur = _current_branch(cwd)
+    return cur if cur in ("main", "master", "trunk") else "main"
+
+
+@dataclass
+class HouseRuleHit:
+    suggested_id: str
+    keyword: str
+    primitive: str
+    params: dict  # seed [[check]] params (a vetted catalog — generation is SELECTION)
+    confidence: str  # "high" | "medium" | "low"
+    layer: str = "change"
+    render: str = "warn"  # "block" (safe-core) | "warn" | "commented" | "judge"
+    match_token: str | None = None  # is_bound discriminator (None = primitive presence suffices)
+    rule_text: str = ""  # the EXACT triggering CLAUDE.md line — the evidence a human audits
+    source: str = ""
+    rationale: str = ""
+
+
+@dataclass
+class RepoScan:
+    default_branch: str
+    code: list[str]
+    tests: list[str]
+    docs: list[str]
+    test_cmd: str | None
+    test_cmd_source: str | None
+    claude_md_paths: list[str]
+    house_rules: list[HouseRuleHit]
+
+
+@dataclass
+class LintFinding:
+    level: str  # "error" (agent must fix) | "warn" (informational) | "todo" (human review item)
+    check_id: str | None
+    msg: str
+
+
+@dataclass(frozen=True)
+class _Rule:
+    rid: str
+    pattern: str  # case-insensitive line regex
+    primitive: str
+    params: dict
+    layer: str
+    render: str
+    conf: str
+    match_token: str | None = None
+
+
+# The CLAUDE.md keyword → primitive catalog. The first five (safe-core) are ALSO emitted
+# unconditionally by render_suggest_toml; rows below them render only on a keyword hit.
+# `render`: block (safe-core, all fact-kind) · warn · commented (needs human params / runs a
+# command) · judge (advisory, never blocks). Provenance: docs/coverage-map.md.
+HOUSE_RULE_MAP: tuple[_Rule, ...] = (
+    _Rule("no-verify", r"--no-?verify|skip.*hooks|HUSKY=0|SKIP_PREFLIGHT", "forbid_command",
+          {"pattern": "--no-verify|--no-gpg-sign|HUSKY=0"}, "agent", "block", "high", "--no-verify"),
+    _Rule("branch-first", r"branch first|never commit.*(to )?(main|master)|work in a (git )?worktree|branch off",
+          "forbid_commit_on_branch", {}, "agent", "block", "high"),
+    _Rule("secret-scan", r"no secrets?|(don'?t|never|do not) commit.*(secret|credential)|\.env\b|API key", "secret_scan",
+          {"forbid_paths": [".env", ".env.*", "*.pem", "*.key", "id_rsa", "*.p12"]}, "change", "block", "high"),
+    _Rule("self-protect", r"don'?t (edit|weaken).*(gate|config)|protected (files|paths)", "self_protect",
+          {"paths": ["ratchet.toml", ".ratchet/**", ".github/workflows/**"]}, "agent", "block", "high"),
+    _Rule("no-force-push", r"never (force.?push|push.*--force)|don'?t force-?push", "forbid_command",
+          {"deny": ["git push --force", "git push -f"]}, "agent", "warn", "medium", "--force"),
+    _Rule("tests-pass", r"run the tests|tests? (must )?pass|all tests green|preflight|make.*test", "run",
+          {}, "change", "commented", "high"),
+    _Rule("docs-currency", r"update (the )?docs|keep docs current|docs.?currency|update (the )?README|update CLAUDE\.md",
+          "path_requires", {"when": "code", "need": "docs"}, "change", "warn", "high"),
+    _Rule("two-lens-review", r"two-?lens review|review before merge|\d+\+? reviewers|code review (is )?required",
+          "marker_present", {"marker": r"(?i)two-lens-review\s*:", "when": "code"}, "change", "warn", "high", "two-lens"),
+    _Rule("no-test-delete", r"don'?t delete.*tests?|delete the failing test", "forbid_delete",
+          {"scope": "tests", "unless_paired_add": True}, "change", "warn", "medium"),
+    _Rule("keep-asserts", r"keep the assert|don'?t (strip|remove).*(assert|guard|await)", "forbid_removal",
+          {"pattern": r"assert|expect\(|\bawait\b", "scope": "tests"}, "change", "warn", "medium", "assert"),
+    _Rule("no-debug-print", r"no (println|console\.log|print).*(prod|production)|use (tracing|logging)|no debug prints?",
+          "forbid_pattern", {"pattern": r"console\.log\(|\bprintln!|System\.out\.print|fmt\.Print", "scope": "code",
+                             "strip_comments": True}, "change", "warn", "medium", "console.log"),
+    _Rule("attest-tdd", r"\bTDD\b|failing test first|test-?driven", "attest",
+          {"class": "always", "box": "TDD"}, "agent", "warn", "medium", "TDD"),
+    _Rule("no-test-skips", r"no.*(it|test|describe)\.only|no focused tests|no test skips?", "forbid_pattern",
+          {"pattern": r"\.only\(|@pytest\.mark\.skip", "scope": "tests"}, "change", "warn", "medium", ".only"),
+    _Rule("conventional-commits", r"conventional commits|commit message format", "require_message_pattern",
+          {"pattern": r"^(feat|fix|docs|chore|refactor|test|ci|build|perf)(\(.+\))?!?: ",
+           "msg_scope": ["commit_subject"]}, "change", "warn", "medium"),
+    _Rule("commit-footer", r"Co-Authored-By|commit footer|sign-?off|trailer", "commit_footer",
+          {}, "change", "warn", "medium"),
+    _Rule("scope-lock", r"stay in scope|don'?t touch unrelated|scope ?lock", "scope_lock",
+          {"allow": ["TODO"]}, "change", "commented", "low"),
+    _Rule("coverage-ratchet", r"coverage|fail_under|don'?t lower (coverage|the threshold)", "numeric_floor",
+          {"key": r"fail_under\s*=\s*([0-9.]+)", "direction": "no_decrease",
+           "scope": ["pyproject.toml", "setup.cfg", ".coveragerc"]}, "change", "warn", "medium"),
+    _Rule("no-skip-ci", r"\[skip ci\]|\[ci skip\]|don'?t disable CI", "forbid_in_message",
+          {"tokens": ["[skip ci]", "[ci skip]"]}, "change", "warn", "medium"),
+    _Rule("no-fat-blobs", r"no (large|fat) files|no binar|don'?t commit (build artifacts|blobs)",
+          "max_added_file_bytes", {"maxkb": 256, "allow_binary": False}, "change", "warn", "low"),
+    _Rule("require-owner-approval", r"CODEOWNERS|owner approval|approval from|security review", "require_approval_from",
+          {"paths": ["TODO"], "require_approval_from": ["TODO"], "exclude_author": True}, "change", "commented", "low"),
+    _Rule("ledger-trace", r"REVIEW-LEDGER|ledger trace|adjudication", "path_requires",
+          {"when": "code", "need": ["**/REVIEW-LEDGER.md"]}, "change", "warn", "low"),
+    _Rule("deferral-has-issue", r"defer|follow-?up issue|track.*(deferred|GitHub issue)", "cooccur",
+          {"trigger": r"defer|follow-?up|TODO", "require": r"#\d+"}, "change", "warn", "low"),
+    _Rule("semantic-judge", r"don'?t (loosen|weaken).*(assert|validation)|no fake (impl|implementation)|tautolog|no mock.*to pass",
+          "judge", {}, "change", "judge", "low"),
+)
+
+# The five always-emitted block ids (gate-self-protection is a universal default).
+SAFE_CORE_IDS = ("no-verify", "branch-first", "secret-scan", "self-protect", "protected-gate-files")
+_CONF_ORDER = {"high": 0, "medium": 1, "low": 2}
+
+
+def scan_house_rules(text: str, *, source: str, default_branch: str,
+                     test_cmd: str | None) -> list[HouseRuleHit]:
+    """Run HOUSE_RULE_MAP line-by-line (case-insensitive) over one CLAUDE.md/AGENTS.md.
+    Each hit carries the EXACT triggering line as `rule_text`. Dedup by suggested_id
+    (first match wins). The two dynamic rows are templated with default_branch / test_cmd."""
+    hits: list[HouseRuleHit] = []
+    seen: set[str] = set()
+    for line in text.splitlines():
+        for rule in HOUSE_RULE_MAP:
+            if rule.rid in seen or not re.search(rule.pattern, line, re.I):
+                continue
+            params = dict(rule.params)
+            conf = rule.conf
+            if rule.rid == "branch-first":
+                params = {"branch": [default_branch], "ops": ["commit", "push"]}
+            elif rule.rid == "tests-pass":
+                params = {"cmd": test_cmd or "TODO: your test command"}
+                conf = "high" if test_cmd else "low"
+            elif rule.rid == "semantic-judge":
+                params = {"prompt": line.strip()}
+            hits.append(HouseRuleHit(
+                suggested_id=rule.rid, keyword=rule.pattern, primitive=rule.primitive,
+                params=params, confidence=conf, layer=rule.layer, render=rule.render,
+                match_token=rule.match_token, rule_text=line.strip(), source=source))
+            seen.add(rule.rid)
+    return hits
+
+
+def rank_house_rules(hits: list[HouseRuleHit]) -> list[HouseRuleHit]:
+    """Stable sort: confidence (high→low) then HOUSE_RULE_MAP table order."""
+    order = {r.rid: i for i, r in enumerate(HOUSE_RULE_MAP)}
+    return sorted(hits, key=lambda h: (_CONF_ORDER.get(h.confidence, 3), order.get(h.suggested_id, 999)))
+
+
+def scan_repo(cwd: str) -> RepoScan:
+    """Orchestrate the deterministic facts: tracked paths → globs; default branch; test
+    command; each CLAUDE.md/AGENTS.md → scan_house_rules → dedup → rank."""
+    paths = _tracked_paths(cwd)
+    code, tests, docs = guess_globs(paths)
+    branch = _detect_default_branch(cwd)
+    cmd, src = detect_test_command(cwd)
+    cm_paths = [p for p in paths if _path_matches(p, ["**/CLAUDE.md", "**/AGENTS.md"])]
+    hits: list[HouseRuleHit] = []
+    seen: set[str] = set()
+    for cp in cm_paths:
+        try:
+            with open(os.path.join(cwd, cp), encoding="utf-8") as fh:
+                txt = fh.read()
+        except OSError:
+            continue
+        for h in scan_house_rules(txt, source=cp, default_branch=branch, test_cmd=cmd):
+            if h.suggested_id in seen:
+                continue
+            seen.add(h.suggested_id)
+            hits.append(h)
+    return RepoScan(default_branch=branch, code=code, tests=tests, docs=docs,
+                    test_cmd=cmd, test_cmd_source=src, claude_md_paths=cm_paths,
+                    house_rules=rank_house_rules(hits))
+
+
+_REVIEW_MARKER = "# TODO(ratchet:review)"
+_DRAFT_BANNER = (
+    "# ratchet.toml.draft — drafted by `ratchet suggest` + your review. This is NOT the\n"
+    "# live gate: only the five safe-core checks have teeth; everything else is warn +\n"
+    "# a `# TODO(ratchet:review)` marker. Arm a rule = set it to `block` AND delete its\n"
+    "# marker. When `ratchet draft-lint` exits 0, `mv ratchet.toml.draft ratchet.toml`."
+)
+# git's well-known empty tree — HEAD vs this = every committed line as `added` (for --simulate).
+_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+_MATCH_EVERYTHING = frozenset({"", ".*", ".+", ".*?", "(.*)", "^.*$", ".*$", "^.*"})
+_SAFE_CMD_CORPUS = ("git push origin feat", "git commit -m x", "git status", "npm test", "cargo test")
+# Every accepted [[check]] TOML key (the args _from_raw reads) — so draft-lint can reject a
+# hallucinated/typo'd key that _from_raw would otherwise silently `.get()`-drop.
+_KNOWN_CHECK_KEYS = frozenset({
+    "id", "kind", "severity", "primitive", "layer", "pattern", "scope", "exempt", "strip_comments",
+    "when", "need", "when_marker", "marker", "where", "cmd", "trigger", "require", "custom",
+    "forbid_paths", "paths", "require_approval", "unless_paired_add", "branch", "ops", "allow",
+    "tokens", "msg_scope", "deny", "key", "direction", "floor", "max_added", "max_removed",
+    "max_files", "max_file_added", "status", "maxkb", "allow_binary", "require_approval_from",
+    "exclude_author", "require_fresh", "no_changes_requested", "disallow_bot", "disallow_author",
+    "min_approvals", "class", "box", "prompt",
+})
+
+
+def _toml_str(s: str) -> str:
+    """TOML scalar string — a single-quote literal (no escaping) unless it contains a
+    single quote or newline, in which case a basic double-quoted string with escapes."""
+    if "'" not in s and "\n" not in s:
+        return f"'{s}'"
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _toml_val(v) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    if isinstance(v, list):
+        return "[" + ", ".join(_toml_val(x) for x in v) + "]"
+    return _toml_str(str(v))
+
+
+def _render_check(rid, kind, severity, primitive, params, layer=None, comment=False) -> str:
+    lines = ["[[check]]", f"id = {_toml_str(rid)}", f"kind = {_toml_str(kind)}",
+             f"severity = {_toml_str(severity)}"]
+    if layer and layer != "change":
+        lines.append(f"layer = {_toml_str(layer)}")
+    lines.append(f"primitive = {_toml_str(primitive)}")
+    for k, val in params.items():
+        lines.append(f"{k} = {_toml_val(val)}")
+    block = "\n".join(lines)
+    return "\n".join("# " + ln for ln in block.splitlines()) if comment else block
+
+
+def _safe_core_block(branch: str) -> str:
+    paths = ["ratchet.toml", ".ratchet/**", ".github/workflows/**"]
+    return "\n\n".join([
+        _render_check("no-verify", "fact", "block", "forbid_command",
+                      {"pattern": "--no-verify|--no-gpg-sign|HUSKY=0"}, layer="agent"),
+        _render_check("branch-first", "fact", "block", "forbid_commit_on_branch",
+                      {"branch": [branch], "ops": ["commit", "push"]}, layer="agent"),
+        _render_check("secret-scan", "fact", "block", "secret_scan",
+                      {"forbid_paths": [".env", ".env.*", "*.pem", "*.key", "id_rsa", "*.p12"]}),
+        _render_check("self-protect", "fact", "block", "self_protect", {"paths": paths}, layer="agent"),
+        # Born `warn`: requires an INDEPENDENT approver, which a solo repo has none of — a hard
+        # block would be unclearable. Promote to severity="block" once a second reviewer /
+        # CODEOWNERS exists (then it's the bypass-proof keystone; the engine demands a fresh,
+        # non-bot, non-author approval). The agent-layer `self-protect` above already hard-blocks
+        # in-session edits regardless.
+        "# promote to severity=\"block\" once you have an independent reviewer (see README)\n"
+        + _render_check("protected-gate-files", "fact", "warn", "protected_path", {"paths": paths}),
+    ])
+
+
+def _render_hit(h: HouseRuleHit) -> str:
+    marker = f'{_REVIEW_MARKER}: from {h.source} "{h.rule_text[:60]}" — verify scope, watch a PR, then promote.'
+    if h.primitive == "judge":
+        kind, sev = "advisory", "judge"
+    elif h.primitive == "attest":
+        kind, sev = "advisory", "attest"
+    else:
+        kind, sev = "fact", "warn"
+    commented = h.render in ("commented", "judge")
+    return marker + "\n" + _render_check(h.suggested_id, kind, sev, h.primitive, h.params,
+                                         layer=h.layer, comment=commented)
+
+
+def render_suggest_toml(scan: RepoScan) -> str:
+    """A deterministic ALL-WARN (+commented/judge) starter draft, guaranteed to parse. The
+    only `block` checks are the five safe-core ids; everything inferred is warn + a marker
+    (or commented). The host agent models its hand-authored draft on this."""
+    out = [_DRAFT_BANNER, "", "schema = 1", "", "[repo]",
+           f"default_branch = {_toml_str(scan.default_branch)}"]
+    if scan.code:
+        out.append(f"code = {_toml_val(scan.code)}")
+    if scan.tests:
+        out.append(f"tests = {_toml_val(scan.tests)}")
+    out.append(f"docs = {_toml_val(scan.docs)}")
+    out += ["", "[meta]", "base_pinned = true", "",
+            "# ── safe core: always armed, all kind=fact ─────────────────────────────────",
+            _safe_core_block(scan.default_branch)]
+    for h in scan.house_rules:
+        if h.suggested_id in SAFE_CORE_IDS:
+            continue
+        out += ["", _render_hit(h)]
+    return "\n".join(out) + "\n"
+
+
+def _scan_to_dict(scan: RepoScan) -> dict:
+    return {
+        "default_branch": scan.default_branch, "code": scan.code, "tests": scan.tests,
+        "docs": scan.docs, "test_cmd": scan.test_cmd, "test_cmd_source": scan.test_cmd_source,
+        "claude_md_paths": scan.claude_md_paths,
+        "house_rules": [{
+            "suggested_id": h.suggested_id, "primitive": h.primitive, "confidence": h.confidence,
+            "render": h.render, "layer": h.layer, "params": h.params, "rule_text": h.rule_text,
+            "source": h.source, "match_token": h.match_token,
+        } for h in scan.house_rules],
+    }
+
+
+def is_bound(hit: HouseRuleHit, checks: list[Check]) -> tuple[bool, Check | None]:
+    """Bound iff a check with `hit.primitive` exists AND (match_token is None OR the token
+    appears in that check's discriminating text). The token refinement stops two different
+    forbid_pattern rules from aliasing."""
+    for c in checks:
+        if c.primitive != hit.primitive:
+            continue
+        if hit.match_token is None:
+            return (True, c)
+        hay = " ".join(filter(None, [
+            c.pattern, c.marker, c.key, " ".join(c.deny), " ".join(c.allow),
+            " ".join(c.tokens), " ".join(c.need),
+        ])).lower()
+        if hit.match_token.lower() in hay:
+            return (True, c)
+    return (False, None)
+
+
+def _marked_ids(text: str) -> set[str]:
+    """Ids of UNCOMMENTED checks carrying a `# TODO(ratchet:review)` marker directly above
+    (skipping commented/blank lines). A marker before a commented check is not associated."""
+    lines = text.splitlines()
+    marked: set[str] = set()
+    for i, line in enumerate(lines):
+        if not line.lstrip().startswith(_REVIEW_MARKER):
+            continue
+        for j in range(i + 1, min(i + 12, len(lines))):
+            sj = lines[j].strip()
+            if sj.startswith("#") or sj == "":
+                continue
+            if sj == "[[check]]":
+                for k in range(j + 1, min(j + 8, len(lines))):
+                    m = re.match(r'\s*id\s*=\s*["\']([^"\']+)', lines[k])
+                    if m:
+                        marked.add(m.group(1))
+                        break
+            break
+    return marked
+
+
+def draft_lint(text: str, *, existing_cfg: Config | None,
+               head_facts: DiffFacts | None) -> list[LintFinding]:
+    """Strict superset of Config.validate that gates the agent-authored draft. error =
+    agent must fix; todo = the human's review marker; warn = informational. (See the
+    module-level design notes + docs/coverage-map.md.)"""
+    try:
+        cfg = Config.parse(text)
+    except ConfigError as e:
+        return [LintFinding("error", None, f"config invalid: {e}")]
+    findings: list[LintFinding] = []
+    # 2 — every regex field compiles + isn't a match-everything no-op
+    for c in cfg.checks:
+        rx_fields = [c.pattern, c.exempt, c.key, c.marker, c.when_marker, c.trigger, c.require, *c.custom]
+        for val in rx_fields:
+            if not val:
+                continue
+            try:
+                re.compile(val)
+            except re.error:
+                findings.append(LintFinding("error", c.id, f"invalid regex: {val!r}"))
+        if c.pattern is not None and c.pattern in _MATCH_EVERYTHING:
+            findings.append(LintFinding("error", c.id, "pattern matches everything → enforces nothing"))
+    # 3 — no unknown/typo'd keys (closes the _from_raw silent-drop hole)
+    try:
+        for ct in tomllib.loads(text).get("check", []):
+            cid = ct.get("id", "?")
+            for k in ct:
+                if k not in _KNOWN_CHECK_KEYS:
+                    findings.append(LintFinding("error", cid, f"unknown check key `{k}`"))
+    except tomllib.TOMLDecodeError:
+        pass
+    # 4 — base_pinned must be true
+    if not cfg.meta.base_pinned:
+        findings.append(LintFinding("error", None, "base_pinned must be true"))
+    # 5 — the safe-core ids present. Four are solo-satisfiable facts → must be block. The
+    # fifth, `protected-gate-files`, needs an INDEPENDENT approver no solo repo has, so it is
+    # born `warn` (loud, not an unclearable wall) and promoted to block once a reviewer/
+    # CODEOWNERS exists — present at warn-or-block, never absent.
+    by_id = {c.id: c for c in cfg.checks}
+    for sid in SAFE_CORE_IDS:
+        sc = by_id.get(sid)
+        if sc is None:
+            findings.append(LintFinding("error", sid, f"safe-core `{sid}` must be present"))
+        elif sid == "protected-gate-files":
+            if sc.severity not in ("warn", "block"):
+                findings.append(LintFinding("error", sid, "`protected-gate-files` must be warn or block"))
+        elif sc.severity != "block":
+            findings.append(LintFinding("error", sid, f"safe-core `{sid}` must be present at severity=block"))
+    # 6 — born-warn: a marked check cannot be block (arming = deleting the marker)
+    marked = _marked_ids(text)
+    for c in cfg.checks:
+        if c.id in marked and c.severity == "block":
+            findings.append(LintFinding("error", c.id, "a # TODO(ratchet:review) check cannot be block — review, then arm"))
+    # 7 — additive-only vs the base config (gaps mode)
+    if existing_cfg is not None:
+        for ec in existing_cfg.checks:
+            dc = by_id.get(ec.id)
+            if dc is None:
+                findings.append(LintFinding("error", ec.id, "an existing check was dropped from the draft"))
+            elif ec.severity == "block" and dc.severity != "block":
+                findings.append(LintFinding("error", ec.id, "an existing block check was weakened"))
+    # 8 — no secret leaked into a copied command string
+    if any(re.search(p, text) for p in DEFAULT_SECRETS):
+        findings.append(LintFinding("error", None, "a secret-shaped token is present in the draft text"))
+    # 9 — over-broad forbid_command (matches a known-safe command)
+    for c in cfg.checks:
+        if c.primitive != "forbid_command":
+            continue
+        for cmd in _SAFE_CMD_CORPUS:
+            if (c.deny and _deny_hit(cmd, c.deny)) or (c.pattern and re.search(c.pattern, cmd)):
+                findings.append(LintFinding("warn", c.id, f"forbid_command matches a known-safe command: {cmd!r}"))
+                break
+    # 10 — simulate: any block that would fire on existing HEAD code (never executes `run`)
+    if head_facts is not None:
+        for f in run_change(cfg, head_facts, allow_run=False):
+            lvl = "error" if f.severity == "block" else "warn"
+            findings.append(LintFinding(lvl, f.id, f"would fire on existing HEAD code: {f.reason}"))
+    # 11 — one todo per remaining review marker LINE (the human's load-bearing act)
+    n_markers = sum(1 for ln in text.splitlines() if ln.lstrip().startswith(_REVIEW_MARKER))
+    for _ in range(n_markers):
+        findings.append(LintFinding("todo", None, "unresolved # TODO(ratchet:review) — arm + delete it, or just delete to keep advisory"))
+    return findings
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
@@ -774,6 +2011,17 @@ layer = "agent"
 primitive = "forbid_command"
 pattern = "--no-verify|--no-gpg-sign|HUSKY=0"
 
+# "If on main, branch first." Deny a commit/push on the default branch in real time;
+# the only way past is `git checkout -b` — which is the intended outcome.
+[[check]]
+id = "branch-first"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "forbid_commit_on_branch"
+branch = ["main"]
+ops = ["commit", "push"]
+
 # Never let a credential into the diff.
 [[check]]
 id = "secret-scan"
@@ -790,7 +2038,35 @@ severity = "warn"
 primitive = "path_requires"
 when = "code"
 need = "docs"
+
+# Close the two canonical "make CI green by doing less" corner-cuts. Uncomment to arm:
+#
+# "delete the failing test" — a whole test-file deletion (unless a test is added in
+# the same change, i.e. a rename/reorg):
+# [[check]]
+# id = "no-test-delete"
+# kind = "fact"
+# severity = "block"
+# primitive = "forbid_delete"
+# scope = "tests"
+# unless_paired_add = true
+#
+# "strip the assertion" — a REMOVED guard line (the '-' twin of forbid_pattern):
+# [[check]]
+# id = "keep-asserts"
+# kind = "fact"
+# severity = "block"
+# primitive = "forbid_removal"
+# pattern = "assert|expect\\\\(|\\\\bawait\\\\b"
+# scope = "code"
 """
+
+
+def _current_branch(cwd: str) -> str | None:
+    """The live agent-layer branch fact. None on a detached HEAD (`git symbolic-ref`
+    fails) → forbid_commit_on_branch never false-fires there."""
+    out = _git(cwd, ["symbolic-ref", "--short", "-q", "HEAD"])
+    return out.strip() if out and out.strip() else None
 
 
 def _resolve_base(cwd: str, default_branch: str) -> str | None:
@@ -814,13 +2090,26 @@ def cmd_gate() -> int:
     (for a merge, also the two-lens block in the PR body) — bypassable via the
     agent-layer escape hatch, because CI still enforces."""
     buf = sys.stdin.read()
-    cmd = CommandFacts.from_pretooluse_json(buf)
+    tool_name, tool_input = _pretooluse_tool(buf)
     try:
         cfg = _read_working_config(".")
     except (OSError, ConfigError):
         return 0  # no/invalid config in this repo → never block
-    # 1) hard deny: forbidden command shapes — never bypassable (it skips the hooks)
+    # 0) a Write/Edit to a gate-defining file — a HARD deny (self_protect), so the
+    #    agent can't loosen its own gate mid-session. Routed here when the hook matcher
+    #    fires on a write tool; a Bash payload simply has no write path.
+    if tool_name in WRITE_TOOLS:
+        fp = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+        spblocks = run_self_protect_gate(cfg, tool_name, fp if isinstance(fp, str) else "")
+        if has_block(spblocks):
+            print(f"ratchet: blocked — {_reasons(spblocks)}", file=sys.stderr)
+            return 2
+        return 0
+    cmd = CommandFacts(command=tool_input.get("command", "") if isinstance(tool_input.get("command", ""), str) else "")
+    # 1) hard deny: forbidden command shapes + commit/push on a protected branch —
+    #    never bypassable (a forbidden command skips the hooks; branch-first is cheap).
     cmdblocks = run_command_gate(cfg, cmd)
+    cmdblocks += run_branch_gate(cfg, cmd, _current_branch("."))
     if has_block(cmdblocks):
         print(f"ratchet: blocked — {_reasons(cmdblocks)}", file=sys.stderr)
         return 2
@@ -909,12 +2198,17 @@ def cmd_check(
     allow_run: bool = True,
     pr_body_file: str | None = None,
     approvals: str | None = None,
+    reviews_file: str | None = None,
+    head_sha: str | None = None,
+    pr_author: str | None = None,
+    checks_file: str | None = None,
     allow_bypass: bool = False,
 ) -> int:
     """CHANGE layer: 1 = blocking findings, 0 = clean (warns print, never fail).
 
-    `pr_body_file` / `approvals` supply PR context (CI passes them; local pre-push
-    omits them, so PR-body / approval checks skip rather than false-fire).
+    `pr_body_file` / `approvals` / `reviews_file` / `head_sha` / `pr_author` /
+    `checks_file` supply PR context (CI passes them; local pre-push omits them, so
+    PR-body / reviewer-identity / checks-green checks skip rather than false-fire).
     `allow_bypass` honours the agent-layer escape hatch (pre-push convenience); the
     authoritative CI run never sets it."""
     try:
@@ -931,7 +2225,8 @@ def cmd_check(
     except (OSError, ConfigError) as e:
         print(f"ratchet: cannot load base-pinned config: {e}", file=sys.stderr)
         return 1
-    facts = DiffFacts.from_range(cwd, base or "HEAD~1")
+    head = "HEAD"
+    facts = DiffFacts.from_range(cwd, base or "HEAD~1", head)
     if pr_body_file:
         try:
             with open(pr_body_file, encoding="utf-8") as fh:
@@ -940,6 +2235,14 @@ def cmd_check(
             pass  # no body file → stays None (no PR context)
     if approvals is not None:
         facts.approvals = [a.strip() for a in approvals.split(",") if a.strip()]
+    if reviews_file:
+        facts.reviews = _load_reviews(reviews_file)
+    facts.head_sha = head_sha or (_git(cwd, ["rev-parse", head]) or "").strip() or None
+    facts.pr_author = pr_author
+    if checks_file:
+        facts.checks = _load_checks(checks_file)
+    if any(c.primitive == "max_added_file_bytes" for c in cfg.checks):
+        _populate_file_sizes(cwd, base or "HEAD~1", head, facts)
     findings = run_change(cfg, facts, allow_run=allow_run)
     for f in findings:
         tag = "BLOCK" if f.severity == "block" else "warn "
@@ -980,7 +2283,541 @@ def _read_working_config(cwd: str) -> Config:
         return Config.parse(fh.read())
 
 
+def cmd_suggest(cwd: str = ".", fmt: str = "json") -> int:
+    """Extract repo facts → JSON (the contract the host agent consumes) or an all-warn
+    starter draft. Writes NOTHING — the agent authors `ratchet.toml.draft`, never this."""
+    scan = scan_repo(cwd)
+    print(json.dumps(_scan_to_dict(scan), indent=2) if fmt == "json" else render_suggest_toml(scan))
+    return 0
+
+
+def cmd_gaps(cwd: str = ".", fmt: str = "text") -> int:
+    """Advisory: which CLAUDE.md house-rules NO check binds (prose vs mechanism, on the
+    repo it guards). Always exit 0 — it never gates."""
+    try:
+        cfg = _read_working_config(cwd)
+    except (OSError, ConfigError):
+        print("ratchet: no ratchet.toml — run /ratchet-init first")
+        return 0
+    scan = scan_repo(cwd)
+    if not scan.house_rules:
+        print("ratchet: no CLAUDE.md/AGENTS.md house-rules found")
+        return 0
+    rows = []
+    for h in scan.house_rules:
+        bound, c = is_bound(h, cfg.checks)
+        if h.render == "judge":
+            bucket = "not-mechanizable"
+        elif bound and c and c.severity == "block":
+            bucket = "bound-block"
+        elif bound:
+            bucket = "bound-warn"
+        else:
+            bucket = "unbound"
+        rows.append((h, bound, c, bucket))
+    if fmt == "json":
+        print(json.dumps([{
+            "rule_id": h.suggested_id, "primitive": h.primitive, "bound": b,
+            "check_id": (c.id if c else None), "severity": (c.severity if c else None),
+            "evidence": h.rule_text, "bucket": bk,
+        } for h, b, c, bk in rows], indent=2))
+        return 0
+    unbound = [r for r in rows if r[3] == "unbound"]
+    bound_block = [r for r in rows if r[3] == "bound-block"]
+    bound_warn = [r for r in rows if r[3] == "bound-warn"]
+    if unbound:
+        print("✗ UNBOUND — prose with no mechanism (the headline):")
+        for h, _b, _c, _bk in unbound:
+            print(f'    {h.suggested_id}: "{h.rule_text[:70]}"  → suggest `{h.primitive}`')
+    if bound_warn:
+        print("~ bound but advisory only (warn — no teeth yet):")
+        for h, _b, c, _bk in bound_warn:
+            print(f"    {h.suggested_id} → {c.id if c else '?'} (warn)")
+    if bound_block:
+        print("✓ enforced (block):")
+        for h, _b, c, _bk in bound_block:
+            print(f"    {h.suggested_id} → {c.id if c else '?'}")
+    nb = len(bound_block) + len(bound_warn)
+    print(f"\nratchet: {len(rows)} house-rule(s) · {nb} bound · {len(unbound)} unbound — advisory only")
+    return 0
+
+
+def cmd_draft_lint(cwd: str = ".", config: str = "ratchet.toml.draft", simulate: bool = False) -> int:
+    """Strict-validate the agent-authored draft (superset of validate). Exit 0 iff
+    structure is clean AND zero review markers remain; else 1."""
+    try:
+        with open(os.path.join(cwd, config), encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        print(f"ratchet: no draft at {config} — run `ratchet suggest` / `/ratchet-init` first", file=sys.stderr)
+        return 1
+    existing = None
+    try:
+        existing = load_config(cwd, _resolve_base(cwd, _detect_default_branch(cwd)))
+    except (OSError, ConfigError):
+        pass
+    head_facts = DiffFacts.from_range(cwd, _EMPTY_TREE, "HEAD") if simulate else None
+    findings = draft_lint(text, existing_cfg=existing, head_facts=head_facts)
+    tags = {"error": "ERROR", "warn": "warn ", "todo": "TODO "}
+    for f in findings:
+        loc = f"{f.check_id}: " if f.check_id else ""
+        print(f"  [{tags[f.level]}] {loc}{f.msg}")
+    blocking = sum(1 for f in findings if f.level in ("error", "todo"))
+    if blocking:
+        print(f"ratchet: draft not ready ({blocking} item(s) to resolve)", file=sys.stderr)
+        return 1
+    print("ratchet: draft OK — `mv ratchet.toml.draft ratchet.toml` to arm it")
+    return 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WIRING  —  install / uninstall / doctor  (the adoption surface)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The agent layer keeps `${CLAUDE_PLUGIN_ROOT}/ratchet.py` (the var exists only
+# in-session). The CHANGE layer must run in CI / a teammate's pre-push / a fresh
+# clone where that var is undefined and base-pinning needs the engine + config in
+# git history — so `install` VENDORS the engine to `.ratchet/ratchet.py`
+# (committed, base-pinnable, offline) and wires a sentinel-delimited managed block
+# into the effective pre-push, coexisting with husky/lefthook/pre-commit/hooksPath.
+
+RATCHET_BEGIN = "# >>> ratchet (managed block) >>>"
+RATCHET_END = "# <<< ratchet <<<"
+
+PREPUSH_BLOCK = f"""\
+{RATCHET_BEGIN}
+if [ -f .ratchet/ratchet.py ] && command -v python3 >/dev/null 2>&1; then
+    python3 .ratchet/ratchet.py check --cwd . --allow-bypass < /dev/null || exit 1
+fi
+{RATCHET_END}
+"""
+
+CI_WORKFLOW = """\
+name: ratchet
+on:
+  pull_request: {}
+  push:
+    branches: [main]
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+jobs:
+  ratchet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: IvanWng97/ratchet@v1
+"""
+
+LEFTHOOK_SNIPPET = """\
+# lefthook detected — add to lefthook.yml, then `lefthook install`:
+pre-push:
+  commands:
+    ratchet:
+      run: python3 .ratchet/ratchet.py check --cwd .
+"""
+
+PRECOMMIT_SNIPPET = """\
+# pre-commit detected — add to .pre-commit-config.yaml
+# (default_install_hook_types: [pre-push]); then `pre-commit install`:
+- repo: local
+  hooks:
+    - id: ratchet
+      name: ratchet (Definition-of-Done)
+      entry: python3 .ratchet/ratchet.py check --cwd .
+      language: system
+      stages: [pre-push]
+      pass_filenames: false
+      always_run: true
+"""
+
+
+def _slurp(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def _repo_root(cwd: str) -> str | None:
+    out = _git(cwd, ["rev-parse", "--show-toplevel"])
+    return out.strip() if out else None
+
+
+def _is_within(path: str, root: str) -> bool:
+    rp, rr = os.path.realpath(path), os.path.realpath(root)
+    return rp == rr or rp.startswith(rr + os.sep)
+
+
+def _atomic_write(path: str, text: str, *, mode: int = 0o644, confine: str | None = None) -> None:
+    """Write `text` to `path` atomically, WRITING THROUGH a symlink to its realpath
+    target (stow-safe — never replaces the symlink with a regular file): mkstemp in
+    the real directory + os.replace onto the real file. `confine` (when set) refuses a
+    write whose realpath escapes that root — for committed gate files (engine/config) a
+    repo that ships `.ratchet/ratchet.py` as a symlink to `../../etc/…` must NOT make
+    `install` clobber an arbitrary path on a victim's clone; the pre-push hook write
+    deliberately omits `confine` because a stow-symlinked hook is intended."""
+    real = os.path.realpath(path)
+    if confine is not None and not _is_within(real, confine):
+        raise OSError(f"refusing to write {path}: resolves outside the repo ({real})")
+    d = os.path.dirname(real) or "."
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".ratchet-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, real)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _replace_or_append_block(cur: str, block: str) -> str:
+    """Replace the sentinel-delimited managed block in `cur` with `block`, else append.
+    Byte-idempotent: a second call with the same block reproduces the input."""
+    block = block if block.endswith("\n") else block + "\n"
+    bi = cur.find(RATCHET_BEGIN)
+    if bi == -1:
+        if cur and not cur.endswith("\n"):
+            cur += "\n"
+        return cur + block
+    ei = cur.find(RATCHET_END, bi)
+    if ei == -1:  # malformed begin-without-end → replace to EOF
+        return cur[:bi] + block
+    nl = cur.find("\n", ei)
+    tail = cur[nl + 1:] if nl != -1 else ""
+    return cur[:bi] + block + tail
+
+
+def _strip_block(cur: str) -> str:
+    """Remove exactly the sentinel span (uninstall). No-op when absent."""
+    bi = cur.find(RATCHET_BEGIN)
+    if bi == -1:
+        return cur
+    ei = cur.find(RATCHET_END, bi)
+    if ei == -1:
+        return cur[:bi]
+    nl = cur.find("\n", ei)
+    tail = cur[nl + 1:] if nl != -1 else ""
+    return cur[:bi] + tail
+
+
+def _ensure_gitignore(root: str) -> None:
+    """Scoped + idempotent: ignore `.ratchet/.state` (the debounce state) — NEVER the
+    whole `.ratchet/` dir, which would un-commit the vendored engine."""
+    p = os.path.join(root, ".gitignore")
+    line = ".ratchet/.state"
+    cur = _slurp(p)
+    if line in {ln.strip() for ln in cur.splitlines()}:
+        return
+    sep = "" if (not cur or cur.endswith("\n")) else "\n"
+    _atomic_write(p, cur + sep + line + "\n", confine=root)
+
+
+def _detect_hook_manager(root: str) -> str | None:
+    for name in ("lefthook.yml", "lefthook.yaml", "lefthook.toml"):
+        if os.path.exists(os.path.join(root, name)):
+            return "lefthook"
+    if os.path.exists(os.path.join(root, ".pre-commit-config.yaml")):
+        return "pre-commit"
+    if os.path.isdir(os.path.join(root, ".husky")):
+        return "husky"
+    return None
+
+
+def _effective_hook_target(cwd: str, root: str) -> tuple[str, str]:
+    """Where (and whether) to write the pre-push block. First match wins:
+      lefthook / pre-commit present → emit a snippet, write NOTHING (they regenerate
+      their own hook). husky → `.husky/pre-push`. core.hooksPath inside the repo →
+      that dir. else the worktree-aware `.git/hooks`. An absolute/out-of-repo
+      hooksPath (a shared global dir) or a non-repo → skip (vendor/config/CI still go).
+    Returns (action, payload): "write"→abs pre-push path; "snippet:<mgr>"→text; "skip"→reason."""
+    mgr = _detect_hook_manager(root)
+    if mgr == "lefthook":
+        return ("snippet:lefthook", LEFTHOOK_SNIPPET)
+    if mgr == "pre-commit":
+        return ("snippet:pre-commit", PRECOMMIT_SNIPPET)
+    if mgr == "husky":
+        return ("write", os.path.join(root, ".husky", "pre-push"))
+    hooks_path = (_git(cwd, ["config", "--get", "core.hooksPath"]) or "").strip()
+    if hooks_path:
+        abs_hooks = hooks_path if os.path.isabs(hooks_path) else os.path.normpath(os.path.join(root, hooks_path))
+        if _is_within(abs_hooks, root):
+            return ("write", os.path.join(abs_hooks, "pre-push"))
+        return ("skip", f"core.hooksPath is outside the repo ({hooks_path}) — a shared global hooks dir; "
+                        "add the pre-push block there by hand, or rely on CI")
+    gh = _git(cwd, ["rev-parse", "--git-path", "hooks"])
+    if not gh:
+        return ("skip", "not a git repository")
+    abs_gh = gh.strip()
+    if not os.path.isabs(abs_gh):
+        abs_gh = os.path.normpath(os.path.join(cwd, abs_gh))
+    return ("write", os.path.join(abs_gh, "pre-push"))
+
+
+def _vendor_engine(root: str) -> str | None:
+    """Copy this running engine → `.ratchet/ratchet.py`. Returns the dest, or None when
+    it would self-reference (running `install` FROM the already-vendored copy → never
+    truncate the file we're executing)."""
+    src = os.path.realpath(__file__)
+    dst = os.path.join(root, ".ratchet", "ratchet.py")
+    if os.path.realpath(dst) == src:
+        return None
+    _atomic_write(dst, _slurp(src), mode=0o644, confine=root)
+    return dst
+
+
+def _install_prepush(target_path: str) -> None:
+    """Append/replace the managed block in the effective pre-push (write-through a
+    symlink to its realpath; chmod +x). Skips the write when already byte-identical."""
+    real = os.path.realpath(target_path)
+    if os.path.exists(real):
+        cur = _slurp(real)
+        new = _replace_or_append_block(cur, PREPUSH_BLOCK)
+    else:
+        cur = ""
+        new = "#!/bin/sh\n" + PREPUSH_BLOCK
+    if new != cur:
+        _atomic_write(target_path, new, mode=0o755)
+        return
+    st = os.stat(real)
+    if not st.st_mode & 0o111:
+        os.chmod(real, st.st_mode | 0o755)
+
+
+def _write_ci(root: str, branch: str = "main") -> str | None:
+    """Scaffold the change-layer CI workflow IF ABSENT (non-clobber), with the push-trigger
+    branch set to the repo's real default branch."""
+    p = os.path.join(root, ".github", "workflows", "ratchet.yml")
+    if os.path.exists(p):
+        return None
+    _atomic_write(p, CI_WORKFLOW.replace("branches: [main]", f"branches: [{branch}]"), mode=0o644, confine=root)
+    return p
+
+
+def _scaffold_config(branch: str) -> str:
+    """The starter `ratchet.toml`, with the detected default branch substituted for the
+    `main` default (so base-pinning + branch-first are correct on master/trunk repos)."""
+    if branch == "main":
+        return INIT_TEMPLATE
+    return (INIT_TEMPLATE
+            .replace('default_branch = "main"', f'default_branch = "{branch}"')
+            .replace('branch = ["main"]', f'branch = ["{branch}"]'))
+
+
+def _protects_gate_files(cfg: Config) -> bool:
+    """True iff some protected_path/self_protect check's globs cover the engine, `ratchet.toml`,
+    AND the CI workflow (doctor #8 — the engine-neuter defense). The engine is matched at the
+    vendored `.ratchet/ratchet.py` OR a root `ratchet.py` (ratchet's own repo)."""
+    for c in cfg.checks:
+        if c.primitive not in ("protected_path", "self_protect") or not c.paths:
+            continue
+        covers_engine = _path_matches(".ratchet/ratchet.py", c.paths) or _path_matches("ratchet.py", c.paths)
+        covers_config = _path_matches("ratchet.toml", c.paths)
+        covers_ci = _path_matches(".github/workflows/ratchet.yml", c.paths)
+        if covers_engine and covers_config and covers_ci:
+            return True
+    return False
+
+
+def cmd_install(cwd: str = ".", vendor: bool = True, config: bool = True,
+                hook: bool = True, ci: bool = True, gitignore: bool = True) -> int:
+    """Idempotent, non-clobbering wiring of the change layer. No flags ⇒ do all five.
+    Touches only plumbing (vendor / scaffold / hook / CI / gitignore) — never authors a
+    check's severity/kind, so the block-requires-fact moat is untouched."""
+    root = _repo_root(cwd)
+    if root is None:
+        print("ratchet: not a git repository — run `git init` first", file=sys.stderr)
+        return 1
+    branch = _detect_default_branch(cwd)
+    did: list[str] = []
+    if vendor:
+        dst = _vendor_engine(root)
+        did.append("vendored .ratchet/ratchet.py" if dst else "engine already vendored (self) — skipped")
+    if config:
+        cfg_path = os.path.join(root, "ratchet.toml")
+        if os.path.exists(cfg_path):
+            did.append("ratchet.toml exists — left untouched")
+        else:
+            _atomic_write(cfg_path, _scaffold_config(branch), confine=root)
+            did.append(f"wrote starter ratchet.toml (default_branch={branch})")
+    if gitignore:
+        _ensure_gitignore(root)
+        did.append("ensured .gitignore covers .ratchet/.state")
+    if hook:
+        action, payload = _effective_hook_target(cwd, root)
+        if action == "write":
+            _install_prepush(payload)
+            did.append(f"wired pre-push managed block ({os.path.realpath(payload)})")
+        elif action.startswith("snippet:"):
+            did.append(f"{action.split(':', 1)[1]} detected — wrote nothing; add this snippet:\n\n{payload}")
+        else:
+            did.append(f"pre-push skipped — {payload}")
+    if ci:
+        did.append("scaffolded .github/workflows/ratchet.yml" if _write_ci(root, branch)
+                   else ".github/workflows/ratchet.yml exists — left untouched")
+    print("ratchet install:")
+    for d in did:
+        print(f"  • {d}")
+    if vendor or config or ci:
+        print("\nnext: `git add .ratchet/ratchet.py ratchet.toml .github/workflows/ratchet.yml` "
+              "& commit, then `ratchet doctor`")
+    return 0
+
+
+def cmd_uninstall(cwd: str = ".", hook: bool = True) -> int:
+    """Conservative: strip ONLY the local pre-push managed block. Never `git rm`
+    committed source (engine / config / workflow) — that is an explicit reviewable change."""
+    root = _repo_root(cwd)
+    if root is None:
+        print("ratchet: not a git repository", file=sys.stderr)
+        return 1
+    if not hook:
+        print("ratchet uninstall: nothing to do (--no-hook)")
+        return 0
+    action, payload = _effective_hook_target(cwd, root)
+    if action != "write":
+        msg = (f"hooks managed by {action.split(':', 1)[1]} — remove the ratchet snippet by hand"
+               if action.startswith("snippet:") else payload)
+        print(f"ratchet uninstall: {msg}")
+        return 0
+    real = os.path.realpath(payload)
+    cur = _slurp(real)
+    if not os.path.exists(real) or RATCHET_BEGIN not in cur:
+        print("ratchet uninstall: no managed block in the pre-push — nothing to strip")
+        return 0
+    stripped = _strip_block(cur)
+    if stripped.strip() in ("", "#!/bin/sh"):  # only our shebang remains → we authored it
+        os.remove(real)
+        print(f"ratchet uninstall: removed the ratchet-authored pre-push hook ({real})")
+    else:
+        _atomic_write(payload, stripped, mode=0o755)
+        print(f"ratchet uninstall: stripped the managed block, kept the rest ({real})")
+    print("note: committed .ratchet/ratchet.py, ratchet.toml and the CI workflow are NOT removed "
+          "(remove them in a reviewed change)")
+    return 0
+
+
+def cmd_doctor(cwd: str = ".", as_json: bool = False) -> int:
+    """Read-only diagnosis of both layers. Exit 1 ONLY on a hard change-layer failure
+    (engine missing / won't compile, or config invalid); everything else is advisory."""
+    root = _repo_root(cwd)
+    base_dir = root or cwd
+    rows: list[tuple[str, str, str]] = []
+
+    def add(status: str, label: str, fix: str = "") -> None:
+        rows.append((status, label, fix))
+
+    if sys.version_info >= (3, 11):
+        add("ok", f"python {sys.version_info.major}.{sys.version_info.minor} ≥ 3.11")
+    else:
+        add("warn", f"python {sys.version_info.major}.{sys.version_info.minor} < 3.11", "tomllib needs 3.11+")
+
+    hard_fail = False
+    eng = os.path.join(base_dir, ".ratchet", "ratchet.py")
+    if os.path.exists(eng):
+        try:
+            compile(_slurp(eng), eng, "exec")  # syntax-check; writes no __pycache__
+            add("ok", ".ratchet/ratchet.py present and compiles")
+        except SyntaxError as e:
+            add("fail", ".ratchet/ratchet.py does not compile", str(e).splitlines()[0])
+            hard_fail = True
+    else:
+        add("fail", ".ratchet/ratchet.py missing", "run `ratchet install` (or /ratchet-init) to vendor the engine")
+        hard_fail = True
+
+    cfg: Config | None = None
+    cfg_path = os.path.join(base_dir, "ratchet.toml")
+    if os.path.exists(cfg_path):
+        try:
+            cfg = Config.parse(_slurp(cfg_path))
+            add("ok", f"ratchet.toml valid — {len(cfg.checks)} checks, base_pinned={cfg.meta.base_pinned}")
+        except (OSError, ConfigError) as e:
+            add("fail", "ratchet.toml invalid", str(e))
+            hard_fail = True
+    else:
+        add("fail", "ratchet.toml missing", "run `ratchet install` / `/ratchet-init`")
+        hard_fail = True
+
+    if root:
+        action, payload = _effective_hook_target(cwd, root)
+        if action == "write":
+            real = os.path.realpath(payload)
+            if os.path.exists(real) and RATCHET_BEGIN in _slurp(real):
+                add("ok", f"pre-push managed block present ({real})")
+            else:
+                add("warn", "pre-push managed block absent", "run `ratchet install` (CI is the authoritative gate)")
+        elif action.startswith("snippet:"):
+            add("warn", f"hooks managed by {action.split(':', 1)[1]} — snippet expected (not auto-written)",
+                "add the ratchet snippet from `ratchet install`")
+        else:
+            add("warn", f"pre-push not wired — {payload}", "rely on CI")
+
+    wf = os.path.join(base_dir, ".github", "workflows", "ratchet.yml")
+    if os.path.exists(wf) and "ratchet" in _slurp(wf):
+        add("ok", ".github/workflows/ratchet.yml references ratchet")
+    else:
+        add("warn", "CI workflow absent", "run `ratchet install` to scaffold .github/workflows/ratchet.yml")
+
+    default_branch = cfg.repo.default_branch if cfg else _detect_default_branch(cwd)
+    base = _resolve_base(cwd, default_branch)
+    if base:
+        add("ok", f"base ref reachable ({base})")
+    else:
+        add("warn", "base ref unreachable", "shallow clone? set `fetch-depth: 0` — base-pinning degrades")
+
+    if base and cfg and cfg.meta.base_pinned:
+        bc = _git(cwd, ["show", f"{base}:ratchet.toml"])
+        add("ok" if bc else "warn",
+            "base-pinned config readable" if bc else "base-pinned config not yet in the base ref (first commit?)")
+    else:
+        add("skip", "base-pinning off or no base ref")
+
+    if cfg:
+        covered = _protects_gate_files(cfg)
+        add("ok" if covered else "warn",
+            "gate files covered by protected_path/self_protect" if covered else "gate files not self-protected",
+            "" if covered else "add a protected_path covering .ratchet/** + ratchet.toml + .github/workflows/** "
+                               "(the action's rev-pinned engine already covers GitHub CI)")
+
+    if os.environ.get("CLAUDE_PLUGIN_ROOT"):
+        add("ok", "agent layer: CLAUDE_PLUGIN_ROOT set (plugin active in-session)")
+    else:
+        add("skip", "agent layer: run /ratchet-doctor inside Claude Code to verify the plugin")
+
+    if as_json:
+        print(json.dumps([{"status": s, "label": lbl, "fix": fx} for s, lbl, fx in rows], indent=2))
+    else:
+        glyph = {"ok": "✓", "warn": "~", "fail": "✗", "skip": "·"}
+        for s, lbl, fx in rows:
+            print(f"  {glyph[s]} {lbl}")
+            if fx and s in ("warn", "fail"):
+                print(f"      → {fx}")
+        print()
+        if hard_fail:
+            print("ratchet doctor: change layer NOT ready (fix the ✗ above)", file=sys.stderr)
+        else:
+            print("ratchet doctor: change layer ready")
+    return 1 if hard_fail else 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    # The renders carry non-ASCII glyphs (the `─` rule in suggest, doctor's ✓/~/✗/·);
+    # a Windows console/pipe defaults to cp1252 and would UnicodeEncodeError on them.
+    # Force UTF-8 at the CLI boundary only (a library must not reconfigure global streams).
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, ValueError):
+            pass
     p = argparse.ArgumentParser(
         prog="ratchet",
         description="Ungameable diff-fact enforcement of the closing-discipline.",
@@ -998,6 +2835,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     c.add_argument("--pr-body-file", help="file holding the PR body (enables PR-body checks; CI only)")
     c.add_argument("--approvals", help="comma-separated approver logins (enables protected_path; CI only)")
+    c.add_argument("--reviews-file", help="JSON from `gh pr view --json reviews` (reviewer-identity checks; CI only)")
+    c.add_argument("--head-sha", help="PR head commit SHA (freshness for approval_state_depth; CI only)")
+    c.add_argument("--pr-author", help="PR author login (excludes self-approval; CI only)")
+    c.add_argument("--checks-file", help="JSON from `gh pr checks --json name,state` (require_checks_green; CI only)")
     c.add_argument("--allow-bypass", action="store_true", help="honour the agent-layer bypass (pre-push only)")
     j = sub.add_parser("judge", help="emit the advisory LLM-judge prompt(s) to stdout (CI)")
     j.add_argument("--cwd", default=".")
@@ -1005,6 +2846,29 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--config", default="ratchet.toml")
     i = sub.add_parser("init", help="write a starter ratchet.toml")
     i.add_argument("--config", default="ratchet.toml")
+    sg = sub.add_parser("suggest", help="extract repo facts → a ranked draft policy (for /ratchet-init; never writes)")
+    sg.add_argument("--cwd", default=".")
+    sg.add_argument("--format", choices=["json", "toml"], default="json")
+    dl = sub.add_parser("draft-lint", help="strict-validate a drafted policy (superset of validate; gates on TODO markers)")
+    dl.add_argument("--cwd", default=".")
+    dl.add_argument("--config", default="ratchet.toml.draft")
+    dl.add_argument("--simulate", action="store_true", help="also flag any block that would fire on existing HEAD code")
+    gp = sub.add_parser("gaps", help="advisory: which CLAUDE.md house-rules are NOT bound by a ratchet check")
+    gp.add_argument("--cwd", default=".")
+    gp.add_argument("--format", choices=["text", "json"], default="text")
+    ins = sub.add_parser("install", help="wire the change layer: vendor engine + scaffold config/hook/CI (idempotent)")
+    ins.add_argument("--cwd", default=".")
+    ins.add_argument("--no-vendor", action="store_true", help="skip vendoring .ratchet/ratchet.py")
+    ins.add_argument("--no-config", action="store_true", help="skip writing a starter ratchet.toml")
+    ins.add_argument("--no-hook", action="store_true", help="skip wiring the pre-push hook")
+    ins.add_argument("--no-ci", action="store_true", help="skip scaffolding the CI workflow")
+    ins.add_argument("--no-gitignore", action="store_true", help="skip the .gitignore entry")
+    un = sub.add_parser("uninstall", help="strip the local pre-push managed block (never removes committed source)")
+    un.add_argument("--cwd", default=".")
+    un.add_argument("--no-hook", action="store_true", help="no-op (reserved)")
+    dr = sub.add_parser("doctor", help="diagnose both layers (read-only; exit 1 only on a hard change-layer failure)")
+    dr.add_argument("--cwd", default=".")
+    dr.add_argument("--json", action="store_true", help="emit the per-check status array")
     sub.add_parser("selftest", help="run the in-process self-test")
 
     args = p.parse_args(argv)
@@ -1018,6 +2882,10 @@ def main(argv: list[str] | None = None) -> int:
             allow_run=not args.no_run,
             pr_body_file=args.pr_body_file,
             approvals=args.approvals,
+            reviews_file=args.reviews_file,
+            head_sha=args.head_sha,
+            pr_author=args.pr_author,
+            checks_file=args.checks_file,
             allow_bypass=args.allow_bypass,
         )
     if args.cmd == "judge":
@@ -1026,6 +2894,25 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_validate(args.config)
     if args.cmd == "init":
         return cmd_init(args.config)
+    if args.cmd == "suggest":
+        return cmd_suggest(args.cwd, fmt=args.format)
+    if args.cmd == "draft-lint":
+        return cmd_draft_lint(args.cwd, args.config, args.simulate)
+    if args.cmd == "gaps":
+        return cmd_gaps(args.cwd, fmt=args.format)
+    if args.cmd == "install":
+        return cmd_install(
+            args.cwd,
+            vendor=not args.no_vendor,
+            config=not args.no_config,
+            hook=not args.no_hook,
+            ci=not args.no_ci,
+            gitignore=not args.no_gitignore,
+        )
+    if args.cmd == "uninstall":
+        return cmd_uninstall(args.cwd, hook=not args.no_hook)
+    if args.cmd == "doctor":
+        return cmd_doctor(args.cwd, as_json=args.json)
     if args.cmd == "selftest":
         print("ratchet selftest: ok (run `python3 -m pytest` / `tests/test_ratchet.py` for the full suite)")
         return 0

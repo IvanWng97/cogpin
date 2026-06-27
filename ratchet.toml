@@ -22,6 +22,28 @@ layer = "agent"
 primitive = "forbid_command"
 pattern = "--no-verify|--no-gpg-sign|HUSKY=0|git .*-c core.hooksPath="
 
+# "If on main, branch first." Deny a commit/push on the default branch in real time;
+# the only way past is `git checkout -b`, which is the intended outcome.
+[[check]]
+id = "branch-first"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "forbid_commit_on_branch"
+branch = ["main"]
+ops = ["commit", "push"]
+
+# Real-time twin of `protected-gate-files`: deny a Write/Edit to a gate-defining file
+# the instant the agent reaches for it, so it can't quietly loosen its own gate. The
+# change-layer `protected_path` (below) is the authoritative PR-approval backstop.
+[[check]]
+id = "self-protect"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "self_protect"
+paths = ["ratchet.toml", "ratchet.py", "action.yml", "hooks/hooks.json", ".github/workflows/**", ".claude-plugin/**"]
+
 # ── change layer (pre-push + CI, authoritative, base-pinned) ─────────────────
 [[check]]
 id = "secret-scan"
@@ -30,14 +52,18 @@ severity = "block"
 primitive = "secret_scan"
 forbid_paths = [".env", ".env.*", "*.env", "*.pem", "*.key", "id_rsa", "*.p12"]
 
-# Gate-defining files can't change without an independent approval (PR context only;
-# local pre-push skips, CI populates approvals). This is the bypass-proof keystone.
+# Gate-defining files can't change without a FRESH, non-bot, non-author approval (PR
+# context only; local pre-push skips, CI populates reviews). The bypass-proof keystone.
+# severity=warn because this repo is solo: GitHub forbids self-approval, so a `block`
+# here would be unclearable on every gate-touching PR. Promote to "block" the day a
+# second maintainer / CODEOWNERS reviewer exists. The agent-layer `self-protect` above
+# already hard-blocks in-session edits, and base-pinning still reads policy from base.
 [[check]]
 id = "protected-gate-files"
 kind = "fact"
-severity = "block"
+severity = "warn"
 primitive = "protected_path"
-paths = ["ratchet.toml", "ratchet.py", "hooks/hooks.json", ".github/workflows/**", ".claude-plugin/**"]
+paths = ["ratchet.toml", "ratchet.py", "action.yml", "hooks/hooks.json", ".github/workflows/**", ".claude-plugin/**"]
 
 # Touch the engine → touch a test (existence-floor; whether the test has teeth is judged).
 [[check]]
@@ -47,6 +73,26 @@ severity = "warn"
 primitive = "path_requires"
 when = "code"
 need = "tests"
+
+# Don't delete a test to go green. A whole test-file deletion blocks unless a test
+# file is added in the same change (a rename/reorg). Ungameable file D-status fact.
+[[check]]
+id = "no-test-delete"
+kind = "fact"
+severity = "block"
+primitive = "forbid_delete"
+scope = "tests"
+unless_paired_add = true
+
+# Don't silently strip a test. A REMOVED `def test_…` line under tests/ blocks —
+# the '-' twin of forbid_pattern, closing the "delete the assertion" corner-cut.
+[[check]]
+id = "keep-tests"
+kind = "fact"
+severity = "block"
+primitive = "forbid_removal"
+pattern = '^\s*def test_'
+scope = "tests"
 
 # Touch the engine → touch docs.
 [[check]]
@@ -63,6 +109,16 @@ id = "commit-footer"
 kind = "fact"
 severity = "warn"
 primitive = "commit_footer"
+
+# Conventional-Commits subject (warn — the repo follows it; the engine never reads
+# intent, only the literal shape). The require-presence twin of forbid_in_message.
+[[check]]
+id = "conventional-commits"
+kind = "fact"
+severity = "warn"
+primitive = "require_message_pattern"
+pattern = '^(feat|fix|docs|chore|refactor|test|ci|build|perf|style|revert)(\(.+\))?!?: '
+msg_scope = ["commit_subject"]
 
 # THE teeth: the change layer re-runs the real test suite from the base-pinned policy.
 # `run` blocks are change-layer-only (validate enforces it) and skipped by --no-run.

@@ -1,0 +1,22 @@
+{
+  "name": "ratchet-site",
+  "type": "module",
+  "version": "0.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "scripts": {
+    "sync-engine": "node scripts/sync-engine.mjs",
+    "predev": "npm run sync-engine",
+    "prebuild": "npm run sync-engine",
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "check": "astro check"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.41.1",
+    "sharp": "^0.35.2"
+  }
+}
