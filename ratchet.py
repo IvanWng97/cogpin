@@ -31,6 +31,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import tomllib
 from dataclasses import dataclass, field
 
@@ -2326,6 +2327,422 @@ def cmd_draft_lint(cwd: str = ".", config: str = "ratchet.toml.draft", simulate:
     return 0
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# WIRING  —  install / uninstall / doctor  (the adoption surface)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The agent layer keeps `${CLAUDE_PLUGIN_ROOT}/ratchet.py` (the var exists only
+# in-session). The CHANGE layer must run in CI / a teammate's pre-push / a fresh
+# clone where that var is undefined and base-pinning needs the engine + config in
+# git history — so `install` VENDORS the engine to `.ratchet/ratchet.py`
+# (committed, base-pinnable, offline) and wires a sentinel-delimited managed block
+# into the effective pre-push, coexisting with husky/lefthook/pre-commit/hooksPath.
+
+RATCHET_BEGIN = "# >>> ratchet (managed block) >>>"
+RATCHET_END = "# <<< ratchet <<<"
+
+PREPUSH_BLOCK = f"""\
+{RATCHET_BEGIN}
+if [ -f .ratchet/ratchet.py ] && command -v python3 >/dev/null 2>&1; then
+    python3 .ratchet/ratchet.py check --cwd . --allow-bypass < /dev/null || exit 1
+fi
+{RATCHET_END}
+"""
+
+CI_WORKFLOW = """\
+name: ratchet
+on:
+  pull_request: {}
+  push:
+    branches: [main]
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+jobs:
+  ratchet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: IvanWng97/ratchet@v1
+"""
+
+LEFTHOOK_SNIPPET = """\
+# lefthook detected — add to lefthook.yml, then `lefthook install`:
+pre-push:
+  commands:
+    ratchet:
+      run: python3 .ratchet/ratchet.py check --cwd .
+"""
+
+PRECOMMIT_SNIPPET = """\
+# pre-commit detected — add to .pre-commit-config.yaml
+# (default_install_hook_types: [pre-push]); then `pre-commit install`:
+- repo: local
+  hooks:
+    - id: ratchet
+      name: ratchet (Definition-of-Done)
+      entry: python3 .ratchet/ratchet.py check --cwd .
+      language: system
+      stages: [pre-push]
+      pass_filenames: false
+      always_run: true
+"""
+
+
+def _slurp(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def _repo_root(cwd: str) -> str | None:
+    out = _git(cwd, ["rev-parse", "--show-toplevel"])
+    return out.strip() if out else None
+
+
+def _is_within(path: str, root: str) -> bool:
+    rp, rr = os.path.realpath(path), os.path.realpath(root)
+    return rp == rr or rp.startswith(rr + os.sep)
+
+
+def _atomic_write(path: str, text: str, *, mode: int = 0o644) -> None:
+    """Write `text` to `path` atomically, WRITING THROUGH a symlink to its realpath
+    target (stow-safe — never replaces the symlink with a regular file): mkstemp in
+    the real directory + os.replace onto the real file."""
+    real = os.path.realpath(path)
+    d = os.path.dirname(real) or "."
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".ratchet-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, real)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _replace_or_append_block(cur: str, block: str) -> str:
+    """Replace the sentinel-delimited managed block in `cur` with `block`, else append.
+    Byte-idempotent: a second call with the same block reproduces the input."""
+    block = block if block.endswith("\n") else block + "\n"
+    bi = cur.find(RATCHET_BEGIN)
+    if bi == -1:
+        if cur and not cur.endswith("\n"):
+            cur += "\n"
+        return cur + block
+    ei = cur.find(RATCHET_END, bi)
+    if ei == -1:  # malformed begin-without-end → replace to EOF
+        return cur[:bi] + block
+    nl = cur.find("\n", ei)
+    tail = cur[nl + 1:] if nl != -1 else ""
+    return cur[:bi] + block + tail
+
+
+def _strip_block(cur: str) -> str:
+    """Remove exactly the sentinel span (uninstall). No-op when absent."""
+    bi = cur.find(RATCHET_BEGIN)
+    if bi == -1:
+        return cur
+    ei = cur.find(RATCHET_END, bi)
+    if ei == -1:
+        return cur[:bi]
+    nl = cur.find("\n", ei)
+    tail = cur[nl + 1:] if nl != -1 else ""
+    return cur[:bi] + tail
+
+
+def _ensure_gitignore(root: str) -> None:
+    """Scoped + idempotent: ignore `.ratchet/.state` (the debounce state) — NEVER the
+    whole `.ratchet/` dir, which would un-commit the vendored engine."""
+    p = os.path.join(root, ".gitignore")
+    line = ".ratchet/.state"
+    cur = _slurp(p)
+    if line in {ln.strip() for ln in cur.splitlines()}:
+        return
+    sep = "" if (not cur or cur.endswith("\n")) else "\n"
+    _atomic_write(p, cur + sep + line + "\n")
+
+
+def _detect_hook_manager(root: str) -> str | None:
+    for name in ("lefthook.yml", "lefthook.yaml", "lefthook.toml"):
+        if os.path.exists(os.path.join(root, name)):
+            return "lefthook"
+    if os.path.exists(os.path.join(root, ".pre-commit-config.yaml")):
+        return "pre-commit"
+    if os.path.isdir(os.path.join(root, ".husky")):
+        return "husky"
+    return None
+
+
+def _effective_hook_target(cwd: str, root: str) -> tuple[str, str]:
+    """Where (and whether) to write the pre-push block. First match wins:
+      lefthook / pre-commit present → emit a snippet, write NOTHING (they regenerate
+      their own hook). husky → `.husky/pre-push`. core.hooksPath inside the repo →
+      that dir. else the worktree-aware `.git/hooks`. An absolute/out-of-repo
+      hooksPath (a shared global dir) or a non-repo → skip (vendor/config/CI still go).
+    Returns (action, payload): "write"→abs pre-push path; "snippet:<mgr>"→text; "skip"→reason."""
+    mgr = _detect_hook_manager(root)
+    if mgr == "lefthook":
+        return ("snippet:lefthook", LEFTHOOK_SNIPPET)
+    if mgr == "pre-commit":
+        return ("snippet:pre-commit", PRECOMMIT_SNIPPET)
+    if mgr == "husky":
+        return ("write", os.path.join(root, ".husky", "pre-push"))
+    hooks_path = (_git(cwd, ["config", "--get", "core.hooksPath"]) or "").strip()
+    if hooks_path:
+        abs_hooks = hooks_path if os.path.isabs(hooks_path) else os.path.normpath(os.path.join(root, hooks_path))
+        if _is_within(abs_hooks, root):
+            return ("write", os.path.join(abs_hooks, "pre-push"))
+        return ("skip", f"core.hooksPath is outside the repo ({hooks_path}) — a shared global hooks dir; "
+                        "add the pre-push block there by hand, or rely on CI")
+    gh = _git(cwd, ["rev-parse", "--git-path", "hooks"])
+    if not gh:
+        return ("skip", "not a git repository")
+    abs_gh = gh.strip()
+    if not os.path.isabs(abs_gh):
+        abs_gh = os.path.normpath(os.path.join(cwd, abs_gh))
+    return ("write", os.path.join(abs_gh, "pre-push"))
+
+
+def _vendor_engine(root: str) -> str | None:
+    """Copy this running engine → `.ratchet/ratchet.py`. Returns the dest, or None when
+    it would self-reference (running `install` FROM the already-vendored copy → never
+    truncate the file we're executing)."""
+    src = os.path.realpath(__file__)
+    dst = os.path.join(root, ".ratchet", "ratchet.py")
+    if os.path.realpath(dst) == src:
+        return None
+    _atomic_write(dst, _slurp(src), mode=0o644)
+    return dst
+
+
+def _install_prepush(target_path: str) -> None:
+    """Append/replace the managed block in the effective pre-push (write-through a
+    symlink to its realpath; chmod +x). Skips the write when already byte-identical."""
+    real = os.path.realpath(target_path)
+    if os.path.exists(real):
+        cur = _slurp(real)
+        new = _replace_or_append_block(cur, PREPUSH_BLOCK)
+    else:
+        cur = ""
+        new = "#!/bin/sh\n" + PREPUSH_BLOCK
+    if new != cur:
+        _atomic_write(target_path, new, mode=0o755)
+        return
+    st = os.stat(real)
+    if not st.st_mode & 0o111:
+        os.chmod(real, st.st_mode | 0o755)
+
+
+def _write_ci(root: str) -> str | None:
+    """Scaffold the change-layer CI workflow IF ABSENT (non-clobber)."""
+    p = os.path.join(root, ".github", "workflows", "ratchet.yml")
+    if os.path.exists(p):
+        return None
+    _atomic_write(p, CI_WORKFLOW, mode=0o644)
+    return p
+
+
+def _protects_gate_files(cfg: Config) -> bool:
+    """True iff some protected_path/self_protect check's globs cover BOTH the vendored
+    engine and `ratchet.toml` (doctor #8 — the engine-neuter defense for non-GitHub paths)."""
+    for c in cfg.checks:
+        if c.primitive in ("protected_path", "self_protect") and c.paths:
+            if _path_matches(".ratchet/ratchet.py", c.paths) and _path_matches("ratchet.toml", c.paths):
+                return True
+    return False
+
+
+def cmd_install(cwd: str = ".", vendor: bool = True, config: bool = True,
+                hook: bool = True, ci: bool = True, gitignore: bool = True) -> int:
+    """Idempotent, non-clobbering wiring of the change layer. No flags ⇒ do all five.
+    Touches only plumbing (vendor / scaffold / hook / CI / gitignore) — never authors a
+    check's severity/kind, so the block-requires-fact moat is untouched."""
+    root = _repo_root(cwd)
+    if root is None:
+        print("ratchet: not a git repository — run `git init` first", file=sys.stderr)
+        return 1
+    did: list[str] = []
+    if vendor:
+        dst = _vendor_engine(root)
+        did.append("vendored .ratchet/ratchet.py" if dst else "engine already vendored (self) — skipped")
+    if config:
+        cfg_path = os.path.join(root, "ratchet.toml")
+        if os.path.exists(cfg_path):
+            did.append("ratchet.toml exists — left untouched")
+        else:
+            _atomic_write(cfg_path, INIT_TEMPLATE)
+            did.append("wrote starter ratchet.toml")
+    if gitignore:
+        _ensure_gitignore(root)
+        did.append("ensured .gitignore covers .ratchet/.state")
+    if hook:
+        action, payload = _effective_hook_target(cwd, root)
+        if action == "write":
+            _install_prepush(payload)
+            did.append(f"wired pre-push managed block ({os.path.realpath(payload)})")
+        elif action.startswith("snippet:"):
+            did.append(f"{action.split(':', 1)[1]} detected — wrote nothing; add this snippet:\n\n{payload}")
+        else:
+            did.append(f"pre-push skipped — {payload}")
+    if ci:
+        did.append("scaffolded .github/workflows/ratchet.yml" if _write_ci(root)
+                   else ".github/workflows/ratchet.yml exists — left untouched")
+    print("ratchet install:")
+    for d in did:
+        print(f"  • {d}")
+    if vendor or config or ci:
+        print("\nnext: `git add .ratchet/ratchet.py ratchet.toml .github/workflows/ratchet.yml` "
+              "& commit, then `ratchet doctor`")
+    return 0
+
+
+def cmd_uninstall(cwd: str = ".", hook: bool = True) -> int:
+    """Conservative: strip ONLY the local pre-push managed block. Never `git rm`
+    committed source (engine / config / workflow) — that is an explicit reviewable change."""
+    root = _repo_root(cwd)
+    if root is None:
+        print("ratchet: not a git repository", file=sys.stderr)
+        return 1
+    if not hook:
+        print("ratchet uninstall: nothing to do (--no-hook)")
+        return 0
+    action, payload = _effective_hook_target(cwd, root)
+    if action != "write":
+        msg = (f"hooks managed by {action.split(':', 1)[1]} — remove the ratchet snippet by hand"
+               if action.startswith("snippet:") else payload)
+        print(f"ratchet uninstall: {msg}")
+        return 0
+    real = os.path.realpath(payload)
+    cur = _slurp(real)
+    if not os.path.exists(real) or RATCHET_BEGIN not in cur:
+        print("ratchet uninstall: no managed block in the pre-push — nothing to strip")
+        return 0
+    stripped = _strip_block(cur)
+    if stripped.strip() in ("", "#!/bin/sh"):  # only our shebang remains → we authored it
+        os.remove(real)
+        print(f"ratchet uninstall: removed the ratchet-authored pre-push hook ({real})")
+    else:
+        _atomic_write(payload, stripped, mode=0o755)
+        print(f"ratchet uninstall: stripped the managed block, kept the rest ({real})")
+    print("note: committed .ratchet/ratchet.py, ratchet.toml and the CI workflow are NOT removed "
+          "(remove them in a reviewed change)")
+    return 0
+
+
+def cmd_doctor(cwd: str = ".", as_json: bool = False) -> int:
+    """Read-only diagnosis of both layers. Exit 1 ONLY on a hard change-layer failure
+    (engine missing / won't compile, or config invalid); everything else is advisory."""
+    root = _repo_root(cwd)
+    base_dir = root or cwd
+    rows: list[tuple[str, str, str]] = []
+
+    def add(status: str, label: str, fix: str = "") -> None:
+        rows.append((status, label, fix))
+
+    if sys.version_info >= (3, 11):
+        add("ok", f"python {sys.version_info.major}.{sys.version_info.minor} ≥ 3.11")
+    else:
+        add("warn", f"python {sys.version_info.major}.{sys.version_info.minor} < 3.11", "tomllib needs 3.11+")
+
+    hard_fail = False
+    eng = os.path.join(base_dir, ".ratchet", "ratchet.py")
+    if os.path.exists(eng):
+        try:
+            compile(_slurp(eng), eng, "exec")  # syntax-check; writes no __pycache__
+            add("ok", ".ratchet/ratchet.py present and compiles")
+        except SyntaxError as e:
+            add("fail", ".ratchet/ratchet.py does not compile", str(e).splitlines()[0])
+            hard_fail = True
+    else:
+        add("fail", ".ratchet/ratchet.py missing", "run `ratchet install` (or /ratchet-init) to vendor the engine")
+        hard_fail = True
+
+    cfg: Config | None = None
+    cfg_path = os.path.join(base_dir, "ratchet.toml")
+    if os.path.exists(cfg_path):
+        try:
+            cfg = Config.parse(_slurp(cfg_path))
+            add("ok", f"ratchet.toml valid — {len(cfg.checks)} checks, base_pinned={cfg.meta.base_pinned}")
+        except (OSError, ConfigError) as e:
+            add("fail", "ratchet.toml invalid", str(e))
+            hard_fail = True
+    else:
+        add("fail", "ratchet.toml missing", "run `ratchet install` / `/ratchet-init`")
+        hard_fail = True
+
+    if root:
+        action, payload = _effective_hook_target(cwd, root)
+        if action == "write":
+            real = os.path.realpath(payload)
+            if os.path.exists(real) and RATCHET_BEGIN in _slurp(real):
+                add("ok", f"pre-push managed block present ({real})")
+            else:
+                add("warn", "pre-push managed block absent", "run `ratchet install` (CI is the authoritative gate)")
+        elif action.startswith("snippet:"):
+            add("warn", f"hooks managed by {action.split(':', 1)[1]} — snippet expected (not auto-written)",
+                "add the ratchet snippet from `ratchet install`")
+        else:
+            add("warn", f"pre-push not wired — {payload}", "rely on CI")
+
+    wf = os.path.join(base_dir, ".github", "workflows", "ratchet.yml")
+    if os.path.exists(wf) and "ratchet" in _slurp(wf):
+        add("ok", ".github/workflows/ratchet.yml references ratchet")
+    else:
+        add("warn", "CI workflow absent", "run `ratchet install` to scaffold .github/workflows/ratchet.yml")
+
+    default_branch = cfg.repo.default_branch if cfg else _detect_default_branch(cwd)
+    base = _resolve_base(cwd, default_branch)
+    if base:
+        add("ok", f"base ref reachable ({base})")
+    else:
+        add("warn", "base ref unreachable", "shallow clone? set `fetch-depth: 0` — base-pinning degrades")
+
+    if base and cfg and cfg.meta.base_pinned:
+        bc = _git(cwd, ["show", f"{base}:ratchet.toml"])
+        add("ok" if bc else "warn",
+            "base-pinned config readable" if bc else "base-pinned config not yet in the base ref (first commit?)")
+    else:
+        add("skip", "base-pinning off or no base ref")
+
+    if cfg:
+        covered = _protects_gate_files(cfg)
+        add("ok" if covered else "warn",
+            "gate files covered by protected_path/self_protect" if covered else "gate files not self-protected",
+            "" if covered else "add a protected_path covering .ratchet/** + ratchet.toml + .github/workflows/** "
+                               "(the action's rev-pinned engine already covers GitHub CI)")
+
+    if os.environ.get("CLAUDE_PLUGIN_ROOT"):
+        add("ok", "agent layer: CLAUDE_PLUGIN_ROOT set (plugin active in-session)")
+    else:
+        add("skip", "agent layer: run /ratchet-doctor inside Claude Code to verify the plugin")
+
+    if as_json:
+        print(json.dumps([{"status": s, "label": lbl, "fix": fx} for s, lbl, fx in rows], indent=2))
+    else:
+        glyph = {"ok": "✓", "warn": "~", "fail": "✗", "skip": "·"}
+        for s, lbl, fx in rows:
+            print(f"  {glyph[s]} {lbl}")
+            if fx and s in ("warn", "fail"):
+                print(f"      → {fx}")
+        print()
+        if hard_fail:
+            print("ratchet doctor: change layer NOT ready (fix the ✗ above)", file=sys.stderr)
+        else:
+            print("ratchet doctor: change layer ready")
+    return 1 if hard_fail else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="ratchet",
@@ -2365,6 +2782,19 @@ def main(argv: list[str] | None = None) -> int:
     gp = sub.add_parser("gaps", help="advisory: which CLAUDE.md house-rules are NOT bound by a ratchet check")
     gp.add_argument("--cwd", default=".")
     gp.add_argument("--format", choices=["text", "json"], default="text")
+    ins = sub.add_parser("install", help="wire the change layer: vendor engine + scaffold config/hook/CI (idempotent)")
+    ins.add_argument("--cwd", default=".")
+    ins.add_argument("--no-vendor", action="store_true", help="skip vendoring .ratchet/ratchet.py")
+    ins.add_argument("--no-config", action="store_true", help="skip writing a starter ratchet.toml")
+    ins.add_argument("--no-hook", action="store_true", help="skip wiring the pre-push hook")
+    ins.add_argument("--no-ci", action="store_true", help="skip scaffolding the CI workflow")
+    ins.add_argument("--no-gitignore", action="store_true", help="skip the .gitignore entry")
+    un = sub.add_parser("uninstall", help="strip the local pre-push managed block (never removes committed source)")
+    un.add_argument("--cwd", default=".")
+    un.add_argument("--no-hook", action="store_true", help="no-op (reserved)")
+    dr = sub.add_parser("doctor", help="diagnose both layers (read-only; exit 1 only on a hard change-layer failure)")
+    dr.add_argument("--cwd", default=".")
+    dr.add_argument("--json", action="store_true", help="emit the per-check status array")
     sub.add_parser("selftest", help="run the in-process self-test")
 
     args = p.parse_args(argv)
@@ -2396,6 +2826,19 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_draft_lint(args.cwd, args.config, args.simulate)
     if args.cmd == "gaps":
         return cmd_gaps(args.cwd, fmt=args.format)
+    if args.cmd == "install":
+        return cmd_install(
+            args.cwd,
+            vendor=not args.no_vendor,
+            config=not args.no_config,
+            hook=not args.no_hook,
+            ci=not args.no_ci,
+            gitignore=not args.no_gitignore,
+        )
+    if args.cmd == "uninstall":
+        return cmd_uninstall(args.cwd, hook=not args.no_hook)
+    if args.cmd == "doctor":
+        return cmd_doctor(args.cwd, as_json=args.json)
     if args.cmd == "selftest":
         print("ratchet selftest: ok (run `python3 -m pytest` / `tests/test_ratchet.py` for the full suite)")
         return 0

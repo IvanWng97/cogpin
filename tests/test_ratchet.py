@@ -1,5 +1,7 @@
 """Stdlib-only test suite for ratchet (no pytest dependency — `python3 -m unittest`)."""
 
+import contextlib
+import io
 import os
 import subprocess
 import sys
@@ -10,6 +12,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ratchet import (  # noqa: E402
     HOUSE_RULE_MAP,
+    PREPUSH_BLOCK,
+    RATCHET_BEGIN,
     SAFE_CORE_IDS,
     Check,
     CommandFacts,
@@ -19,13 +23,22 @@ from ratchet import (  # noqa: E402
     HouseRuleHit,
     RepoCfg,
     RepoScan,
+    _atomic_write,
+    _detect_hook_manager,
+    _effective_hook_target,
+    _ensure_gitignore,
     _git_ops,
     _glob_to_re,
+    _replace_or_append_block,
+    _strip_block,
     _ticked,
     approval_state_depth,
     attestation_gaps,
     change_budget,
     change_classes,
+    cmd_doctor,
+    cmd_install,
+    cmd_uninstall,
     commit_footer,
     cooccur,
     detect_test_command,
@@ -1220,6 +1233,294 @@ class TestSuggestGapsCLI(unittest.TestCase):
             fh.write(cleaned)
         g = self._ratchet("gaps")
         self.assertEqual(g.returncode, 0, g.stderr)
+
+
+def _quiet(fn, *a, **k):
+    """Run a cmd_* entrypoint, swallow its stdout, return (rc, captured_stdout)."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+        rc = fn(*a, **k)
+    return rc, buf.getvalue()
+
+
+class TestBlockHelpers(unittest.TestCase):
+    """Pure sentinel-block surgery — no git, no fs."""
+
+    def test_append_when_absent(self):
+        out = _replace_or_append_block("#!/bin/sh\necho hi\n", PREPUSH_BLOCK)
+        self.assertTrue(out.startswith("#!/bin/sh\necho hi\n"))
+        self.assertIn(RATCHET_BEGIN, out)
+
+    def test_replace_in_place_no_double_append(self):
+        once = _replace_or_append_block("#!/bin/sh\n", PREPUSH_BLOCK)
+        twice = _replace_or_append_block(once, PREPUSH_BLOCK)
+        self.assertEqual(once, twice)  # byte-idempotent
+        self.assertEqual(once.count(RATCHET_BEGIN), 1)
+
+    def test_append_adds_separator_when_no_trailing_newline(self):
+        out = _replace_or_append_block("echo hi", PREPUSH_BLOCK)
+        self.assertIn("echo hi\n" + RATCHET_BEGIN, out)
+
+    def test_replace_preserves_surrounding(self):
+        cur = _replace_or_append_block("#!/bin/sh\nA\n", PREPUSH_BLOCK) + "Z\n"
+        out = _replace_or_append_block(cur, PREPUSH_BLOCK)
+        self.assertIn("#!/bin/sh\nA\n", out)
+        self.assertTrue(out.rstrip().endswith("Z"))
+        self.assertEqual(out.count(RATCHET_BEGIN), 1)
+
+    def test_strip_removes_exactly_the_span(self):
+        cur = "#!/bin/sh\nA\n" + PREPUSH_BLOCK + "Z\n"
+        out = _strip_block(cur)
+        self.assertNotIn(RATCHET_BEGIN, out)
+        self.assertIn("A\n", out)
+        self.assertIn("Z\n", out)
+
+    def test_strip_noop_when_absent(self):
+        cur = "#!/bin/sh\necho hi\n"
+        self.assertEqual(_strip_block(cur), cur)
+
+
+class TestAtomicWrite(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_writes_through_symlink_to_realpath(self):
+        real = os.path.join(self.d, "real.txt")
+        with open(real, "w") as fh:
+            fh.write("old\n")
+        link = os.path.join(self.d, "link.txt")
+        os.symlink(real, link)
+        _atomic_write(link, "new\n")
+        self.assertTrue(os.path.islink(link))  # symlink preserved
+        with open(real) as fh:
+            self.assertEqual(fh.read(), "new\n")  # real target updated
+
+    def test_executable_mode(self):
+        p = os.path.join(self.d, "hook")
+        _atomic_write(p, "#!/bin/sh\n", mode=0o755)
+        self.assertTrue(os.stat(p).st_mode & 0o111)
+
+
+class _GitRepo(unittest.TestCase):
+    """Shared git-temp harness for the wiring tests."""
+
+    def _git(self, *args):
+        subprocess.run(["git", "-C", self.d, *args], check=True, capture_output=True, text=True)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = self.tmp.name
+        self._git("init", "-q")
+        self._git("config", "user.email", "t@t")
+        self._git("config", "user.name", "t")
+        self._git("config", "commit.gpgsign", "false")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _w(self, rel, text):
+        p = os.path.join(self.d, rel)
+        os.makedirs(os.path.dirname(p) or self.d, exist_ok=True)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def _read(self, rel):
+        with open(os.path.join(self.d, rel), encoding="utf-8") as fh:
+            return fh.read()
+
+    def _prepush(self):
+        return os.path.join(self.d, ".git", "hooks", "pre-push")
+
+
+class TestEnsureGitignore(_GitRepo):
+    def test_scoped_and_idempotent(self):
+        _ensure_gitignore(self.d)
+        _ensure_gitignore(self.d)
+        gi = self._read(".gitignore")
+        self.assertIn(".ratchet/.state", gi)
+        self.assertNotIn(".ratchet/\n", gi)  # never the whole dir
+        self.assertEqual(gi.count(".ratchet/.state"), 1)  # no dup
+
+    def test_preserves_existing(self):
+        self._w(".gitignore", "node_modules\n")
+        _ensure_gitignore(self.d)
+        gi = self._read(".gitignore")
+        self.assertIn("node_modules", gi)
+        self.assertIn(".ratchet/.state", gi)
+
+
+class TestHookTarget(_GitRepo):
+    def test_default_git_hooks(self):
+        action, payload = _effective_hook_target(self.d, self.d)
+        self.assertEqual(action, "write")
+        self.assertEqual(os.path.realpath(payload), os.path.realpath(self._prepush()))
+
+    def test_lefthook_emits_snippet(self):
+        self._w("lefthook.yml", "pre-commit:\n")
+        self.assertEqual(_detect_hook_manager(self.d), "lefthook")
+        action, payload = _effective_hook_target(self.d, self.d)
+        self.assertEqual(action, "snippet:lefthook")
+        self.assertIn("lefthook", payload)
+
+    def test_precommit_emits_repo_local_snippet(self):
+        self._w(".pre-commit-config.yaml", "repos: []\n")
+        action, payload = _effective_hook_target(self.d, self.d)
+        self.assertEqual(action, "snippet:pre-commit")
+        self.assertIn("repo: local", payload)
+
+    def test_husky_targets_husky_prepush(self):
+        os.makedirs(os.path.join(self.d, ".husky"))
+        action, payload = _effective_hook_target(self.d, self.d)
+        self.assertEqual(action, "write")
+        self.assertEqual(payload, os.path.join(self.d, ".husky", "pre-push"))
+
+    def test_core_hookspath_inside_repo(self):
+        self._git("config", "core.hooksPath", ".githooks")
+        action, payload = _effective_hook_target(self.d, self.d)
+        self.assertEqual(action, "write")
+        self.assertEqual(payload, os.path.join(self.d, ".githooks", "pre-push"))
+
+    def test_core_hookspath_outside_repo_skips(self):
+        outside = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(outside, ignore_errors=True))
+        self._git("config", "core.hooksPath", outside)
+        action, _payload = _effective_hook_target(self.d, self.d)
+        self.assertEqual(action, "skip")
+
+
+class TestInstall(_GitRepo):
+    def test_install_all(self):
+        rc, _ = _quiet(cmd_install, self.d)
+        self.assertEqual(rc, 0)
+        eng = os.path.join(self.d, ".ratchet", "ratchet.py")
+        self.assertTrue(os.path.exists(eng))
+        subprocess.run([sys.executable, "-m", "py_compile", eng], check=True)
+        self.assertTrue(os.path.exists(os.path.join(self.d, "ratchet.toml")))
+        pp = self._read(".git/hooks/pre-push")
+        self.assertIn(RATCHET_BEGIN, pp)
+        self.assertIn("[ -f .ratchet/ratchet.py ]", pp)  # inert guard
+        self.assertTrue(os.stat(self._prepush()).st_mode & 0o111)
+        self.assertTrue(os.path.exists(os.path.join(self.d, ".github", "workflows", "ratchet.yml")))
+        self.assertIn(".ratchet/.state", self._read(".gitignore"))
+
+    def test_idempotent(self):
+        _quiet(cmd_install, self.d)
+        pp1 = self._read(".git/hooks/pre-push")
+        gi1 = self._read(".gitignore")
+        _quiet(cmd_install, self.d)
+        self.assertEqual(self._read(".git/hooks/pre-push"), pp1)
+        self.assertEqual(self._read(".gitignore"), gi1)
+
+    def test_appends_to_existing_prepush(self):
+        self._w(".git/hooks/pre-push", "#!/bin/sh\necho custom\n")
+        _quiet(cmd_install, self.d)
+        pp = self._read(".git/hooks/pre-push")
+        self.assertIn("echo custom", pp)
+        self.assertLess(pp.index("echo custom"), pp.index(RATCHET_BEGIN))  # runs first
+
+    def test_replaces_stale_block_in_place(self):
+        stale = "#!/bin/sh\necho keep\n" + RATCHET_BEGIN + "\nOLD GARBAGE\n# <<< ratchet <<<\n"
+        self._w(".git/hooks/pre-push", stale)
+        _quiet(cmd_install, self.d)
+        pp = self._read(".git/hooks/pre-push")
+        self.assertIn("echo keep", pp)
+        self.assertNotIn("OLD GARBAGE", pp)
+        self.assertEqual(pp.count(RATCHET_BEGIN), 1)
+
+    def test_non_clobber_existing_config_and_ci(self):
+        self._w("ratchet.toml", "schema = 1\n# mine\n")
+        self._w(".github/workflows/ratchet.yml", "# mine\n")
+        _quiet(cmd_install, self.d)
+        self.assertIn("# mine", self._read("ratchet.toml"))
+        self.assertIn("# mine", self._read(".github/workflows/ratchet.yml"))
+
+    def test_flag_scope_no_hook_no_ci(self):
+        rc, _ = _quiet(cmd_install, self.d, hook=False, ci=False)
+        self.assertEqual(rc, 0)
+        self.assertTrue(os.path.exists(os.path.join(self.d, ".ratchet", "ratchet.py")))
+        self.assertFalse(os.path.exists(self._prepush()))
+        self.assertFalse(os.path.exists(os.path.join(self.d, ".github", "workflows", "ratchet.yml")))
+
+    def test_lefthook_writes_no_prepush(self):
+        self._w("lefthook.yml", "pre-commit:\n")
+        _quiet(cmd_install, self.d)
+        self.assertFalse(os.path.exists(self._prepush()))
+
+    def test_self_vendor_short_circuits(self):
+        """Running install FROM the already-vendored copy must not truncate it."""
+        _quiet(cmd_install, self.d)
+        vendored = os.path.join(self.d, ".ratchet", "ratchet.py")
+        size_before = os.path.getsize(vendored)
+        r = subprocess.run([sys.executable, vendored, "install", "--cwd", self.d, "--no-config", "--no-hook", "--no-ci"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(os.path.getsize(vendored), size_before)  # not truncated
+
+    def test_not_a_git_repo_returns_1(self):
+        nong = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(nong, ignore_errors=True))
+        rc, _ = _quiet(cmd_install, nong)
+        self.assertEqual(rc, 1)
+
+
+class TestUninstall(_GitRepo):
+    def test_strips_only_block_keeps_rest(self):
+        self._w(".git/hooks/pre-push", "#!/bin/sh\necho custom\n")
+        _quiet(cmd_install, self.d)
+        rc, _ = _quiet(cmd_uninstall, self.d)
+        self.assertEqual(rc, 0)
+        pp = self._read(".git/hooks/pre-push")
+        self.assertNotIn(RATCHET_BEGIN, pp)
+        self.assertIn("echo custom", pp)
+
+    def test_deletes_only_authored_file(self):
+        _quiet(cmd_install, self.d)  # ratchet authored the whole pre-push
+        _quiet(cmd_uninstall, self.d)
+        self.assertFalse(os.path.exists(self._prepush()))
+
+    def test_never_removes_committed_source(self):
+        _quiet(cmd_install, self.d)
+        _quiet(cmd_uninstall, self.d)
+        self.assertTrue(os.path.exists(os.path.join(self.d, ".ratchet", "ratchet.py")))
+        self.assertTrue(os.path.exists(os.path.join(self.d, "ratchet.toml")))
+        self.assertTrue(os.path.exists(os.path.join(self.d, ".github", "workflows", "ratchet.yml")))
+
+
+class TestDoctor(_GitRepo):
+    def test_clean_repo_exits_0(self):
+        _quiet(cmd_install, self.d)
+        rc, out = _quiet(cmd_doctor, self.d)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("change layer ready", out)
+
+    def test_missing_engine_exits_1(self):
+        self._w("ratchet.toml", "schema = 1\n[repo]\ndefault_branch=\"main\"\ncode=[\"src/**\"]\n")
+        rc, _ = _quiet(cmd_doctor, self.d)
+        self.assertEqual(rc, 1)
+
+    def test_invalid_config_exits_1(self):
+        _quiet(cmd_install, self.d)
+        # a block without kind=fact violates the moat → Config.parse raises
+        self._w("ratchet.toml", 'schema = 1\n[repo]\ndefault_branch="main"\ncode=["src/**"]\n'
+                                '[[check]]\nid="x"\nkind="judge"\nseverity="block"\nprimitive="secret_scan"\n')
+        rc, _ = _quiet(cmd_doctor, self.d)
+        self.assertEqual(rc, 1)
+
+    def test_missing_hook_is_advisory(self):
+        _quiet(cmd_install, self.d, hook=False)
+        rc, out = _quiet(cmd_doctor, self.d)
+        self.assertEqual(rc, 0, out)  # missing pre-push is ~ , not ✗
+
+    def test_json_shape(self):
+        _quiet(cmd_install, self.d)
+        rc, out = _quiet(cmd_doctor, self.d, as_json=True)
+        import json as _json
+        data = _json.loads(out)
+        self.assertTrue(all({"status", "label", "fix"} <= set(r) for r in data))
 
 
 if __name__ == "__main__":
