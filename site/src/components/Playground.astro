@@ -85,9 +85,14 @@ const base = import.meta.env.BASE_URL;
 
   /* The editor stack: highlighted <pre> behind a transparent <textarea>.
      Both layers MUST share every metric so the glyphs land on top of each other. */
-  .pg-ed { position: relative; display: flex; flex: 1; }
+  .pg-ed { position: relative; display: block; flex: 1; }
+  /* The two layers MUST share every box metric so glyphs land on top of each
+     other. The editor auto-grows to its content (JS sets height = scrollHeight),
+     so it never scrolls internally — that's what kept the scrollbar-less mirror
+     and the scrollbar-reserving textarea wrapping at different widths. */
   .pg-edit,
   .pg-hl {
+    box-sizing: border-box;
     margin: 0;
     padding: 4px 12px 12px;
     border: 0;
@@ -97,12 +102,25 @@ const base = import.meta.env.BASE_URL;
     tab-size: 2;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+    word-break: break-word;
+    /* Pin text inflation on BOTH layers: iOS can auto-inflate a <textarea> and a
+       <pre> by different ratios on rotation, which would desync the glyphs even
+       though every other metric matches. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
   }
   .pg-edit {
-    flex: 1;
-    min-height: 230px;
+    display: block;
+    width: 100%;
+    /* No max-height: capping the height makes the textarea scroll internally,
+       which reserves a scrollbar gutter the gutterless mirror doesn't — and the
+       two layers wrap at different widths again (the exact bug this auto-grow
+       fixes). If a cap is ever needed, reserve the gutter on BOTH layers. */
+    min-height: 7em;
+    height: auto;
     resize: none;
     outline: 0;
+    overflow: hidden;
     background: transparent;
     color: transparent;
     caret-color: var(--c-fg);
@@ -190,7 +208,10 @@ const base = import.meta.env.BASE_URL;
   const esc = (s: string) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]!);
 
   function hlValue(v: string): string {
-    const re = /("(?:[^"\\]|\\.)*")|(\b(?:true|false)\b)|(-?\d+\.?\d*)|([[\],])|([^"\d[\]]+)/g;
+    // Final `(.)` alternative guarantees EVERY character is emitted — incl. a lone
+    // unbalanced quote while typing a string. A skipped char would shorten the
+    // mirror and shift every following glyph out from under the caret.
+    const re = /("(?:[^"\\]|\\.)*")|(\b(?:true|false)\b)|(-?\d+\.?\d*)|([[\],])|([^"\d[\]]+)|(.)/g;
     let out = '', m: RegExpExecArray | null;
     while ((m = re.exec(v))) {
       if (m[1]) out += `<span class="t-str">${esc(m[1])}</span>`;
@@ -242,13 +263,17 @@ const base = import.meta.env.BASE_URL;
     }).join('\n');
   }
 
+  // Grow the textarea to fit its content so it never scrolls internally.
+  function fit(ta: HTMLTextAreaElement) {
+    ta.style.height = 'auto';
+    ta.style.height = ta.scrollHeight + 'px';
+  }
+
   function paint(ta: HTMLTextAreaElement) {
     const code = ta.parentElement!.querySelector<HTMLElement>('.pg-hl code')!;
     const hl = ta.dataset.lang === 'toml' ? hlToml(ta.value) : hlDiff(ta.value);
     code.innerHTML = hl + '\n'; // trailing newline keeps the last line in view
-    const pre = code.parentElement!;
-    pre.scrollTop = ta.scrollTop;
-    pre.scrollLeft = ta.scrollLeft;
+    fit(ta);
   }
 
   // ---- the engine -------------------------------------------------------------
@@ -402,8 +427,17 @@ prompt = "is the code good?"
 
     for (const ta of [toml, scen]) {
       ta.addEventListener('input', () => paint(ta));
-      ta.addEventListener('scroll', () => paint(ta));
     }
+    // Re-fit after a width change (rewrap changes height) and after fonts settle.
+    // Coalesce into one rAF so a resize/rotation storm doesn't thrash layout (each
+    // fit() forces a write→read→write; rotation fires resize continuously).
+    let raf = 0;
+    const refit = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => { raf = 0; fit(toml); fit(scen); });
+    };
+    window.addEventListener('resize', refit);
+    window.addEventListener('load', refit);
     const setVal = (ta: HTMLTextAreaElement, v: string) => { ta.value = v; paint(ta); };
 
     setVal(toml, PRESETS.strip.toml);
