@@ -1,0 +1,27 @@
+name: ratchet
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  definition-of-done:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need history for the base..HEAD range
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # base-pinning needs the default branch as a local ref
+      - name: fetch base
+        run: git fetch --no-tags --depth=200 origin "${{ github.event.repository.default_branch }}"
+      - name: validate config
+        run: python3 ratchet.py validate
+      - name: unit tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+      # change-layer gate: authoritative, base-pinned, ignores RATCHET_BYPASS.
+      # (`run` blocks fire here — this is where the real test teeth bite.)
+      - name: definition-of-done
+        run: python3 ratchet.py check --cwd .

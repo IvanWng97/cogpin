@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "ratchet",
+  "owner": { "name": "Ivan Wng", "url": "https://github.com/IvanWng97" },
+  "metadata": {
+    "description": "The ratchet Definition-of-Done gate — install once, the closing-discipline enforces itself.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "ratchet",
+      "source": "./",
+      "description": "Real-time PreToolUse command gate + base-pinned change-layer diff-fact enforcement of the whole DoD chain.",
+      "category": "governance"
+    }
+  ]
+}

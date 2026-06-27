@@ -1,0 +1,75 @@
+# ratchet gates its own repo — the smallest honest dogfood. Every primitive used here
+# is one the product ships. The one rule: severity="block" REQUIRES kind="fact".
+schema = 1
+
+[repo]
+default_branch = "main"
+code = ["ratchet.py"]
+tests = ["tests/**/*.py"]
+docs = ["README.md", "SCHEMA.md", "docs/**/*.md"]
+
+[meta]
+base_pinned = true
+bypass_env = "RATCHET_BYPASS"
+commit_footer = 'Co-Authored-By: Claude'
+
+# ── agent layer (real-time PreToolUse) ───────────────────────────────────────
+[[check]]
+id = "no-verify"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "forbid_command"
+pattern = "--no-verify|--no-gpg-sign|HUSKY=0|git .*-c core.hooksPath="
+
+# ── change layer (pre-push + CI, authoritative, base-pinned) ─────────────────
+[[check]]
+id = "secret-scan"
+kind = "fact"
+severity = "block"
+primitive = "secret_scan"
+forbid_paths = [".env", ".env.*", "*.env", "*.pem", "*.key", "id_rsa", "*.p12"]
+
+# Gate-defining files can't change without an independent approval (PR context only;
+# local pre-push skips, CI populates approvals). This is the bypass-proof keystone.
+[[check]]
+id = "protected-gate-files"
+kind = "fact"
+severity = "block"
+primitive = "protected_path"
+paths = ["ratchet.toml", "hooks/hooks.json", ".github/workflows/**", "npm/**", ".claude-plugin/**"]
+
+# Touch the engine → touch a test (existence-floor; whether the test has teeth is judged).
+[[check]]
+id = "engine-needs-tests"
+kind = "fact"
+severity = "warn"
+primitive = "path_requires"
+when = "code"
+need = "tests"
+
+# Touch the engine → touch docs.
+[[check]]
+id = "docs-currency"
+kind = "fact"
+severity = "warn"
+primitive = "path_requires"
+when = "code"
+need = "docs"
+
+# Every commit carries the footer (declared in [meta]).
+[[check]]
+id = "commit-footer"
+kind = "fact"
+severity = "warn"
+primitive = "commit_footer"
+
+# THE teeth: the change layer re-runs the real test suite from the base-pinned policy.
+# `run` blocks are change-layer-only (validate enforces it) and skipped by --no-run.
+[[check]]
+id = "tests-pass"
+kind = "fact"
+severity = "block"
+layer = "change"
+primitive = "run"
+cmd = "python3 -m unittest discover -s tests -p 'test_*.py'"

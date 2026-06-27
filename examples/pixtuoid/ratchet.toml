@@ -1,0 +1,193 @@
+# pixtuoid — ratchet policy, a faithful port of scripts/check_dod.py (890 lines) into
+# the ratchet primitive library. Each check notes its check_dod.py origin.
+#
+# Scope note: ratchet replaces the *closing-discipline* gate (the non-code-shaped
+# lifecycle checks check_dod.py mechanizes) — NOT pixtuoid's ~25 CI jobs +
+# `just preflight`, which remain the compiled-code teeth. So there is no `run`
+# block here; the teeth are pixtuoid's existing CI.
+schema = 1
+
+[repo]
+default_branch = "main"
+# _RUST_SRC_RE = ^crates/[^/]+/src/.*\.rs$
+code = ["crates/*/src/**/*.rs"]
+# _RUST_TEST_RE (approx) — used only to *exempt* tests from the prod-print/write nets
+tests = ["crates/*/tests/**/*.rs", "crates/*/src/**/*_tests.rs", "crates/*/src/**/tests.rs"]
+# _DOC_RE — docs-ish tree
+docs = ["**/*.md", "docs/**", "site/**", "**/README.md", "**/CONTRIBUTING.md", "**/CHANGELOG.md"]
+
+[meta]
+base_pinned = true
+bypass_env = "DOD_BYPASS"        # agent-layer escape hatch (CLAUDE.md); CI ignores it
+commit_footer = 'Co-Authored-By:'  # every commit carries the footer
+
+# ── agent layer (PreToolUse) ─────────────────────────────────────────────────
+# check_dod.py: command_has_no_verify() — the binding PreToolUse deny. A transient
+# command leaves no diff trace, so this is the real-time half.
+[[check]]
+id = "no-verify-command"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "forbid_command"
+pattern = '--no-verify\b|\bSKIP_PREFLIGHT=1\b|\bgit\s+commit\b[^|&;]*\s-\w*n\b'
+
+# ── change layer (pre-push + CI, authoritative, base-pinned) ─────────────────
+
+# check_dod.py: no_verify_violations() — committed hook-skipping flag in a path
+# where it would be a LIVE git op (.sh / .githooks / CI workflow / justfile).
+# Source files (.rs/.py) are out of scope: the token there is data, not an op.
+[[check]]
+id = "no-verify-committed"
+kind = "fact"
+severity = "block"
+primitive = "forbid_pattern"
+pattern = '--no-verify\b|\bSKIP_PREFLIGHT=1\b'
+scope = ["**/*.sh", ".githooks/**", ".github/workflows/**", "justfile", "Justfile"]
+exempt = '^\s*#|\bban\b|\bforbid'   # comment / ban-documenting lines
+
+# check_dod.py: prod_print_violations() — a new println!/eprintln! in a Rust prod
+# path, minus the CLI-presenter files, without a `// dod:allow(println)` pragma.
+# (check_dod also strips string literals; dod strip_comments drops comments only,
+# so a println! mentioned inside a "string" is a rare residual FP — acceptable.)
+[[check]]
+id = "prod-print"
+kind = "fact"
+severity = "block"
+primitive = "forbid_pattern"
+pattern = '\b(?:println|eprintln)\s*!'
+scope = "code"
+strip_comments = true
+exempt = '/(?:main|cli|validate|init_pack|doctor)\.rs$|/runtime/mod\.rs$|_tests?\.rs$|/tests?\.rs$|(^|/)tests/|build\.rs$|/examples/|dod:allow\(println\)'
+
+# check_dod.py: settings_write_violations() — a new fs write touching settings.json
+# outside install/io.rs. Single-line co-occurrence (settings.json AND a write call)
+# via lookahead. KNOWN LIMITATION (same as check_dod): line-scoped; a write split
+# across two lines is missed — the install/io.rs `pub(crate)` boundary + `just arch`
+# are the primary enforcement, this is defense-in-depth.
+[[check]]
+id = "settings-write"
+kind = "fact"
+severity = "block"
+primitive = "forbid_pattern"
+pattern = '(?=.*settings\.json)(?=.*(?:fs::write|File::create|OpenOptions|\.write_all\(|\.write\())'
+scope = "code"
+strip_comments = true
+exempt = 'crates/pixtuoid/src/install/io\.rs$|_tests?\.rs$|/tests?\.rs$|(^|/)tests/|[Tt]mp|tempdir'
+
+# check_dod.py: two_lens_ok() at the merge/CI scope — a code PR must carry a
+# Two-lens-review block. EXISTENCE FLOOR (forcing function); whether the lenses are
+# substantive is the advisory judge below. `when="code"` → docs-only PRs are exempt;
+# `pr_body is None` locally → skipped, CI is the real gate.
+[[check]]
+id = "two-lens-review"
+kind = "fact"
+severity = "block"
+primitive = "marker_present"
+marker = '(?i)two-lens-review\s*:'
+when = "code"
+
+# check_dod.py: path_sep_warnings() — a path stringified and compared against a
+# '/'-bearing literal (the Windows mis-compare class). windows-test is the backstop.
+[[check]]
+id = "path-sep"
+kind = "fact"
+severity = "warn"
+primitive = "forbid_pattern"
+pattern = '(?=.*(?:to_string_lossy|\.display\(\)\.to_string)\(\))(?=.*"[^"]*/[^"]*")'
+scope = ["crates/**/*.rs"]
+
+# check_dod.py: public_surface_violations() — a public surface (cli.rs / config.rs)
+# changed without README + CLAUDE.md currency. Coarser than check_dod's added-line
+# variant heuristic (file-level here), hence WARN; `need` is satisfied by either doc.
+[[check]]
+id = "docs-currency"
+kind = "fact"
+severity = "warn"
+primitive = "path_requires"
+when = ["crates/*/src/cli.rs", "crates/*/src/config.rs", "crates/*/src/**/source/registry.rs"]
+need = ["**/README.md", "**/CLAUDE.md"]
+
+# check_dod.py: ledger_touched() — a code PR with no docs/REVIEW-LEDGER.md trace.
+[[check]]
+id = "ledger-trace"
+kind = "fact"
+severity = "warn"
+primitive = "path_requires"
+when = "code"
+need = ["docs/REVIEW-LEDGER.md"]
+
+# check_dod.py: deferrals_have_issue() — deferral language with no nearby issue ref.
+# (check_dod is per-line; this is per-PR-text, hence a coarser WARN.)
+[[check]]
+id = "deferral-has-issue"
+kind = "fact"
+severity = "warn"
+primitive = "cooccur"
+trigger = '\b(?:defer(?:red)?|follow-?up|punt(?:ed)?|TODO)\b'
+require = '#\d+'
+
+# check_dod.py: commit_footer (declared-but-inert in check_dod) — activated here.
+[[check]]
+id = "commit-footer"
+kind = "fact"
+severity = "warn"
+primitive = "commit_footer"
+
+# ── beyond check_dod.py: free ratchet baselines pixtuoid should want ─────────────
+# Not in check_dod.py, but cheap defense the engine gives for free.
+[[check]]
+id = "secret-scan"
+kind = "fact"
+severity = "block"
+primitive = "secret_scan"
+forbid_paths = [".env", ".env.*", "*.pem", "*.key", "id_rsa", "*.p12"]
+
+# The bypass-proof keystone: gate-defining files can't change without an
+# independent approval (PR context only; local pre-push skips, CI populates).
+[[check]]
+id = "protected-gate-files"
+kind = "fact"
+severity = "block"
+primitive = "protected_path"
+paths = ["dod.toml", "justfile", ".github/workflows/**", "scripts/check_dod.py", ".dod/**"]
+
+# ── agent-layer attestation (advisory: the Stop-hook checklist) ──────────────
+# check_dod.py: attestation_gaps() — class-gated DoD boxes. Declared here as the
+# advisory intent; the ratchet Stop-checklist runtime is a follow-up (the engine treats
+# attest/judge as advisory today — they surface, never block).
+[[check]]
+id = "attest-tdd"
+kind = "advisory"
+severity = "attest"
+layer = "agent"
+primitive = "attest"
+class = "always"
+prompt = "TDD: a failing test preceded the implementation."
+
+[[check]]
+id = "attest-self-review"
+kind = "advisory"
+severity = "attest"
+layer = "agent"
+primitive = "attest"
+class = "always"
+prompt = "Self-review: you re-read the full diff for bugs/blast-radius."
+
+[[check]]
+id = "attest-design"
+kind = "advisory"
+severity = "attest"
+layer = "agent"
+primitive = "attest"
+class = "feature"
+prompt = "Design + impl-plan exist for this feature-shaped change."
+
+# check_dod.py: judge_prompt() — the advisory substance-over-existence LLM-judge.
+[[check]]
+id = "judge-substance"
+kind = "advisory"
+severity = "judge"
+layer = "change"
+primitive = "judge"
+prompt = "Are the two-lens review lenses DISTINCT and diff-grounded (not paraphrase), and is TDD evident?"
