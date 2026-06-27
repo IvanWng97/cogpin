@@ -1,8 +1,11 @@
 name: self-gate
 # ratchet gates its OWN repo with its own dogfood ratchet.toml — the change layer,
-# authoritative + base-pinned, ignoring RATCHET_BYPASS. This is the honest dogfood:
-# the gate has to pass the gate. (Tests + lint + plugin packaging live in ci.yml /
-# lint.yml / plugin-validate.yml; this job is the DoD self-application only.)
+# authoritative + base-pinned, ignoring RATCHET_BYPASS. This now runs THROUGH the
+# composite action (`uses: ./`), so the action's gh-facts wiring (PR body, reviews
+# via GraphQL, checks, approvals, head-sha, author) is itself dogfooded end-to-end —
+# exercising the reviewer-identity / checks path a hand-rolled `check` never did.
+# (Tests + lint + plugin packaging live in ci.yml / lint.yml / plugin-validate.yml;
+# this job is the DoD self-application only.)
 on:
   pull_request:
   push:
@@ -11,6 +14,7 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  checks: read
 
 jobs:
   definition-of-done:
@@ -19,32 +23,4 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # need history for the base..HEAD range + base-pinning
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: fetch base ref (for base-pinned config + diff range)
-        run: git fetch --no-tags --depth=200 origin "${{ github.event.repository.default_branch }}"
-      # In a PR, supply the PR facts so the approval/marker checks evaluate (they SKIP
-      # without context). On a push to main there is no PR → the same checks skip.
-      - name: gather PR facts
-        if: github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          gh pr view "$PR" --json body -q .body > .pr-body.txt || true
-          gh pr view "$PR" --json reviews \
-            -q '[.reviews[] | select(.state=="APPROVED") | .author.login] | unique | join(",")' \
-            > .pr-approvals.txt || true
-          echo "approvals=$(cat .pr-approvals.txt)" >> "$GITHUB_ENV"
-      - name: definition-of-done (PR)
-        if: github.event_name == 'pull_request'
-        run: |
-          python3 ratchet.py check --cwd . \
-            --pr-body-file .pr-body.txt \
-            --approvals "${approvals:-}" \
-            --pr-author "${{ github.event.pull_request.user.login }}"
-      - name: definition-of-done (push)
-        if: github.event_name != 'pull_request'
-        run: python3 ratchet.py check --cwd .
+      - uses: ./ # the composite action at the repo root; engine=pinned → ./ratchet.py

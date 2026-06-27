@@ -104,12 +104,26 @@ def main() -> int:
             if not cfm.get("description"):
                 errors.append(f"commands/{fn}: frontmatter missing `description`")
 
+    # the composite action is the change-layer distribution surface (`uses: owner/repo@v1`);
+    # actionlint validates the YAML in CI — here we only assert it exists, is composite, and
+    # runs the engine (stdlib has no YAML parser, so this is a deliberate text-level check).
+    action_path = os.path.join(ROOT, "action.yml")
+    if not os.path.exists(action_path):
+        errors.append("action.yml: missing (the composite action consumers `uses:`)")
+    else:
+        with open(action_path, encoding="utf-8") as fh:
+            blob = fh.read()
+        if "using: composite" not in blob:
+            errors.append("action.yml: not a composite action (`using: composite`)")
+        if "ratchet.py" not in blob:
+            errors.append("action.yml: never invokes ratchet.py")
+
     if errors:
         print("plugin validation FAILED:")
         for err in errors:
             print(f"  ✗ {err}")
         return 1
-    print("plugin validation: ok (manifests, hooks ref, version parity, skill/command frontmatter)")
+    print("plugin validation: ok (manifests, hooks ref, version parity, skill/command frontmatter, action.yml)")
     return 0
 
 

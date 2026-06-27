@@ -42,7 +42,7 @@ kind = "fact"
 severity = "block"
 layer = "agent"
 primitive = "self_protect"
-paths = ["ratchet.toml", "ratchet.py", "hooks/hooks.json", ".github/workflows/**", ".claude-plugin/**"]
+paths = ["ratchet.toml", "ratchet.py", "action.yml", "hooks/hooks.json", ".github/workflows/**", ".claude-plugin/**"]
 
 # ── change layer (pre-push + CI, authoritative, base-pinned) ─────────────────
 [[check]]
@@ -59,7 +59,7 @@ id = "protected-gate-files"
 kind = "fact"
 severity = "block"
 primitive = "protected_path"
-paths = ["ratchet.toml", "ratchet.py", "hooks/hooks.json", ".github/workflows/**", ".claude-plugin/**"]
+paths = ["ratchet.toml", "ratchet.py", "action.yml", "hooks/hooks.json", ".github/workflows/**", ".claude-plugin/**"]
 
 # Touch the engine → touch a test (existence-floor; whether the test has teeth is judged).
 [[check]]

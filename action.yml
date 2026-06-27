@@ -1,0 +1,108 @@
+name: ratchet
+description: >-
+  Definition-of-Done gate for AI coding agents. Runs the rev-pinned ratchet engine
+  over your base-pinned ratchet.toml — neither the judge (engine) nor the policy
+  (config) is read from the PR head, so only ungameable diff/PR facts decide.
+branding:
+  icon: check-square
+  color: purple
+
+inputs:
+  engine:
+    description: >-
+      Which engine evaluates: 'pinned' (the action's own rev-pinned ratchet.py —
+      recommended; a PR can't self-neuter it) or 'vendored' (the consumer's HEAD
+      .ratchet/ratchet.py — only if you pin .ratchet/** via protected_path + branch
+      protection).
+    default: pinned
+  config-dir:
+    description: Directory holding ratchet.toml (and, for engine=vendored, .ratchet/).
+    default: "."
+  default-branch:
+    description: Base branch to diff against / base-pin from.
+    default: ${{ github.event.repository.default_branch }}
+  python-version:
+    description: Python for the engine (needs >= 3.11 for tomllib).
+    default: "3.12"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: resolve engine + fetch base
+      id: prep
+      shell: bash
+      env:
+        ENGINE_INPUT: ${{ inputs.engine }}
+        ACTION_PATH: ${{ github.action_path }}
+        CONFIG_DIR: ${{ inputs.config-dir }}
+        DEFAULT_BRANCH: ${{ inputs.default-branch }}
+      run: |
+        set -euo pipefail
+        if [ "$ENGINE_INPUT" = "vendored" ]; then
+          engine="$CONFIG_DIR/.ratchet/ratchet.py"
+        else
+          engine="$ACTION_PATH/ratchet.py"
+        fi
+        if [ ! -f "$engine" ]; then
+          echo "::error::ratchet engine not found at $engine (engine=$ENGINE_INPUT)"
+          exit 1
+        fi
+        echo "engine=$engine" >> "$GITHUB_OUTPUT"
+        git fetch --no-tags --depth=200 origin "$DEFAULT_BRANCH" || true
+        if ! git rev-parse --verify "origin/$DEFAULT_BRANCH" >/dev/null 2>&1; then
+          echo "::warning::base ref origin/$DEFAULT_BRANCH unreachable — base-pinning degrades; set 'fetch-depth: 0' on actions/checkout."
+        fi
+
+    - name: ratchet check (pull request)
+      if: github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        ENGINE: ${{ steps.prep.outputs.engine }}
+        CONFIG_DIR: ${{ inputs.config-dir }}
+        OWNER: ${{ github.repository_owner }}
+        REPO: ${{ github.event.repository.name }}
+        PR: ${{ github.event.pull_request.number }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+      run: |
+        set -euo pipefail
+        body="$CONFIG_DIR/.ratchet-pr-body.txt"
+        reviews="$CONFIG_DIR/.ratchet-reviews.json"
+        checks="$CONFIG_DIR/.ratchet-checks.json"
+        gh pr view "$PR" --json body -q .body > "$body" || true
+        # Reviews via GraphQL → the flat {login,state,commit_id,is_bot,author_association}
+        # shape the engine consumes (REST/`gh pr view` can't surface is_bot / the review's commit oid).
+        gh api graphql -F owner="$OWNER" -F repo="$REPO" -F pr="$PR" -f query='
+          query($owner:String!,$repo:String!,$pr:Int!){
+            repository(owner:$owner,name:$repo){
+              pullRequest(number:$pr){
+                reviews(first:100){ nodes{
+                  state authorAssociation commit{oid} author{login __typename}
+                }}}}}' \
+          --jq '[.data.repository.pullRequest.reviews.nodes[] | {
+                  login: .author.login, state: .state, commit_id: .commit.oid,
+                  is_bot: (.author.__typename=="Bot"), author_association: .authorAssociation }]' \
+          > "$reviews" || echo '[]' > "$reviews"
+        gh pr checks "$PR" --json name,state > "$checks" 2>/dev/null || echo '[]' > "$checks"
+        # protected_path consumes the flat approvals list; the *_approval primitives consume reviews — pass both.
+        approvals="$(jq -r '[.[] | select(.state=="APPROVED") | .login] | unique | join(",")' "$reviews")"
+        python3 "$ENGINE" check --cwd "$CONFIG_DIR" \
+          --pr-body-file "$body" \
+          --reviews-file "$reviews" \
+          --checks-file "$checks" \
+          --approvals "$approvals" \
+          --head-sha "$HEAD_SHA" \
+          --pr-author "$PR_AUTHOR"
+
+    - name: ratchet check (push)
+      if: github.event_name != 'pull_request'
+      shell: bash
+      env:
+        ENGINE: ${{ steps.prep.outputs.engine }}
+        CONFIG_DIR: ${{ inputs.config-dir }}
+      run: python3 "$ENGINE" check --cwd "$CONFIG_DIR"
