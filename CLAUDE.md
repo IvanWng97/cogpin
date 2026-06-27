@@ -22,17 +22,27 @@ Why each primitive exists: [`docs/coverage-map.md`](docs/coverage-map.md).
 ratchet.py              THE engine — one single-file, stdlib-only module (zero deps).
                         Sections: glob→regex · config (Config/Check/validate) · facts
                         (DiffFacts/CommandFacts) · primitive evaluators (pure fns) ·
-                        engine (run_change/_eval_diff) · agent layer (gate/stop) · CLI.
+                        engine (run_change/_eval_diff) · agent layer (gate/stop) · repo
+                        introspection (suggest/gaps/draft-lint config-gen) · wiring
+                        (install/uninstall/doctor) · CLI.
 tests/test_ratchet.py   the whole suite — stdlib `unittest`, no pytest dep.
 ratchet.toml            the dogfood policy that gates THIS repo.
+action.yml              the composite GitHub Action — the change-layer DISTRIBUTION
+                        surface (`uses: IvanWng97/ratchet@v1`); runs a rev-pinned engine
+                        over the base-pinned config. self-gate.yml dogfoods it (`uses: ./`).
 examples/*/ratchet.toml  lift-and-adjust recipes (python · node-ts · pixtuoid · advisory).
-scripts/validate_plugin.py   plugin-packaging validator (manifests + frontmatter).
+scripts/validate_plugin.py   plugin-packaging validator (manifests + frontmatter + action.yml).
 hooks/hooks.json        the PreToolUse + Stop hook wiring the plugin installs.
 .claude-plugin/         plugin.json + marketplace.json (the `/plugin install` surface).
-commands/ · skills/     /ratchet-init · /ratchet-check + the authoring skill.
+commands/ · skills/     /ratchet-init · /ratchet-check · /ratchet-doctor · /ratchet-gaps
+                        + the authoring skill.
 site/                   the Astro Starlight tutorial + Pyodide playground (own toolchain).
 assets/                 the logo + the README diagrams (reproducible: gen_*.py).
 ```
+
+The engine is the install surface too: `install` vendors it to `.ratchet/ratchet.py`
+(committed, base-pinnable) and wires the pre-push + CI; `doctor` verifies both layers.
+Adding/altering a subcommand updates the README CLI list + `SCHEMA.md` (docs-currency).
 
 ## Architecture invariants (load-bearing — don't break these)
 

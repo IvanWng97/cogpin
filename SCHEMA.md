@@ -151,6 +151,7 @@ module) · `public_surface` · `claude_md`. `box` defaults to the check `id`.
 ## CLI
 
 ```
+# enforce
 ratchet gate                    # agent layer: PreToolUse hook (reads the tool envelope on stdin)
 ratchet stop --cwd .            # agent layer: Stop hook (blocks turn-end on unmet DoD)
 ratchet check --cwd .           # change layer: gate the committed range (authoritative)
@@ -158,10 +159,37 @@ ratchet check --cwd .           # change layer: gate the committed range (author
     [--pr-body-file F] [--approvals a,b] [--reviews-file F]
     [--head-sha S] [--pr-author L] [--checks-file F]
 ratchet judge --cwd .           # emit advisory judge prompts (CI pipes to a model)
-ratchet validate --config ratchet.toml
-ratchet init --config ratchet.toml
+
+# author
+ratchet init --config ratchet.toml          # write a minimal starter config
+ratchet validate --config ratchet.toml      # parse + the block-requires-fact invariant
+ratchet suggest --cwd . [--format json|toml]  # repo facts → ranked draft (CLAUDE.md house-rules → primitives); writes NOTHING
+ratchet draft-lint --cwd . [--config ratchet.toml.draft] [--simulate]  # strict superset of validate; gates on # TODO(ratchet:review) markers
+ratchet gaps --cwd . [--format text|json]   # advisory: which house-rules no check binds
+
+# wire (the adoption surface)
+ratchet install --cwd .         # vendor .ratchet/ratchet.py + scaffold config/hook/CI/gitignore (idempotent)
+    [--no-vendor] [--no-config] [--no-hook] [--no-ci] [--no-gitignore]
+ratchet uninstall --cwd .       # strip the local pre-push managed block (never removes committed source)
+ratchet doctor --cwd . [--json] # diagnose both layers; one-line fix per finding
 ```
 
 Exit codes: `gate` → `2` denies (stderr shown to the agent), `0` allows. `check` →
 `1` on a blocking finding, `0` otherwise (warnings print, never fail). `stop` always
 exits `0`; the block rides in the JSON decision the hook contract reads.
+`draft-lint` → `1` while any structural problem or review marker remains, else `0`.
+`doctor` → `1` only on a hard change-layer failure (engine missing / won't compile,
+or `ratchet.toml` invalid); everything else is advisory. `suggest` / `gaps` always
+exit `0`.
+
+### Distribution & engine trust
+
+`install` **vendors** the engine to `.ratchet/ratchet.py` (committed, base-pinnable,
+offline) rather than referencing `${CLAUDE_PLUGIN_ROOT}` — that var exists only in a
+live Claude session, while the change layer must run in CI / a teammate's pre-push /
+a fresh clone. The composite GitHub Action (`uses: IvanWng97/ratchet@v1`) runs its
+**own rev-pinned `ratchet.py`** over your **base-pinned config** by default
+(`engine: pinned`), so neither the judge (engine) nor the policy (config) is read
+from the PR head — a PR can't self-neuter the gate. `engine: vendored` runs the
+consumer's HEAD `.ratchet/ratchet.py` instead, for teams that pin `.ratchet/**` via
+`protected_path` + branch protection.

@@ -43,19 +43,35 @@ base-pinned, un-bypassable) is per-repo. Run once, inside Claude Code:
 /ratchet-init
 ```
 
-It vendors the engine to `.ratchet/ratchet.py`, scaffolds `ratchet.toml`, and adds the CI
-step. Commit those and every clone — every agent, every PR — meets the same gate:
+One command runs `ratchet install` — vendors the engine to `.ratchet/ratchet.py`,
+scaffolds `ratchet.toml`, wires a pre-push managed block into your effective hooks dir
+(coexisting with any husky/lefthook/pre-commit — it appends, never clobbers), and adds
+`.github/workflows/ratchet.yml` — then drafts a policy from your `CLAUDE.md` house rules
+as `ratchet.toml.draft` for you to review and rename. Then `/ratchet-doctor` confirms
+both layers are live. Commit `.ratchet/ratchet.py`, `ratchet.toml`, and the workflow,
+and every clone — every agent, every PR — meets the same gate. The scaffolded CI is two
+steps over the composite action:
 
 ```yaml
-- uses: actions/checkout@v4
-  with: { fetch-depth: 0 }          # base-pinning needs history
-- uses: actions/setup-python@v5
-  with: { python-version: "3.12" }
-- run: python3 .ratchet/ratchet.py check
+permissions: { contents: read, pull-requests: read, checks: read }  # reviews/checks SKIP without these
+jobs:
+  ratchet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }          # base-pinning needs history
+      - uses: IvanWng97/ratchet@v1         # rev-pinned engine over your base-pinned config
 ```
 
-No npm, no package manager, no binary download — one stdlib-Python file, committed. The
-change layer needs no Claude Code at all, so it gates **human** PRs and **any** agent CLI
-too; only the real-time agent layer is Claude-Code-specific.
+The action runs its **own rev-pinned engine** (not the repo's head-side copy) over your
+**base-pinned config**, so a PR can't rewrite the engine to `exit 0` or relax the policy
+in the same diff it's gated on. No npm, no package manager, no binary download — one
+stdlib-Python file, committed.
+
+The change layer needs no Claude Code at all, so it gates **human** PRs and **any** agent
+CLI too; only the real-time agent layer is Claude-Code-specific. Not on GitHub Actions?
+A teammate's local pre-push is `python3 .ratchet/ratchet.py install --no-vendor
+--no-config --no-ci`; on GitLab CI, set `GIT_DEPTH: 0`, fetch the default branch, and run
+`python3 .ratchet/ratchet.py check` (PR-review facts degrade-to-skip off-GitHub).
 
 Next: **[lift a recipe →](/ratchet/recipes/)** for your stack.

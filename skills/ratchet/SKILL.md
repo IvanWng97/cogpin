@@ -64,6 +64,30 @@ for a genuine, logged exception, not for avoiding the work.
 5. New primitive blocking real code for the first time? Start it at `warn`, watch
    a few PRs for false positives, then promote to `block`.
 
-See `README.md` for the full primitive table, `SCHEMA.md` for every field,
+Or skip the hand-authoring: `python3 .ratchet/ratchet.py suggest` reads the repo's
+`CLAUDE.md` house-rules + structure into a ranked draft, and `/ratchet-init` walks the
+whole flow. Write it to `ratchet.toml.draft` (never the live config), mark each
+non-safe-core block with `# TODO(ratchet:review)`, run `draft-lint` until clean, then
+the **human renames** `…draft → …toml` — that rename is the sign-off ratchet's whole
+premise depends on (an auto-applied gate a human rubber-stamps is the exact corner-cut
+it stops).
+
+## Wiring & verifying
+
+- `/ratchet-init` (→ `ratchet install`) wires the change layer once per repo: vendor
+  `.ratchet/ratchet.py`, scaffold config, add the pre-push managed block + CI. It
+  **coexists, never clobbers** — appends a sentinel-fenced block to the effective
+  pre-push, and for lefthook/pre-commit (which regenerate their own hook) it prints a
+  snippet instead of writing. Commit `.ratchet/ratchet.py`, `ratchet.toml`, and
+  `.github/workflows/ratchet.yml`.
+- `/ratchet-doctor` (→ `ratchet doctor`) confirms both layers are live, with a one-line
+  fix for anything missing; `/ratchet-gaps` shows which house-rules are still prose.
+- A teammate's local pre-push (CI already gates them):
+  `python3 .ratchet/ratchet.py install --no-vendor --no-config --no-ci`.
+- "Fix the cause, don't bypass" still applies: if the gate blocks you, address the
+  finding — don't loosen the policy (`self_protect` denies an in-session gate edit, and
+  the CI action runs a rev-pinned engine over the base-pinned config regardless).
+
+See `README.md` for the full primitive table, `SCHEMA.md` for every field + the CLI,
 `docs/coverage-map.md` for why each primitive exists, and
 `examples/{pixtuoid,node-ts,python,advisory}/ratchet.toml` for ready-to-lift policies.

@@ -133,20 +133,53 @@ CI, base-pinned, un-bypassable) is per-repo. Run once, inside Claude Code:
 /ratchet-init
 ```
 
-It vendors the single-file engine to `.ratchet/ratchet.py`, scaffolds
-`ratchet.toml`, and adds the CI step. Commit those and every clone — every agent,
-every PR — meets the same gate. The CI step is just:
+That single command runs `ratchet install` — vendors the single-file engine to
+`.ratchet/ratchet.py`, scaffolds `ratchet.toml`, wires a pre-push managed block
+into your effective hooks dir (coexisting with any husky/lefthook/pre-commit you
+already run — it appends, never clobbers), and scaffolds
+`.github/workflows/ratchet.yml` — then drafts a project-specific policy from your
+`CLAUDE.md` house rules **as `ratchet.toml.draft` for you to review and rename**.
+Commit `.ratchet/ratchet.py`, `ratchet.toml`, and the workflow, and every clone —
+every agent, every PR — meets the same gate. Then `/ratchet-doctor` confirms both
+layers are live. No npm, no package manager, no binary download — one
+stdlib-Python file, committed.
+
+The scaffolded CI is two steps over the composite action:
 
 ```yaml
-- uses: actions/checkout@v4
-  with: { fetch-depth: 0 }          # base-pinning needs history
-- uses: actions/setup-python@v5
-  with: { python-version: "3.12" }
-- run: python3 .ratchet/ratchet.py check
+permissions: { contents: read, pull-requests: read, checks: read }  # reviews/checks SKIP without these
+jobs:
+  ratchet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }          # base-pinning needs history
+      - uses: IvanWng97/ratchet@v1         # rev-pinned engine over your base-pinned config
 ```
 
-No npm, no package manager, no binary download — one stdlib-Python file,
-committed.
+The action runs its **own rev-pinned `ratchet.py`** (not the repo's head-side copy)
+over your **base-pinned `ratchet.toml`** — so a PR can neither rewrite the engine to
+`exit 0` nor relax the policy in the same diff it's gated on. It also gathers the PR
+facts (body, reviews, checks, approvals) so the reviewer-identity and checks-green
+primitives work with zero extra config.
+
+**Not on GitHub Actions?** The engine is the same everywhere. A teammate who wants
+their *local* pre-push (CI already gates them) runs
+`python3 .ratchet/ratchet.py install --no-vendor --no-config --no-ci`. On GitLab CI,
+five lines do it: `GIT_DEPTH: 0`, `git fetch origin "$CI_DEFAULT_BRANCH"`, then
+`python3 .ratchet/ratchet.py check` (PR-review facts degrade-to-skip off-GitHub).
+Using **pre-commit**? It regenerates its own hook, so add a `repo: local` entry
+pointing at the same vendored engine (`entry: python3 .ratchet/ratchet.py check`,
+`stages: [pre-push]`) — `ratchet install` prints the exact snippet.
+
+> **No Claude Code?** The change layer is tool-agnostic. Vendor the engine once
+> without the plugin — pin a tag and fetch the one file, then `install --no-vendor`:
+> ```sh
+> mkdir -p .ratchet && curl -fsSL https://raw.githubusercontent.com/IvanWng97/ratchet/v1/ratchet.py -o .ratchet/ratchet.py
+> python3 .ratchet/ratchet.py install --no-vendor   # wires hook + CI + gitignore
+> ```
+> It's a documented one-liner, not a bootstrapper to maintain — every later install
+> re-runs the already-committed engine.
 
 ## Why it's bypass-proof
 
@@ -251,12 +284,21 @@ schema itself (`block` requires `fact`), so the guarantee can't silently erode.
 
 ## Config & recipes
 
-Start from a scaffold, then validate:
+Let `/ratchet-init` draft a policy from your `CLAUDE.md`, or start from a scaffold:
 
 ```
-python3 ratchet.py init       # or  /ratchet-init  inside Claude Code
+python3 ratchet.py install    # vendor + scaffold + hook + CI (or /ratchet-init in Claude Code)
+python3 ratchet.py suggest    # repo facts → a ranked draft policy (CLAUDE.md house-rules → primitives)
+python3 ratchet.py draft-lint # gate ratchet.toml.draft (the moat + outstanding review markers) before the rename
+python3 ratchet.py gaps       # which CLAUDE.md rules are still prose with no mechanism
+python3 ratchet.py doctor     # diagnose both layers (or /ratchet-doctor)
 python3 ratchet.py validate   # checks the block-requires-fact invariant + structural sanity
 ```
+
+The AI drafts to `ratchet.toml.draft`, never the live config; only the five
+safe-core blocks may be born enforcing, and `draft-lint` blocks the rename until
+every other block carries a cleared `# TODO(ratchet:review)` marker — the human's
+`mv …draft …toml` is the sign-off.
 
 Ready-to-lift policies:
 
@@ -287,6 +329,8 @@ guard this very repo with the primitives it ships.
 
 ## Status
 
-v0.1 — engine (23 primitives) + Claude Code plugin (agent layer) + `/ratchet-init`
-repo wiring (change layer) + tutorial site. Stdlib Python (3.11+), no third-party
-deps, no package manager. MIT.
+v0.1 — engine (23 primitives) + Claude Code plugin (agent layer) + one-command
+`/ratchet-init` wiring (`install` / `uninstall` / `doctor`) + AI-assisted config
+draft (`suggest` / `draft-lint` / `gaps`) + a rev-pinned composite GitHub Action
+(change layer) + tutorial site. Stdlib Python (3.11+), no third-party deps, no
+package manager. MIT.
