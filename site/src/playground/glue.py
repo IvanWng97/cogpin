@@ -12,6 +12,8 @@ Mini-diff scenario format (one item per line):
     - <code>              a removed line  in the most-recent file
     $ <shell command>     an agent command (forbid_command / forbid_commit_on_branch)
     @ <branch>            the current branch (for forbid_commit_on_branch)
+    write> <path>         an agent Write/Edit target (self_protect)
+    commit> <message>     a commit message (require_message_pattern / forbid_in_message)
     pr> <text>            a PR-body line (marker_present / cooccur)
     approvals> a, b       reviewer approvals (protected_path)
     # comment / blank     ignored
@@ -27,8 +29,8 @@ _STATUS = {"A": ratchet.ADDED, "M": ratchet.MODIFIED, "D": ratchet.DELETED}
 
 
 def _parse(scenario_text):
-    changed, added, removed = [], [], []
-    command, branch, pr_lines, approvals = "", None, [], None
+    changed, added, removed, commits = [], [], [], []
+    command, branch, pr_lines, approvals, write_path = "", None, [], None, ""
     cur = None
     for line in (scenario_text or "").splitlines():
         s = line.strip()
@@ -39,6 +41,12 @@ def _parse(scenario_text):
             continue
         if line.startswith("approvals>"):
             approvals = [a.strip() for a in line[len("approvals>"):].split(",") if a.strip()]
+            continue
+        if line.startswith("commit>"):
+            commits.append(line[len("commit>"):].lstrip())
+            continue
+        if line.startswith("write>"):
+            write_path = line[len("write>"):].strip()
             continue
         marker, rest = line[0], (line[2:] if len(line) > 1 else "")
         if marker in _STATUS and len(line) > 1 and line[1] == " ":
@@ -56,7 +64,8 @@ def _parse(scenario_text):
             branch = rest.strip() or None
     return {
         "changed": changed, "added": added, "removed": removed,
-        "command": command, "branch": branch,
+        "command": command, "branch": branch, "write_path": write_path,
+        "commit_msgs": commits,
         "pr_body": "\n".join(pr_lines) if pr_lines else None,
         "approvals": approvals,
     }
@@ -75,15 +84,19 @@ def run(toml_text, scenario_text):
     p = _parse(scenario_text)
     facts = ratchet.DiffFacts(
         added=p["added"], removed=p["removed"], changed=p["changed"],
-        pr_body=p["pr_body"], approvals=p["approvals"],
+        pr_body=p["pr_body"], approvals=p["approvals"], commit_msgs=p["commit_msgs"],
     )
     # change layer — skip `run` blocks (no shell in the browser)
     for f in ratchet.run_change(cfg, facts, allow_run=False):
         out["change_findings"].append({"sev": f.severity, "id": f.id, "reason": f.reason})
-    # agent layer — command gate + branch gate, only if a command was supplied
+    # agent layer — command gate + branch gate (if a command was supplied) + the
+    # self_protect gate (if a Write/Edit target was supplied).
     if p["command"]:
         cmd = ratchet.CommandFacts(command=p["command"])
         for f in ratchet.run_command_gate(cfg, cmd) + ratchet.run_branch_gate(cfg, cmd, p["branch"]):
+            out["agent_denials"].append({"sev": f.severity, "id": f.id, "reason": f.reason})
+    if p["write_path"]:
+        for f in ratchet.run_self_protect_gate(cfg, "Edit", p["write_path"]):
             out["agent_denials"].append({"sev": f.severity, "id": f.id, "reason": f.reason})
 
     nb = sum(1 for f in out["change_findings"] if f["sev"] == "block")

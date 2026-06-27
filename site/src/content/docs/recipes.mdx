@@ -59,15 +59,27 @@ See the full file (with secret-scan, debugger guard, skip-marker warn, docs-curr
 ## Node / TypeScript
 
 A focused test (`it.only`), a committed `debugger;`, a deleted test, a stripped `await`,
-plus the real `npm run lint && npm test` as the change-layer teeth →
+plus a full **team / PR-review layer** — CODEOWNERS-lite (`require_approval_from`), a
+supply-chain gate on new dependencies (`pattern_requires_approval`), fresh-human-approval
+depth (`approval_state_depth`), and `require_checks_green` — and the real
+`npm run lint && npm test` as the change-layer teeth →
 [`examples/node-ts/ratchet.toml`](https://github.com/IvanWng97/ratchet/blob/main/examples/node-ts/ratchet.toml).
 
 ## A real Rust workspace
 
 A faithful port of an 890-line bespoke Definition-of-Done gate (the pixtuoid project) into
-21 declarative checks — prod-`println!` guard, settings-write guard, two-lens-review marker,
-docs/ledger coupling, the new diff-side guards, and an advisory substance judge →
+22 declarative checks — prod-`println!` guard, settings-write guard, two-lens-review marker,
+docs/ledger coupling, the diff-side guards, real-time `self_protect`, and an advisory
+substance judge →
 [`examples/pixtuoid/ratchet.toml`](https://github.com/IvanWng97/ratchet/blob/main/examples/pixtuoid/ratchet.toml).
+
+## The advisory library
+
+The eight **semantic-weakening** classes a fact can’t prove — assertion-loosening, fake
+implementation, regex relaxing, guard removal, silent fallback, tautological test, scope
+drift, comment rot — as `judge` prompts a CI step pipes to a model (`continue-on-error`).
+Compose them with the blocking facts above →
+[`examples/advisory/ratchet.toml`](https://github.com/IvanWng97/ratchet/blob/main/examples/advisory/ratchet.toml).
 
 ## Promoting `warn` → `block`
 

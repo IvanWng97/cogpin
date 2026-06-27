@@ -51,6 +51,30 @@ being gated on**.
 - **Isolated `run`** — invoke tools isolated (`ruff --isolated`, a pinned `pytest -c …`) so
   head-side config can’t defang the teeth.
 
+## Coverage map
+
+The primitive library isn’t a guess. Its fact-kind rules were derived two ways: a
+first-principles pass over the closing-discipline, then an **empirical mining** of real
+AI-authored history — a 30-agent sweep over nine corpora (the Claude Code issue tracker,
+public `CLAUDE.md`/`AGENTS.md` repos, AI-authored reverts, a real review ledger, competitor
+rule sets) that produced 95 findings, 19 candidate gaps, and **six** adversarially-verified
+fact-kind gaps.
+
+| corner-cut | primitive | evidence |
+|---|---|---|
+| Scope creep (edit outside the task) | `scope_lock` | the #1 reported class — 10+ issues incl. one titled “SCOPE LOCK violation” |
+| Smuggle a verb past a prefix rule (`git -C p push`) | `forbid_command{deny}` | a tracker issue ships the exact repro table |
+| Lower a coverage threshold / raise retries | `numeric_floor` | 20+ real commits in ~6 weeks (85→75, →19%, →5%) |
+| Commit a multi-MB binary (zero diff lines) | `max_added_file_bytes` | invisible to every line-based rule; mirrors pre-commit’s most-installed hook |
+| `[skip ci]` to disarm the host | `forbid_in_message` | one token disarms the change layer’s own CI |
+| Approve-then-push games (stale / self / bot) | `approval_state_depth` | the gameable shape behind a bare approval check |
+
+The eight **semantic-weakening** classes a fact can’t prove — assertion-loosening, fake
+implementation, regex relaxing, guard removal, silent fallback, tautological test, scope
+drift, comment rot — can’t hard-block (that would block on a judgment the agent authors), so
+they ship as the advisory `judge` library. The full matrix, with every citation, is in
+[`docs/coverage-map.md`](https://github.com/IvanWng97/ratchet/blob/main/docs/coverage-map.md).
+
 ## What it does and doesn’t claim
 
 ratchet guarantees the **forcing function**, not omniscience. A `fact` block can’t be talked

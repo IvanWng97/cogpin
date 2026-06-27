@@ -10,43 +10,64 @@ column is the signal each rule reads — and the agent writes none of it.
 
 <img src={`${base}assets/catches.svg`} alt="Each corner-cut and the fact that catches it" style="width:100%;max-width:840px;display:block;margin:1rem auto;" />
 
-## The new fact-surface primitives
+## Where the rules came from
 
-Most gates scan **added** lines for bad patterns. That leaves the parts of a diff where the
-canonical AI corner-cuts actually live — *removals*, *deletions*, *the branch you’re on* —
-completely unguarded. These three close that:
+These aren’t a guess about how agents cut corners. The fact-kind primitives were derived
+two ways: a first-principles pass over the closing-discipline, then an **empirical mining**
+of real AI-authored PR/commit/review history — a 30-agent sweep over nine corpora that
+surfaced 95 findings, synthesized 19 candidate gaps, and adversarially verified six as
+real, ungameable facts. The full evidence (with issue/commit citations) is the
+**[coverage map →](/ratchet/concepts/#coverage-map)**.
 
-- **`forbid_removal`** — the `-` twin of `forbid_pattern`. A **removed** line matching a
-  guard pattern (an `assert`, an `await`, an error-propagating `?`, an auth check, a
-  `# nosec` / SPDX header) blocks. *“Silently delete the safety net”* is the most common AI
-  corner-cut, and the one a scanner of added lines cannot see.
-- **`forbid_delete`** — file D-status guard. *“Delete the failing test to reach green.”* A
-  whole-file deletion under a scope blocks, with `unless_paired_add` to let a genuine
-  rename/reorg through.
-- **`forbid_commit_on_branch`** — the live-branch fact. *“Commit straight to main.”* The
-  `PreToolUse` hook denies a commit/push on a protected branch in real time; the only way
-  past is `git checkout -b`, which is the intended outcome. A `run` check can’t substitute
-  — it isn’t a real-time op-denier.
+A few of the sharpest:
+
+- **`scope_lock`** — the positive A/M/D allowlist; the structural inverse of every denylist.
+  *“Edit a subsystem outside the task.”* Scope creep is the single most-reported agent
+  failure class, and no denylist can express “any file **not** in the allow-set.”
+- **`numeric_floor`** — the namesake ratchet. It pairs a numeric token across the −/+ hunks
+  on the same key, so *lowering* `fail_under` 85→75 (byte-identical to a raise to a one-side
+  scanner) blocks. Disarms the very quality gate the DoD exists to protect.
+- **`self_protect`** — the live-write fact. A `Write`/`Edit` to a gate-defining file is
+  denied at `PreToolUse`, so the agent can’t quietly loosen its own gate mid-session.
+- **`forbid_removal`** — the `-` twin of `forbid_pattern`: a **removed** guard line (an
+  `assert`, an `await`, an auth check) blocks. *“Silently delete the safety net”* — the cut
+  a scanner of added lines can’t see.
 
 ## The full primitive library
 
-Every check reads only facts — never your code.
+Every check reads only facts — never your code. The 23 below; full field reference in
+[`SCHEMA.md`](https://github.com/IvanWng97/ratchet/blob/main/SCHEMA.md).
 
 | primitive | kind | decides over |
 |---|---|---|
-| `forbid_command` | fact | the agent’s command string (agent layer) |
+| `forbid_command` | fact | the agent’s command string — `deny` matches the **normalized** verb (agent layer) |
 | `forbid_commit_on_branch` | fact | the live current branch (agent layer) |
+| `self_protect` | fact | a live Write/Edit to a gate-defining file (agent layer) |
 | `secret_scan` | fact | added lines vs token shapes + forbidden file globs |
 | `forbid_pattern` | fact | **added** lines under a path scope |
 | `forbid_removal` | fact | **removed** lines under a path scope |
 | `forbid_delete` | fact | per-file D-status (a deletion under scope) |
+| `scope_lock` | fact | every A/M/D path must be inside the allowlist (scope creep) |
+| `numeric_floor` | fact | a value’s **direction** across the diff (lower coverage / raised retries) |
+| `change_budget` | fact | count ceilings over the diff (blast radius) |
+| `file_must_contain` | fact | an added/changed file in scope must add a matching line |
+| `max_added_file_bytes` | fact | a per-file byte ceiling (vendored bundles, stray binaries) |
 | `path_requires` | fact | name-status: if `when` changed, `need` must too |
 | `cooccur` | fact | if `trigger` appears, `require` must too |
 | `marker_present` | fact | a marker block exists in the PR body |
+| `forbid_in_message` | fact | forbidden tokens in a commit/PR message (e.g. `[skip ci]`) |
+| `require_message_pattern` | fact | every commit/PR message matches a shape (e.g. Conventional Commits) |
 | `commit_footer` | fact | every commit ends with the required footer |
 | `protected_path` | fact | gate-defining files changed → need an independent approval |
+| `require_approval_from` | fact | a change under `paths` needs an owner’s APPROVED review (CI) |
+| `pattern_requires_approval` | fact | an added line matching `pattern` needs an approval (CI) |
+| `approval_state_depth` | fact | the approval is fresh, human, non-author, no changes-requested (CI) |
+| `require_checks_green` | fact | every required status check concluded `success` (CI) |
 | `run` | fact\* | shell-out; the exit code is the fact (**`block` only at the change layer**) |
 | `attest` | advisory | a class-gated `Stop`-hook checklist box (forcing function) |
 | `judge` | advisory | an advisory LLM-judge prompt for a CI substance check |
+
+The eight **semantic-weakening** classes a fact *can’t* prove (assertion-loosening,
+fake-impl, guard-removal, …) ship as the advisory `judge` library — see the coverage map.
 
 Want to feel it? **[Try it live →](/ratchet/try-it/)**

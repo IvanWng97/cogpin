@@ -24,6 +24,8 @@ because the engine reads **facts**, not raw text, you describe the change as fac
 | `- <code>` | a **removed** line in the current file |
 | `$ <command>` | a command the agent is about to run (agent layer) |
 | `@ <branch>` | the current branch (for `forbid_commit_on_branch`) |
+| `write> <path>` | a `Write`/`Edit` target (for `self_protect`) |
+| `commit> <message>` | a commit message (`require_message_pattern` / `forbid_in_message`) |
 
 Hit **run** and the engine reports two layers: **agent layer** denials (what the
 `PreToolUse` hook would block in real time) and **change layer** findings (what pre-push +
@@ -38,6 +40,13 @@ CI would catch).
   `A tests/...` line and it passes — `unless_paired_add` reads that as a rename/reorg.
 - **`commit to main`** is denied at the *agent* layer — change `@ main` to `@ feature/x`
   and it’s allowed.
+- **`scope creep`** touches a path outside the allowlist → `scope_lock` blocks. The
+  structural inverse of a denylist: it gates “any file *not* in the allow-set.”
+- **`lower coverage`** flips `fail_under` 85→75 → `numeric_floor` blocks. To a one-side
+  scanner that’s byte-identical to a *raise*; pairing the number across the −/+ hunks is the
+  whole point.
+- **`edit the gate`** is a `write> ratchet.toml` — denied at the *agent* layer by
+  `self_protect`, so the agent can’t loosen its own gate mid-session.
 - **`an un-blockable rule`** loads a policy that tries to hard-block on a `judge` (an
   LLM-judge the agent could sway). The engine **refuses to load it** —
   `severity="block"` requires `kind="fact"`. That error is the moat, enforced at parse

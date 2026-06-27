@@ -15,7 +15,7 @@ const base = import.meta.env.BASE_URL;
     <div class="pg-pane">
       <label class="pg-h" for="pg-scen">change <span>— what the agent did</span></label>
       <textarea id="pg-scen" class="pg-edit" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
-      <p class="pg-legend"><code>A/M/D path</code> file · <code>+ line</code> added · <code>- line</code> removed · <code>$ cmd</code> command · <code>@ branch</code></p>
+      <p class="pg-legend"><code>A/M/D path</code> file · <code>+ line</code> added · <code>- line</code> removed · <code>$ cmd</code> command · <code>@ branch</code> · <code>write&gt; path</code> · <code>commit&gt; msg</code></p>
     </div>
   </div>
   <div class="pg-controls">
@@ -24,6 +24,8 @@ const base = import.meta.env.BASE_URL;
     <button class="pg-preset" data-preset="delete">delete the test</button>
     <button class="pg-preset" data-preset="main">commit to main</button>
     <button class="pg-preset" data-preset="scope">scope creep</button>
+    <button class="pg-preset" data-preset="floor">lower coverage</button>
+    <button class="pg-preset" data-preset="protect">edit the gate</button>
     <button class="pg-preset" data-preset="invalid">an un-blockable rule</button>
     <button class="pg-run" data-run>▶ run ratchet</button>
   </div>
@@ -119,6 +121,25 @@ id = "secret-scan"
 kind = "fact"
 severity = "block"
 primitive = "secret_scan"
+
+# the namesake ratchet: a lowered threshold is byte-identical to a raise to a
+# one-side scanner — numeric_floor pairs the number across the −/+ hunks
+[[check]]
+id = "coverage-ratchet"
+kind = "fact"
+severity = "block"
+primitive = "numeric_floor"
+key = "fail_under\\\\s*=\\\\s*(\\\\d+)"
+direction = "no_decrease"
+
+# real-time (agent layer): can't edit the gate's own files in-session
+[[check]]
+id = "self-protect"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "self_protect"
+paths = ["ratchet.toml", ".github/workflows/**"]
 `;
 
   const INVALID = `schema = 1
@@ -140,6 +161,8 @@ prompt = "is the code good?"
     delete: { toml: STARTER, scen: 'D tests/test_auth.py' },
     main: { toml: STARTER, scen: '$ git commit -m wip\n@ main' },
     scope: { toml: STARTER, scen: 'M src/app.py\nM infra/deploy.tf' },
+    floor: { toml: STARTER, scen: 'M pyproject.toml\n- fail_under = 85\n+ fail_under = 75' },
+    protect: { toml: STARTER, scen: 'write> ratchet.toml' },
     invalid: { toml: INVALID, scen: '' },
   };
 
