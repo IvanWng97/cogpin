@@ -105,40 +105,57 @@ def _rx(pat: str | None) -> re.Pattern[str] | None:
 KINDS = {"fact", "advisory"}
 SEVERITIES = {"block", "warn", "attest", "judge"}
 LAYERS = {"agent", "change", "both"}
-PRIMITIVES = {
-    "secret_scan",
-    "forbid_command",
-    "forbid_pattern",
-    "forbid_removal",
-    "forbid_delete",
-    "forbid_commit_on_branch",
-    "scope_lock",
-    "self_protect",
-    "forbid_in_message",
-    "require_message_pattern",
-    "numeric_floor",
-    "change_budget",
-    "file_must_contain",
-    "max_added_file_bytes",
-    "path_requires",
-    "cooccur",
-    "marker_present",
-    "commit_footer",
-    "protected_path",
-    "require_approval_from",
-    "pattern_requires_approval",
-    "approval_policy",
-    "require_checks_green",
-    "run",
-    "attest",
-    "judge",
-}
+_ANY_LAYER = frozenset({"agent", "change", "both"})
+_AGENT_ONLY = frozenset({"agent", "both"})  # live-signal primitives: a change placement never fires
 
-# attest (a Stop-hook checklist box) and judge (an LLM-judge prompt) are advisory BY NATURE:
-# they decide over no diff/command FACT, so they can NEVER block — regardless of the author's
-# `kind` label. The moat checks the label; this set is the single source that also rejects a
-# `kind="fact"` LIE on them (a never-firing `block`) and derives the test-side fact set.
-_ADVISORY_ONLY = frozenset({"attest", "judge"})
+
+@dataclass(frozen=True)
+class Spec:
+    """The intrinsic, declarative facts about a primitive — its single source of truth.
+    `kind` is its NATURE: an advisory primitive decides over no fact, so it can never block,
+    whatever the author labels (the moat checks the label; _ADVISORY_ONLY rejects the lie).
+    `layers` is the allowed placement — a live-signal primitive (it reads an agent-layer fact)
+    is agent-only, so a change-layer placement would silently never fire."""
+    kind: str
+    layers: frozenset[str] = _ANY_LAYER
+
+
+# THE primitive registry: one Spec per primitive is the single source for the name set
+# (PRIMITIVES), the fact/advisory split (_ADVISORY_ONLY + the moat-mislabel guard), and the
+# layer-placement rule (validate). Adding a primitive is ONE entry here, not parallel-list edits.
+# The evaluator FN, its typed call, and the gate-runner routing stay EXPLICIT in _eval_diff / the
+# runners (the table holds no callable — that keeps mypy's per-call arity check and the route test).
+PRIMITIVE_SPECS: dict[str, "Spec"] = {
+    "secret_scan": Spec("fact"),
+    "forbid_command": Spec("fact"),
+    "forbid_pattern": Spec("fact"),
+    "forbid_removal": Spec("fact"),
+    "forbid_delete": Spec("fact"),
+    "forbid_commit_on_branch": Spec("fact", _AGENT_ONLY),
+    "scope_lock": Spec("fact"),
+    "self_protect": Spec("fact", _AGENT_ONLY),
+    "forbid_in_message": Spec("fact"),
+    "require_message_pattern": Spec("fact"),
+    "numeric_floor": Spec("fact"),
+    "change_budget": Spec("fact"),
+    "file_must_contain": Spec("fact"),
+    "max_added_file_bytes": Spec("fact"),
+    "path_requires": Spec("fact"),
+    "cooccur": Spec("fact"),
+    "marker_present": Spec("fact"),
+    "commit_footer": Spec("fact"),
+    "protected_path": Spec("fact"),
+    "require_approval_from": Spec("fact"),
+    "pattern_requires_approval": Spec("fact"),
+    "approval_policy": Spec("fact"),
+    "require_checks_green": Spec("fact"),
+    "run": Spec("fact"),
+    "attest": Spec("advisory"),
+    "judge": Spec("advisory"),
+}
+PRIMITIVES = frozenset(PRIMITIVE_SPECS)
+# advisory-by-nature primitives (decide over no fact → can never block, whatever the `kind` label).
+_ADVISORY_ONLY = frozenset(n for n, s in PRIMITIVE_SPECS.items() if s.kind == "advisory")
 
 
 class ConfigError(Exception):
@@ -391,20 +408,15 @@ class Config:
                 raise ConfigError(
                     f"check `{c.id}`: a `run` block must live at the change layer, not agent"
                 )
-            # The current branch is a LIVE agent-layer fact (read at the PreToolUse
-            # intercept); a pure change-layer placement would silently never fire.
-            if c.primitive == "forbid_commit_on_branch" and c.layer == "change":
+            # Placement: a live-signal primitive (forbid_commit_on_branch reads the current
+            # branch, self_protect the live Write/Edit target — both at the PreToolUse intercept)
+            # would silently never fire at the change layer. The allowed layers live in the
+            # primitive's Spec, so there is no per-primitive guard to forget (the change-layer
+            # twin of self_protect is protected_path).
+            if c.layer not in PRIMITIVE_SPECS[c.primitive].layers:
                 raise ConfigError(
-                    f"check `{c.id}`: forbid_commit_on_branch reads the live branch — "
-                    f"declare layer=\"agent\" (or \"both\"), not change"
-                )
-            # self_protect reads the LIVE Write/Edit tool_input at the PreToolUse
-            # intercept — same constraint; the change-layer twin is protected_path.
-            if c.primitive == "self_protect" and c.layer == "change":
-                raise ConfigError(
-                    f"check `{c.id}`: self_protect reads the live Write/Edit target — "
-                    f"declare layer=\"agent\" (or \"both\"); the change-layer twin is "
-                    f"protected_path"
+                    f"check `{c.id}`: {c.primitive} reads a live agent-layer signal — declare "
+                    f'layer "agent" or "both", not "{c.layer}"'
                 )
             # numeric_floor's `direction` selects both the floor/ceiling branch and the
             # pairing arm; a typo'd value would silently disable the floor and invert the

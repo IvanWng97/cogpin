@@ -2147,3 +2147,48 @@ class TestNoDrift(unittest.TestCase):
         ok = ('schema=1\n[repo]\ndefault_branch="main"\n[[check]]\nid="j"\nkind="advisory"\n'
               'severity="warn"\nprimitive="judge"\nprompt="p"\n')
         self.assertEqual(len(Config.parse(ok).checks), 1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase B — PRIMITIVE_SPECS is the single source for the name set, the fact/advisory
+# split, and the layer-placement rule. Pins the table's columns against drift.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestPrimitiveSpecs(unittest.TestCase):
+    def test_primitives_is_spec_keyset_and_names_pinned(self):
+        self.assertEqual(R.PRIMITIVES, frozenset(R.PRIMITIVE_SPECS))
+        self.assertEqual(set(R.PRIMITIVE_SPECS), {
+            "secret_scan", "forbid_command", "forbid_pattern", "forbid_removal", "forbid_delete",
+            "forbid_commit_on_branch", "scope_lock", "self_protect", "forbid_in_message",
+            "require_message_pattern", "numeric_floor", "change_budget", "file_must_contain",
+            "max_added_file_bytes", "path_requires", "cooccur", "marker_present", "commit_footer",
+            "protected_path", "require_approval_from", "pattern_requires_approval", "approval_policy",
+            "require_checks_green", "run", "attest", "judge"})
+
+    def test_spec_kinds_valid(self):
+        for name, spec in R.PRIMITIVE_SPECS.items():
+            self.assertIn(spec.kind, R.KINDS, f"{name}: invalid kind {spec.kind!r}")
+
+    def test_advisory_only_derives_from_spec_kind(self):
+        self.assertEqual(R._ADVISORY_ONLY,
+                         frozenset(n for n, s in R.PRIMITIVE_SPECS.items() if s.kind == "advisory"))
+        self.assertEqual(R._ADVISORY_ONLY, {"attest", "judge"})
+
+    def test_agent_only_primitives_pinned(self):
+        agent_only = {n for n, s in R.PRIMITIVE_SPECS.items() if s.layers != R._ANY_LAYER}
+        self.assertEqual(agent_only, {"forbid_commit_on_branch", "self_protect"})
+        for n in agent_only:
+            self.assertEqual(R.PRIMITIVE_SPECS[n].layers, R._AGENT_ONLY)
+
+    def test_layer_placement_guard_is_table_driven(self):
+        # live-signal primitives are rejected at the change layer; a normal fact primitive is fine
+        for prim, extra in (("self_protect", 'paths=["ratchet.toml"]'),
+                            ("forbid_commit_on_branch", 'branch=["main"]')):
+            bad = ('schema=1\n[repo]\ndefault_branch="main"\n[[check]]\nid="x"\nkind="fact"\n'
+                   f'severity="warn"\nlayer="change"\nprimitive="{prim}"\n{extra}\n')
+            with self.assertRaises(ConfigError):
+                Config.parse(bad)
+        ok = ('schema=1\n[repo]\ndefault_branch="main"\n[[check]]\nid="ok"\nkind="fact"\n'
+              'severity="warn"\nlayer="change"\nprimitive="forbid_pattern"\npattern="x"\n')
+        self.assertEqual(len(Config.parse(ok).checks), 1)
