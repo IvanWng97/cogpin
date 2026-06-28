@@ -562,6 +562,23 @@ class TestAgentLayer(unittest.TestCase):
         self.assertEqual(push_or_merge("gh api repos/o/r/pulls/7/merge -X PUT"), "merge")
         self.assertIsNone(push_or_merge("git status"))
         self.assertIsNone(push_or_merge("git commit -m 'about to push'"))  # quoted → not a push
+        # M4: a quoted/split verb still executes in a shell, so it must still be detected.
+        self.assertEqual(push_or_merge('git "push" origin'), "push")
+        self.assertEqual(push_or_merge('gh pr "merge" 7'), "merge")
+        self.assertEqual(push_or_merge("git \\\npush"), "push")             # continuation
+        self.assertIsNone(push_or_merge('echo "git push"'))                 # quoted phrase, not a verb
+        # symmetric to the push case: a MERGE verb merely NAMED in a quoted phrase is not a hit
+        # (token-aware, so the single quoted token never equals the `gh pr merge` token run).
+        self.assertIsNone(push_or_merge('echo "gh pr merge"'))
+        self.assertIsNone(push_or_merge('git commit -m "gh pr merge later"'))
+        self.assertIsNone(push_or_merge('echo "deploy via gh api x/merge now"'))
+        # parity with the old regex: a path-qualified gh and a backtick command-substitution
+        # must still be caught — gh merge is GitHub-API-side, with no change-layer backstop.
+        self.assertEqual(push_or_merge("/usr/bin/gh pr merge 7"), "merge")
+        self.assertEqual(push_or_merge("./gh pr merge"), "merge")
+        self.assertEqual(push_or_merge("/usr/bin/gh api repos/o/r/pulls/7/merge -X PUT"), "merge")
+        self.assertEqual(push_or_merge("`gh pr merge 7`"), "merge")       # backtick cmd-subst
+        self.assertEqual(push_or_merge("`git push`"), "push")
 
     def test_ticked_parsing(self):
         md = "- [x] TDD\n- [ ] Design\n-[X] Self-review"
@@ -632,7 +649,14 @@ class TestAgentLayer(unittest.TestCase):
         self.assertEqual(_git_ops("git add . && git push origin main"), {"add", "push"})
         self.assertEqual(_git_ops("git -C dir -c k=v push"), {"push"})  # skips opt + value
         self.assertEqual(_git_ops("ls -la"), set())
-        self.assertEqual(_git_ops("git commit -m 'git push later'"), {"commit"})  # quote-stripped
+        self.assertEqual(_git_ops("git commit -m 'git push later'"), {"commit"})  # quoted phrase ≠ verb
+        # M4: quoting/splitting the VERB must not evade — a shell strips the quote GLYPHS and runs
+        # it, so shlex tokenization keeps the verb while quoted CONTENT stays one token.
+        self.assertEqual(_git_ops('git "push"'), {"push"})
+        self.assertEqual(_git_ops("git 'commit'"), {"commit"})
+        self.assertEqual(_git_ops('git p"ush"'), {"push"})        # adjacent-quote concatenation
+        self.assertEqual(_git_ops('echo "git push"'), set())      # quoted phrase, NOT a false hit
+        self.assertEqual(_git_ops("git \\\npush"), {"push"})      # backslash-newline continuation
 
     def test_forbid_commit_on_branch_denies_on_protected(self):
         cfg = Config.parse(self.BRANCH_CFG)
@@ -787,6 +811,13 @@ class TestMinedPrimitives(unittest.TestCase):
         self.assertIsNone(forbid_command(c, CommandFacts("git status")))                 # benign
         self.assertIsNone(forbid_command(c, CommandFacts("git format-patch")))           # different subcommand
         self.assertIsNone(forbid_command(c, CommandFacts('echo "git push later"')))      # quoted → not a real op
+        # M4: the deny path (via _normalize_command_segments → _shell_segments) is quote-aware
+        # too — quoting/splitting the verb still trips the deny, a phrase merely naming it does not.
+        self.assertIsNotNone(forbid_command(c, CommandFacts('git "push"')))              # quoted verb
+        self.assertIsNotNone(forbid_command(c, CommandFacts('git p"ush"')))              # split verb
+        self.assertIsNotNone(forbid_command(c, CommandFacts("git \\\npush")))            # continuation
+        self.assertIsNotNone(forbid_command(c, CommandFacts('git "reset" --hard HEAD~1')))  # multi-token deny
+        self.assertIsNone(forbid_command(c, CommandFacts('echo "please git push"')))     # quoted phrase ≠ deny
 
     def test_forbid_command_pattern_still_works_with_deny(self):
         # the legacy `pattern` (raw regex, matches anywhere) coexists with `deny`
@@ -1968,6 +1999,34 @@ class TestSubshellEvasion(unittest.TestCase):
         self.assertTrue(has_block(run_branch_gate(cfg, CommandFacts("(git commit -m x)"), "main")))
         self.assertTrue(has_block(run_branch_gate(cfg, CommandFacts("(git push)"), "main")))
         self.assertEqual(run_branch_gate(cfg, CommandFacts("(git status)"), "main"), [])
+
+
+class TestQuoteEvasion(unittest.TestCase):
+    """M4: quoting/splitting the git verb (`git "push"`, `git p"ush"`, a backslash-newline
+    continuation) runs the REAL verb in a shell, so it must not evade the agent-layer
+    commit/push-on-default-branch deny. A quoted PHRASE that merely names a verb
+    (`echo "git push"`) stays one token and must NOT false-block."""
+
+    BRANCH = ('schema=1\n[repo]\ndefault_branch="main"\n[[check]]\nid="bf"\nkind="fact"\n'
+              'severity="block"\nlayer="agent"\nprimitive="forbid_commit_on_branch"\n'
+              'branch=["main"]\nops=["commit","push"]\n')
+
+    def test_quoted_verb_denied_on_protected_branch(self):
+        cfg = Config.parse(self.BRANCH)
+        for cmd in ('git "push"', "git 'commit' -m x", 'git p"ush"', "git \\\npush"):
+            self.assertTrue(has_block(run_branch_gate(cfg, CommandFacts(cmd), "main")),
+                            f"{cmd!r} must be denied on main")
+
+    def test_quoted_phrase_is_not_a_false_block(self):
+        cfg = Config.parse(self.BRANCH)
+        self.assertEqual(run_branch_gate(cfg, CommandFacts('echo "git push to main"'), "main"), [])
+        self.assertEqual(run_branch_gate(cfg, CommandFacts("git status"), "main"), [])
+
+    def test_unbalanced_quote_degrades_toward_detection(self):
+        # A malformed command (unbalanced quote) can't be lexed; the fallback errs toward
+        # DETECTION — over-denying a malformed git push on main is the safe direction.
+        cfg = Config.parse(self.BRANCH)
+        self.assertTrue(has_block(run_branch_gate(cfg, CommandFacts('git "push'), "main")))
 
 
 class TestApprovalHardening(unittest.TestCase):

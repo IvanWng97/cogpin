@@ -30,6 +30,7 @@ import ast
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -1516,22 +1517,76 @@ _GIT_VALUE_OPTS = frozenset(
 # `$(git commit)`, `{git push;}`) can't hide the gated git verb behind a `(`/`{` from the
 # tokenized op scan — `( git push )` was already caught; the glued `(git` was the gap.
 _SHELL_SEP = re.compile(r"[;&|\n(){}]+")
-_MERGE_RE = re.compile(r"\bgh\s+pr\s+merge\b|\bgh\s+api\b[^|&;]*?/merge\b")
+def _cmd_name(tok: str) -> str:
+    """Bare command name of a token — strips a leading path so a path-qualified invocation
+    (`/usr/bin/gh`, `./gh`, `bin/gh`) maps to its basename. Split on `/` (a shell path is
+    always `/`-separated, OS-independent); shlex already un-escapes a backslash-quoted name."""
+    return tok.rsplit("/", 1)[-1]
 
 
-def _strip_quotes(s: str) -> str:
-    return re.sub(r"'[^']*'|\"[^\"]*\"", "", s)
+def _seg_is_gh_merge(toks: list[str]) -> bool:
+    """`gh pr merge …` (contiguous tokens) or `gh api … <…/merge> …` within ONE shell
+    segment. Token-equality (basename-matched, so `/usr/bin/gh` still counts), NOT a regex
+    over the re-joined string — so a phrase merely naming the verb in a quoted string
+    (`echo "gh pr merge"`, one shlex token) can't match, while a real `gh pr "merge" 7`
+    (three tokens) and a backtick/path-qualified invocation still do. (A wrapper that hides
+    the verb in a quoted command argument — `bash -c "gh pr merge"` — is one inert token by
+    the same property that kills the false positive; a static scanner can't see into it, and
+    the old regex missed it too. The pre-push/CI change layer is the backstop for git push;
+    gh-merge basename-matching is the extra hardening for the one path it can't backstop.)"""
+    for i in range(len(toks) - 1):
+        if _cmd_name(toks[i]) != "gh":
+            continue
+        rest = toks[i + 1:]
+        if rest[:2] == ["pr", "merge"]:
+            return True
+        if rest[0] == "api" and any("/merge" in t for t in rest[1:]):
+            return True
+    return False
+
+
+_CONT_RE = re.compile(r"\\\r?\n")          # backslash-newline shell line-continuation
+_SEG_PUNCT = "();<>|&{}`"                      # operators that bound a command segment (incl. ` cmd-subst)
+_OP_TOKEN = re.compile(rf"^[{re.escape(_SEG_PUNCT)}]+$")
+
+
+def _shell_segments(cmd: str) -> list[list[str]]:
+    """Tokenize a shell command into operator-bounded segments with REAL quote handling:
+    shlex strips quote GLYPHS but keeps quoted CONTENT as one token, so `git "push"` →
+    ['git','push'] is caught (a shell runs the real verb) while `echo "git push"` stays
+    ['echo','git push'] — one token, no false hit. Backslash-newline continuations fold first.
+    On a lexer error (unbalanced quotes) it degrades to a glyph-strip split that errs toward
+    DETECTION — over-denying a malformed command is the safe direction for a deny gate."""
+    cmd = _CONT_RE.sub("", cmd or "")
+    try:
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars=_SEG_PUNCT)
+        lex.whitespace_split = True
+        lex.commenters = ""  # '#' never hides a verb from a deny-scanner
+        toks = list(lex)
+    except ValueError:
+        glyphs = cmd.replace('"', "").replace("'", "")
+        return [t for t in (seg.split() for seg in _SHELL_SEP.split(glyphs)) if t]
+    segs: list[list[str]] = []
+    cur: list[str] = []
+    for t in toks:
+        if _OP_TOKEN.match(t):
+            if cur:
+                segs.append(cur)
+                cur = []
+        else:
+            cur.append(t)
+    if cur:
+        segs.append(cur)
+    return segs
 
 
 def _git_ops(cmd: str) -> set[str]:
     """The set of git SUBCOMMANDS invoked across shell-separated segments, tolerating
     leading git global options + their values (`git -C dir -c k=v push` → {"push"}).
-    Quote-stripped first so a subcommand named inside a message isn't a false hit.
-    Tokenized (not a mega-regex) → ReDoS-immune."""
-    c = _strip_quotes(cmd or "")
+    shlex-tokenized so a verb named inside a quoted message stays one token (no false hit)
+    while a quoted verb (`git "push"`) is still caught. Tokenized → ReDoS-immune."""
     ops: set[str] = set()
-    for seg in _SHELL_SEP.split(c):
-        toks = seg.split()
+    for toks in _shell_segments(cmd):
         i = 0
         while i < len(toks):
             if toks[i] != "git":
@@ -1552,8 +1607,9 @@ def _git_ops(cmd: str) -> set[str]:
 def push_or_merge(cmd: str) -> str | None:
     """"merge" / "push" / None for a shell command. `gh pr merge` (or `gh api …/merge`)
     → merge; any `git push` (via the tokenized op scan) → push."""
-    if _MERGE_RE.search(_strip_quotes(cmd or "")):
-        return "merge"
+    for seg in _shell_segments(cmd):
+        if _seg_is_gh_merge(seg):
+            return "merge"
     return "push" if "push" in _git_ops(cmd) else None
 
 
@@ -1563,11 +1619,11 @@ _ENV_ASSIGN = re.compile(r"^\w+=")
 def _normalize_command_segments(cmd: str) -> list[list[str]]:
     """Shell-split, then per segment strip leading `sudo` + `VAR=val` assignments and,
     for a git invocation, drop global options (+ their values) so the gated verb sits at
-    the front. Quote-stripped first. Defeats the `git -C/path`, `cd d &&`, `env X=Y`,
-    `git -c k=v` evasions that prefix matching misses (#66176)."""
+    the front. shlex-tokenized (quote glyphs removed, quoted content kept whole), so a
+    quoted verb can't hide. Defeats the `git -C/path`, `cd d &&`, `env X=Y`, `git -c k=v`,
+    and `git "push"` evasions that prefix matching misses (#66176)."""
     segs: list[list[str]] = []
-    for seg in _SHELL_SEP.split(_strip_quotes(cmd or "")):
-        toks = seg.split()
+    for toks in _shell_segments(cmd):
         i = 0
         while i < len(toks) and (toks[i] == "sudo" or _ENV_ASSIGN.match(toks[i])):
             i += 1
