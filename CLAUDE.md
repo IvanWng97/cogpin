@@ -28,7 +28,7 @@ ratchet.py              THE engine — one single-file, stdlib-only module (zero
 tests/test_ratchet.py   the whole suite — stdlib `unittest`, no pytest dep.
 ratchet.toml            the dogfood policy that gates THIS repo.
 action.yml              the composite GitHub Action — the change-layer DISTRIBUTION
-                        surface (`uses: IvanWng97/ratchet@v1`); runs a rev-pinned engine
+                        surface (`uses: IvanWng97/ratchet@v0`); runs a rev-pinned engine
                         over the base-pinned config. self-gate.yml dogfoods it (`uses: ./`).
 examples/*/ratchet.toml  lift-and-adjust recipes (python · node-ts · pixtuoid · advisory).
 scripts/validate_plugin.py   plugin-packaging validator (manifests + frontmatter + action.yml).

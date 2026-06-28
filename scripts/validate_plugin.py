@@ -104,7 +104,7 @@ def main() -> int:
             if not cfm.get("description"):
                 errors.append(f"commands/{fn}: frontmatter missing `description`")
 
-    # the composite action is the change-layer distribution surface (`uses: owner/repo@v1`);
+    # the composite action is the change-layer distribution surface (`uses: owner/repo@v0`);
     # actionlint validates the YAML in CI — here we only assert it exists, is composite, and
     # runs the engine (stdlib has no YAML parser, so this is a deliberate text-level check).
     action_path = os.path.join(ROOT, "action.yml")

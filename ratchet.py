@@ -115,7 +115,7 @@ PRIMITIVES = {
     "protected_path",
     "require_approval_from",
     "pattern_requires_approval",
-    "approval_state_depth",
+    "approval_policy",
     "require_checks_green",
     "run",
     "attest",
@@ -159,24 +159,27 @@ class Check:
     primitive: str
     layer: str = "change"
     # primitive params (all optional; the primitive selects which it reads)
+    # forbid_pattern / forbid_removal / secret_scan / file_must_contain: the match + its scope
     pattern: str | None = None
     scope: list[str] = field(default_factory=list)  # named scope(s) or literal glob(s)
     exempt: str | None = None
     strip_comments: bool = False
+    # path_requires: a `when`-scoped change requires a `need`-scoped change too
     when: list[str] = field(default_factory=list)
     need: list[str] = field(default_factory=list)
     # require_checks_green: check names to EXCLUDE (denylist complement of `need`) — chiefly
     # ratchet's OWN job, which is still pending while it gates the same workflow run.
     ignore: list[str] = field(default_factory=list)
-    when_marker: str | None = None
-    marker: str | None = None
-    where: str | None = None
-    cmd: str | None = None
+    when_marker: str | None = None      # path_requires: a PR-body marker as the `when` trigger
+    marker: str | None = None           # marker_present: the block that must appear in the PR body
+    where: str | None = None            # (reserved — currently unused)
+    cmd: str | None = None              # run: the shell command (its exit code is the fact)
+    # cooccur: if `trigger` appears (diff/PR/commit), `require` must appear too
     trigger: str | None = None
     require: str | None = None
-    custom: list[str] = field(default_factory=list)
-    forbid_paths: list[str] = field(default_factory=list)
-    paths: list[str] = field(default_factory=list)
+    custom: list[str] = field(default_factory=list)        # secret_scan: extra secret-token regexes
+    forbid_paths: list[str] = field(default_factory=list)  # secret_scan: forbidden file-path globs
+    paths: list[str] = field(default_factory=list)         # protected_path / self_protect: gate-file globs
     require_approval: bool = True
     # forbid_delete: a paired added file under the same scope (a rename/replace) suppresses
     unless_paired_add: bool = False
@@ -207,7 +210,7 @@ class Check:
     # require_approval_from / *_approval: reviewer-identity facts from the PR API
     approvers: list[str] = field(default_factory=list)
     exclude_author: bool = False
-    # approval_state_depth: deeper approval-state requirements
+    # approval_policy: deeper approval-state requirements
     require_fresh: bool = False
     no_changes_requested: bool = False
     disallow_bot: bool = False
@@ -461,6 +464,13 @@ class CommandFacts:
         """PreToolUse delivers a JSON envelope; the Bash command is at
         `.tool_input.command`. Unknown shapes degrade to empty (no false block)."""
         _name, ti = _pretooluse_tool(stdin)
+        return CommandFacts.from_tool_input(ti)
+
+    @staticmethod
+    def from_tool_input(ti: dict) -> "CommandFacts":
+        """The command from a `tool_input` dict, coerced to '' unless it's a real string —
+        the single home for the 'degrade to empty command' rule (the hook and the
+        PreToolUse gate both go through here)."""
         cmd = ti.get("command", "")
         return CommandFacts(command=cmd if isinstance(cmd, str) else "")
 
@@ -558,6 +568,8 @@ def secret_scan(check: Check, facts: DiffFacts) -> str | None:
 
 
 def forbid_pattern(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
+    """An ADDED line in scope matching `pattern` blocks (minus `exempt` paths/lines) —
+    the denylist anchor the rest of the family is described against."""
     pat = _rx(check.pattern)
     if not pat:
         return None
@@ -728,6 +740,8 @@ def numeric_floor(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
     news = _num_hits(facts.added, scope, key_rx)
     for prefix, new_val in news.items():
         if check.floor is not None:
+            # `floor` doubles as a CEILING under direction="no_increase" (block when the value
+            # rises past it) — one field, two meanings selected by `direction`.
             if direction == "no_decrease" and new_val < check.floor:
                 return f"`{check.id}`: {prefix} {new_val:g} is below the floor {check.floor:g}"
             if direction == "no_increase" and new_val > check.floor:
@@ -865,34 +879,52 @@ def marker_present(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
     return f"`{check.id}`: required marker `{check.marker}` absent from PR body"
 
 
-def commit_footer(footer_rx: str | None, facts: DiffFacts) -> str | None:
+def commit_footer(check: Check, footer_rx: str | None, facts: DiffFacts) -> str | None:
+    # meta-driven: the footer regex is [meta].commit_footer, not a per-check field — hence the
+    # extra arg vs the rest of the family. `check` is here only for the id-prefixed reason.
     rx = _rx(footer_rx)
     if not rx:
         return None
     for msg in facts.commit_msgs:
         if not rx.search(msg):
-            return "a commit is missing the required footer"
+            return f"`{check.id}`: a commit is missing the required footer"
     return None
 
 
-def _qualifying_approvers(facts: DiffFacts) -> set[str]:
-    """APPROVED reviewers that may satisfy gate-file protection: non-author, non-bot,
-    and — when the review's commit and the head are both known — ON the current head.
-    A stale approval (left before a later malicious commit) or a bot rubber-stamp is
-    NOT qualifying; that is what stops the 'approve-benign-then-push-malicious' bypass."""
-    out: set[str] = set()
+def _approved_reviews(
+    facts: DiffFacts,
+    *,
+    exclude_author: bool = False,
+    exclude_bot: bool = False,
+    fresh_only: bool = False,
+) -> list[dict]:
+    """The APPROVED reviews, filtered by the policy flags a given gate requires — the shared
+    core of the PR-approval family, so each call states its policy explicitly instead of
+    re-deriving it three times. `fresh_only` is FAIL-CLOSED: once the head SHA is known, a
+    review counts only if its `commit_id` equals it — a stale approval (left before a later
+    commit) OR one with no recorded commit does NOT qualify. That is the freshness defence
+    behind gate-file protection (the 'approve-benign-then-push-malicious' bypass)."""
+    out: list[dict] = []
     for rv in facts.reviews or []:
         if (rv.get("state") or "").upper() != "APPROVED":
             continue
         login = rv.get("login") or ""
-        if facts.pr_author and login == facts.pr_author:
+        if exclude_author and facts.pr_author and login == facts.pr_author:
             continue
-        if rv.get("is_bot"):
+        if exclude_bot and rv.get("is_bot"):
             continue
-        if facts.head_sha and rv.get("commit_id") and rv.get("commit_id") != facts.head_sha:
+        if fresh_only and facts.head_sha and rv.get("commit_id") != facts.head_sha:
             continue
-        out.add(login)
+        out.append(rv)
     return out
+
+
+def _qualifying_approvers(facts: DiffFacts) -> set[str]:
+    """APPROVED reviewers that may satisfy gate-file protection: non-author, non-bot, and
+    fresh on the current head. A stale / bot / self approval does NOT qualify — that is what
+    stops the 'approve-benign-then-push-malicious' bypass."""
+    return {(rv.get("login") or "")
+            for rv in _approved_reviews(facts, exclude_author=True, exclude_bot=True, fresh_only=True)}
 
 
 def protected_path(check: Check, facts: DiffFacts) -> str | None:
@@ -923,15 +955,8 @@ def protected_path(check: Check, facts: DiffFacts) -> str | None:
 def _approver_logins(facts: DiffFacts, exclude_author: bool) -> set[str]:
     """The set of logins with a current APPROVED review (the PR author optionally
     excluded, so a self-approval never satisfies a reviewer-identity gate)."""
-    out: set[str] = set()
-    for rv in facts.reviews or []:
-        if (rv.get("state") or "").upper() != "APPROVED":
-            continue
-        login = rv.get("login") or ""
-        if exclude_author and facts.pr_author and login == facts.pr_author:
-            continue
-        out.add(login)
-    return out
+    return {(rv.get("login") or "")
+            for rv in _approved_reviews(facts, exclude_author=exclude_author)}
 
 
 def require_approval_from(check: Check, facts: DiffFacts) -> str | None:
@@ -975,33 +1000,23 @@ def pattern_requires_approval(check: Check, facts: DiffFacts, repo: RepoCfg) -> 
     return f"`{check.id}`: `{hit[1].strip()}` in {hit[0]} requires an independent approval"
 
 
-def approval_state_depth(check: Check, facts: DiffFacts) -> str | None:
+def approval_policy(check: Check, facts: DiffFacts) -> str | None:
     """Deeper approval-state requirements the bare 'approved' badge can't express:
-    `require_fresh` (the approval is on the current head_sha, not a stale earlier
-    commit), `disallow_author`/`disallow_bot`, `no_changes_requested` (no outstanding
-    CHANGES_REQUESTED), and a `min_approvals` floor. reviews=None → skip."""
+    `require_fresh` (the approval is on the current head_sha, not a stale earlier commit),
+    `disallow_author` / `disallow_bot`, `no_changes_requested` (no outstanding
+    CHANGES_REQUESTED), and a `min_approvals` floor. reviews=None → skip.
+    (Renamed from `approval_state_depth` in 0.x — the old name described nothing.)"""
     if facts.reviews is None:
         return None
-    valid: list[dict] = []
-    outstanding_cr = False
-    for rv in facts.reviews:
-        state = (rv.get("state") or "").upper()
-        login = rv.get("login") or ""
-        if state == "CHANGES_REQUESTED":
-            if check.no_changes_requested:
-                outstanding_cr = True
-            continue
-        if state != "APPROVED":
-            continue
-        if check.disallow_author and facts.pr_author and login == facts.pr_author:
-            continue
-        if check.disallow_bot and rv.get("is_bot"):
-            continue
-        if check.require_fresh and facts.head_sha and rv.get("commit_id") != facts.head_sha:
-            continue
-        valid.append(rv)
-    if check.no_changes_requested and outstanding_cr:
+    if check.no_changes_requested and any(
+            (rv.get("state") or "").upper() == "CHANGES_REQUESTED" for rv in facts.reviews):
         return f"`{check.id}`: an outstanding CHANGES_REQUESTED review must be resolved"
+    valid = _approved_reviews(
+        facts,
+        exclude_author=check.disallow_author,
+        exclude_bot=check.disallow_bot,
+        fresh_only=check.require_fresh,
+    )
     need = check.min_approvals if check.min_approvals is not None else 1
     if len(valid) < need:
         return (
@@ -1099,15 +1114,15 @@ def _eval_diff(c: Check, cfg: Config, facts: DiffFacts) -> str | None:
     if p == "marker_present":
         return marker_present(c, facts, cfg.repo)
     if p == "commit_footer":
-        return commit_footer(cfg.footer_regex, facts)
+        return commit_footer(c, cfg.footer_regex, facts)
     if p == "protected_path":
         return protected_path(c, facts)
     if p == "require_approval_from":
         return require_approval_from(c, facts)
     if p == "pattern_requires_approval":
         return pattern_requires_approval(c, facts, cfg.repo)
-    if p == "approval_state_depth":
-        return approval_state_depth(c, facts)
+    if p == "approval_policy":
+        return approval_policy(c, facts)
     if p == "require_checks_green":
         return require_checks_green(c, facts)
     if p == "run":
@@ -2119,7 +2134,7 @@ def cmd_gate() -> int:
             print(f"ratchet: blocked — {_reasons(spblocks)}", file=sys.stderr)
             return 2
         return 0
-    cmd = CommandFacts(command=tool_input.get("command", "") if isinstance(tool_input.get("command", ""), str) else "")
+    cmd = CommandFacts.from_tool_input(tool_input)
     # 1) hard deny: forbidden command shapes + commit/push on a protected branch —
     #    never bypassable (a forbidden command skips the hooks; branch-first is cheap).
     cmdblocks = run_command_gate(cfg, cmd)
@@ -2440,7 +2455,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: IvanWng97/ratchet@v1
+      - uses: IvanWng97/ratchet@v0
 """
 
 LEFTHOOK_SNIPPET = """\
@@ -2873,7 +2888,7 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--pr-body-file", help="file holding the PR body (enables PR-body checks; CI only)")
     c.add_argument("--approvals", help="comma-separated approver logins (enables protected_path; CI only)")
     c.add_argument("--reviews-file", help="JSON from `gh pr view --json reviews` (reviewer-identity checks; CI only)")
-    c.add_argument("--head-sha", help="PR head commit SHA (freshness for approval_state_depth; CI only)")
+    c.add_argument("--head-sha", help="PR head commit SHA (freshness for approval_policy; CI only)")
     c.add_argument("--pr-author", help="PR author login (excludes self-approval; CI only)")
     c.add_argument("--checks-file", help="JSON from `gh pr checks --json name,state` (require_checks_green; CI only)")
     c.add_argument("--allow-bypass", action="store_true", help="honour the agent-layer bypass (pre-push only)")

@@ -8,7 +8,9 @@ import Playground from '../../components/Playground.astro';
 This is **the actual `ratchet.py` that ships** — no demo reimplementation, no server. It
 runs in your browser (CPython compiled to WebAssembly), reading the diff you type as the
 same `DiffFacts` the engine reads from `git`. Edit the policy on the left and the change on
-the right, or hit a preset:
+the right, or hit a preset. The verdict splits into two layers: the **agent layer** (what
+Claude Code denies in real time as the agent works — bypassable) and the **change layer**
+(the un-bypassable pre-push + CI gate).
 
 <Playground />
 
@@ -19,7 +21,7 @@ because the engine reads **facts**, not raw text, you describe the change as fac
 
 | you type | the fact |
 |---|---|
-| `A path` / `M path` / `D path` | a file added / modified / **deleted** (name-status) |
+| `A path` / `M path` / `D path` | a file added / modified / **deleted** |
 | `+ <code>` | an **added** line in the current file |
 | `- <code>` | a **removed** line in the current file |
 | `$ <command>` | a command the agent is about to run (agent layer) |
@@ -42,9 +44,9 @@ CI would catch).
   and it’s allowed.
 - **`scope creep`** touches a path outside the allowlist → `scope_lock` blocks. The
   structural inverse of a denylist: it gates “any file *not* in the allow-set.”
-- **`lower coverage`** flips `fail_under` 85→75 → `numeric_floor` blocks. To a one-side
-  scanner that’s byte-identical to a *raise*; pairing the number across the −/+ hunks is the
-  whole point.
+- **`lower coverage`** flips `fail_under` 85→75 → `numeric_floor` blocks. If you only scan
+  the added lines that’s byte-identical to a *raise*; pairing the number across the removed
+  and added lines is the whole point.
 - **`edit the gate`** is a `write> ratchet.toml` — denied at the *agent* layer by
   `self_protect`, so the agent can’t loosen its own gate mid-session.
 - **`an un-blockable rule`** loads a policy that tries to hard-block on a `judge` (an

@@ -13,9 +13,10 @@ export const base = import.meta.env.BASE_URL;
 <div class="hero-wrap">
   <h1>ratchet</h1>
   <p class="lede">
-    The closing-discipline an AI agent keeps skipping — forgets the test, bypasses the
-    hook with <span class="hero-mono">--no-verify</span>, deletes the failing test, leaves
-    the docs stale — turned into <b>a gate it can’t talk its way around.</b>
+    AI coding agents say “done” when they’re not — they skip the test, bypass the hook with
+    <span class="hero-mono">--no-verify</span>, delete the failing test, leave the docs
+    stale. ratchet turns each of those corner-cuts into <b>a gate the agent can’t talk its
+    way around.</b>
   </p>
 </div>
 
@@ -27,11 +28,14 @@ export const base = import.meta.env.BASE_URL;
   <a class="btn" href="https://github.com/IvanWng97/ratchet">GitHub</a>
 </div>
 
+**The one rule that makes that possible:** only things the agent can’t fake — the diff it’s
+committing, the command it’s about to run, the branch, PR/commit metadata — are allowed to
+hard-block. Anything that needs *judgment* can only warn. Said precisely:
+
 <div class="the-rule">severity = "block" <span class="req">REQUIRES</span> kind = "fact"</div>
 
-A **fact** decides only over things the agent can’t fake — the diff it’s committing, the
-command it’s about to run, PR/commit metadata. Those may hard-block. Anything that needs
-*judgment* (an LLM-judge, a self-checkbox) stays **advisory** — it warns, never blocks.
+A **fact** is exactly that ungameable signal; an LLM-judge or a self-checkbox is *judgment*,
+so it stays **advisory** — it warns, never blocks.
 One stdlib-only `ratchet.py`, one per-repo `ratchet.toml`, installed as a Claude Code
 plugin. That’s the whole moat: an agent can’t pass a block it didn’t actually satisfy,
 because it never authored the evidence the block reads.

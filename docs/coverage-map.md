@@ -32,7 +32,7 @@ construction — see "the advisory frontier" below.
 | Lower a quality threshold (coverage `fail_under`, raise retries, shorten a timeout) | `numeric_floor` | mined — `gh search commits "lower coverage threshold"` → 20+ repos in ~6 weeks; 0e3fbdf (85→75), 05c51cd (→19%), 70ca77e (→5%) |
 | Commit a multi-MB binary / vendored bundle (zero diff lines) | `max_added_file_bytes` | mined — mirrors pre-commit's most-installed `check-added-large-files`; structurally invisible to every line-based primitive |
 | Disarm CI from inside the message (`[skip ci]`) | `forbid_in_message` | mined — a one-token message disarms the change layer's own host; `marker_present`/`commit_footer` had no forbid-presence inverse |
-| Approve-then-push games (stale approval, self-approval, bot rubber-stamp, ignored CHANGES_REQUESTED) | `approval_state_depth` | mined — the gameable shape behind a bare `protected_path` approval check |
+| Approve-then-push games (stale approval, self-approval, bot rubber-stamp, ignored CHANGES_REQUESTED) | `approval_policy` | mined — the gameable shape behind a bare `protected_path` approval check |
 | Delete the failing test to go green | `forbid_delete{unless_paired_add}` | first-principles; the canonical "green by doing less" cut |
 | Strip the assertion / the `await` / the guard line | `forbid_removal` | first-principles; the `−`-side twin a content scanner can't see |
 | Slip a new dependency past review | `pattern_requires_approval` | ranked-unbuilt → built; the supply-chain cut |
@@ -42,6 +42,10 @@ construction — see "the advisory frontier" below.
 | Merge a red / still-pending tree | `require_checks_green` | ranked-unbuilt → built |
 | Leave docs / the ledger / a deferral-issue stale | `path_requires` / `cooccur` / `marker_present` | first-principles; the pixtuoid `check_dod.py` lineage |
 | Drop a credential into the diff | `secret_scan` | first-principles (best-effort; pair with `gitleaks` via `run`) |
+
+> **Provenance key.** *first-principles* — derived by reasoning about how agents cut corners.
+> *mined* — surfaced in the empirical sweep of real AI-authored history (cited issues/commits).
+> *ranked-unbuilt → built* — flagged as a gap in that ranking, then implemented.
 
 ## The advisory frontier (deliberately *not* blocking)
 

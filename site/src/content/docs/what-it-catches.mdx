@@ -10,28 +10,45 @@ column is the signal each rule reads — and the agent writes none of it.
 
 <img src={`${base}assets/catches.svg`} alt="Each corner-cut and the fact that catches it" style="width:100%;max-width:840px;display:block;margin:1rem auto;" />
 
-## Where the rules came from
+<details>
+<summary>Text version of the diagram</summary>
 
-These aren’t a guess about how agents cut corners. The fact-kind primitives were derived
-two ways: a first-principles pass over the closing-discipline, then an **empirical mining**
-of real AI-authored PR/commit/review history — a 30-agent sweep over nine corpora that
-surfaced 95 findings, synthesized 19 candidate gaps, and adversarially verified six as
-real, ungameable facts. The full evidence (with issue/commit citations) is the
-**[coverage map →](/ratchet/concepts/#coverage-map)**.
+| the corner-cut | the fact that catches it |
+|---|---|
+| strip an assertion / guard line | `forbid_removal` |
+| delete the failing test file | `forbid_delete` |
+| commit straight to `main` | `forbid_commit_on_branch` |
+| `--no-verify` to skip the hook | `forbid_command` |
+| lower a coverage threshold | `numeric_floor` |
+| edit outside the task | `scope_lock` |
+| commit a secret / `.env` | `secret_scan` |
+| claim a review that didn’t happen | `protected_path` / `attest` |
 
-A few of the sharpest:
+</details>
+
+## A few of the sharpest
 
 - **`scope_lock`** — the positive A/M/D allowlist; the structural inverse of every denylist.
   *“Edit a subsystem outside the task.”* Scope creep is the single most-reported agent
   failure class, and no denylist can express “any file **not** in the allow-set.”
-- **`numeric_floor`** — the namesake ratchet. It pairs a numeric token across the −/+ hunks
-  on the same key, so *lowering* `fail_under` 85→75 (byte-identical to a raise to a one-side
-  scanner) blocks. Disarms the very quality gate the DoD exists to protect.
+- **`numeric_floor`** — the namesake ratchet. It pairs a number across the removed and added
+  lines on the same key, so *lowering* `fail_under` 85→75 (which looks byte-identical to a
+  *raise* if you only scan the added lines) blocks. Disarms the very quality gate the DoD
+  exists to protect.
 - **`self_protect`** — the live-write fact. A `Write`/`Edit` to a gate-defining file is
   denied at `PreToolUse`, so the agent can’t quietly loosen its own gate mid-session.
 - **`forbid_removal`** — the `-` twin of `forbid_pattern`: a **removed** guard line (an
   `assert`, an `await`, an auth check) blocks. *“Silently delete the safety net”* — the cut
-  a scanner of added lines can’t see.
+  a tool that only scans the added lines can’t see.
+
+## Where the rules came from
+
+These aren’t a guess about how agents cut corners. The fact-kind primitives were derived
+two ways: a first-principles pass over how agents cut corners, then an **empirical mining**
+of real AI-authored PR/commit/review history — a 30-agent sweep over nine corpora that
+surfaced 95 findings, synthesized 19 candidate gaps, and adversarially verified six as
+real, ungameable facts. The full evidence (with issue/commit citations) is the
+**[coverage map →](/ratchet/concepts/#coverage-map)**.
 
 ## The full primitive library
 
@@ -61,7 +78,7 @@ Every check reads only facts — never your code. The 23 below; full field refer
 | `protected_path` | fact | gate-defining files changed → need an independent approval |
 | `require_approval_from` | fact | a change under `paths` needs an owner’s APPROVED review (CI) |
 | `pattern_requires_approval` | fact | an added line matching `pattern` needs an approval (CI) |
-| `approval_state_depth` | fact | the approval is fresh, human, non-author, no changes-requested (CI) |
+| `approval_policy` | fact | the approval is fresh, human, non-author, no changes-requested (CI) |
 | `require_checks_green` | fact | every required status check concluded `success` (CI) |
 | `run` | fact\* | shell-out; the exit code is the fact (**`block` only at the change layer**) |
 | `attest` | advisory | a class-gated `Stop`-hook checklist box (forcing function) |

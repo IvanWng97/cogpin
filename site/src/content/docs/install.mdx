@@ -60,7 +60,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with: { fetch-depth: 0 }          # base-pinning needs history
-      - uses: IvanWng97/ratchet@v1         # rev-pinned engine over your base-pinned config
+      - uses: IvanWng97/ratchet@v0         # rev-pinned engine over your base-pinned config
 ```
 
 The action runs its **own rev-pinned engine** (not the repo's head-side copy) over your
