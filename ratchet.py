@@ -2899,8 +2899,11 @@ def _engine_skew(vendored_src: str, cfg_primitives: set[str], cfg_schema: int,
     """Compare a VENDORED engine source against the config it must serve + the running engine.
     PURE (cmd_doctor does the I/O and passes RAW config values, so detection works even when
     the running engine can't validate the config — the exact skew case). Returns (status,
-    label, fix) rows. A stale vendored engine silently fail-opens the agent layer (#16); these
-    rows make the skew visible and point at `ratchet update`."""
+    label, fix) rows. The VENDORED .ratchet/ratchet.py drives the CHANGE layer (the pre-push
+    hook / CI); too old for its config, that layer fails CLOSED — it rejects a config it can't
+    parse and over-blocks the push with a confusing "cannot load config" (#16). These rows name
+    the real cause and point at `ratchet update`. (The agent-layer fail-OPEN half of #16 — the
+    PLUGIN engine, not this vendored copy — is surfaced separately by cmd_stop's notice.)"""
     rows: list[tuple[str, str, str]] = []
     vend_prims, vend_schema = _extract_engine_meta(vendored_src)
     if not vend_prims:
@@ -2910,7 +2913,8 @@ def _engine_skew(vendored_src: str, cfg_primitives: set[str], cfg_schema: int,
         unknown = sorted(p for p in cfg_primitives if p and p not in vend_prims)
         if unknown:
             rows.append(("fail", f"vendored engine is STALE — config uses {', '.join(unknown)} that "
-                                 ".ratchet/ratchet.py doesn't know (agent layer fail-opens on this)",
+                                 ".ratchet/ratchet.py doesn't know; the change-layer gate (pre-push/CI) "
+                                 "will reject this config",
                          "run `ratchet update` to re-vendor the active engine"))
     if vend_schema is not None and cfg_schema and vend_schema != cfg_schema:
         rows.append(("fail", f"vendored engine schema v{vend_schema} ≠ config schema v{cfg_schema} "
@@ -3263,10 +3267,12 @@ def cmd_doctor(cwd: str = ".", as_json: bool = False) -> int:
         add("fail", "ratchet.toml missing", "run `ratchet install` / `/ratchet-init`")
         hard_fail = True
 
-    # engine/config SKEW (#16): the agent layer fail-OPENS when the vendored engine is too old
-    # for the config (unknown primitive) or its schema differs. Derive the config's primitives +
-    # schema from a RAW parse — independent of the running engine's validate(), which is exactly
-    # what breaks in the skew case — then compare against the VENDORED engine's static metadata.
+    # engine/config SKEW (#16): the vendored engine drives the CHANGE layer (pre-push/CI); too
+    # old for the config (unknown primitive / schema mismatch) it fails CLOSED — rejecting a
+    # config it can't parse and over-blocking with a confusing "cannot load config". Derive the
+    # config's primitives + schema from a RAW parse — independent of the running engine's
+    # validate(), which is exactly what breaks in the skew case — then compare against the
+    # VENDORED engine's static metadata.
     if engine_compiles and os.path.exists(cfg_path):
         try:
             raw = tomllib.loads(_slurp(cfg_path))

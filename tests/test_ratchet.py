@@ -2758,6 +2758,15 @@ class TestEngineSkew(unittest.TestCase):
         self.assertTrue(any(s == "warn" and "can't determine" in lbl for s, lbl, _ in rows))
         # never raises
 
+    def test_schema_vs_running_warns(self):
+        # config omits schema (cfg_schema=0), vendored schema differs from the active engine →
+        # the advisory drift warn branch (not the config-mismatch fail) fires
+        old = 'SCHEMA_VERSION = 1\nPRIMITIVE_SPECS: dict = {"run": 1}\n'
+        rows = R._engine_skew(old, {"run"}, 0, 2)   # vendored 1, running 2, config unset
+        self.assertTrue(any(s == "warn" and "differs from the active engine" in lbl
+                            for s, lbl, _ in rows))
+        self.assertFalse(any(s == "fail" for s, _, _ in rows))   # not a config mismatch
+
 
 class TestDoctorSkew(_GitRepo):
     _OLD_ENGINE = 'SCHEMA_VERSION = 1\nPRIMITIVE_SPECS = {"secret_scan": 1, "forbid_command": 1}\n'

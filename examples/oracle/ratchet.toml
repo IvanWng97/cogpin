@@ -283,7 +283,7 @@ kind = "fact"
 severity = "block"
 layer = "change"
 primitive = "forbid_pattern"
-pattern = '#\s*pragma:\s*no\s*cover|/\*\s*istanbul ignore|//\s*c8 ignore|#\[coverage\(off\)\]'
+pattern = '#\s*pragma:\s*no\s*cover|/\*\s*istanbul ignore|/\*\s*c8 ignore|#\[coverage\(off\)\]'
 scope = "code"
 
 # (5e) Block newly-added markers that defeat the LINT oracle (clippy / eslint). #[allow]
@@ -299,14 +299,17 @@ pattern = '#!?\[allow\(|eslint-disable|//\s*nolint'
 scope = "code"
 exempt = '#!\[allow\(clippy::module_name_repetitions\)\]'
 
-# (5f) Block newly-added markers that defeat the TEST oracle: a focused/skipped test
-# silently disables the rest of the suite (it.only) or removes teeth (test.skip / #[ignore]
-# / pytest.mark.skip), so the oracle exits zero over less. moat: added diff fact (environment).
+# (5f) Block newly-added markers that defeat the TEST oracle: a focused/skipped test silently
+# disables the rest of the suite (it.only) or removes teeth (test.skip / #[ignore] /
+# pytest.mark.skip[if]/xfail), so the oracle exits zero over less. moat: added diff fact
+# (environment). Each form is ANCHORED to its call shape (`it.skip(`, `fit(`, `pytest.mark.skip…`)
+# so it does NOT false-fire on legitimate code in the tests scope — e.g. Rust's `iter().skip(1)`
+# or the English word "fit" — which a bare `.skip(` / `\bfit\b` would wrongly block.
 [[check]]
 id = "forbid-test-suppression"
 kind = "fact"
 severity = "block"
 layer = "change"
 primitive = "forbid_pattern"
-pattern = '\b(?:describe|it|test)\.only\s*\(|\bfdescribe\b|\bfit\b|\.skip\s*\(|@(?:unittest\.skip|pytest\.mark\.(?:skip|xfail))\b|#\[ignore\]'
+pattern = '\b(?:describe|it|test)\.only\s*\(|\bfdescribe\s*\(|\bfit\s*\(|\b(?:describe|it|test)\.skip\s*\(|@(?:unittest\.skip\w*|pytest\.mark\.(?:skip\w*|xfail))|#\[ignore\]'
 scope = "tests"
