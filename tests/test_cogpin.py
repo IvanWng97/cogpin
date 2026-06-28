@@ -811,6 +811,13 @@ class TestMinedPrimitives(unittest.TestCase):
         self.assertIsNone(forbid_command(c, CommandFacts("git status")))                 # benign
         self.assertIsNone(forbid_command(c, CommandFacts("git format-patch")))           # different subcommand
         self.assertIsNone(forbid_command(c, CommandFacts('echo "git push later"')))      # quoted → not a real op
+        # M4: the deny path (via _normalize_command_segments → _shell_segments) is quote-aware
+        # too — quoting/splitting the verb still trips the deny, a phrase merely naming it does not.
+        self.assertIsNotNone(forbid_command(c, CommandFacts('git "push"')))              # quoted verb
+        self.assertIsNotNone(forbid_command(c, CommandFacts('git p"ush"')))              # split verb
+        self.assertIsNotNone(forbid_command(c, CommandFacts("git \\\npush")))            # continuation
+        self.assertIsNotNone(forbid_command(c, CommandFacts('git "reset" --hard HEAD~1')))  # multi-token deny
+        self.assertIsNone(forbid_command(c, CommandFacts('echo "please git push"')))     # quoted phrase ≠ deny
 
     def test_forbid_command_pattern_still_works_with_deny(self):
         # the legacy `pattern` (raw regex, matches anywhere) coexists with `deny`
