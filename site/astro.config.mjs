@@ -37,6 +37,7 @@ export default defineConfig({
             { label: 'Install', slug: 'install' },
             { label: 'Recipes', slug: 'recipes' },
             { label: 'Concepts', slug: 'concepts' },
+            { label: 'Where ratchet fits', slug: 'composition' },
           ],
         },
       ],

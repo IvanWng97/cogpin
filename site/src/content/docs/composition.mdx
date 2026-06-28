@@ -1,0 +1,45 @@
+---
+title: Where ratchet fits
+description: ratchet is the policy plane in a defense-in-depth stack — it owns the verdict and delegates the muscle. What it covers, and the four layers it deliberately does not.
+---
+
+ratchet is **one layer**, not the stack. It is the **policy plane**: it declares which
+un-fabricable facts must hold before a change merges, and renders a verdict. Every other
+layer — containment, correctness, review, deploy — is owned by something ratchet *calls
+into*, never re-implements.
+
+:::caution[A green gate is not "the work is good"]
+ratchet certifies that a discipline *happened*, never that it was done *well*. Reading a
+green gate as approval of substance is the safety-theater failure. Keep the layers below
+wired.
+:::
+
+## The stack
+
+| Layer | Owner | ratchet's role |
+|---|---|---|
+| **Policy plane** (Definition-of-Done) | **ratchet** | ratchet *is* this layer — the single source of "done" |
+| **Capability floor / sandbox** | OS · container · the agent harness | *declares* the posture and *emits* it (`[capability]`); **never contains** |
+| **Verification oracle** | CI (compilers, tests, coverage) | *delegates* via `run` / `require_checks_green`; doesn't re-run your suite |
+| **Review / approval** | humans · CODEOWNERS · branch protection | fact-gates that review *happened*; never that it was *good* |
+| **Admission / deploy** | Sigstore · SLSA · Kyverno | **not covered** — hands the green signal off |
+
+## What ratchet does NOT cover
+
+1. **Substance / quality** — a judgment, so advisory only (the moat forbids blocking on it). → **review**.
+2. **Code correctness** — whether it actually works is the **verification oracle**'s job; ratchet only reports its exit codes.
+3. **Runtime containment** — the in-band command/path deny is a *forcing-function* (bypassable, always logged), **not** a sandbox. → **capability floor** (OS/harness).
+4. **Post-merge / deploy / production** — signing, provenance, admission. → **admission**.
+5. **Anything off the fact-surface** — if it isn't a fact over the diff or the command, ratchet can't see it.
+
+## The ceiling
+
+The only thing ratchet will ever hard-block on is an un-fabricable, independently-observable
+fact (`provenance="environment"` — a CI result, a recorded approval, a branch, a real diff),
+never something the author merely asserts. That un-fabricable **observability** is the whole
+product — and it is worth zero unless a higher layer actually *consumes* it. ratchet raises
+the floor of what is observable before a merge; it does not raise the ceiling of what is good.
+
+The authoritative version of this map (with the full table and the delegation-over-primitive
+rule) lives in
+[`docs/composition.md`](https://github.com/IvanWng97/ratchet/blob/main/docs/composition.md).
