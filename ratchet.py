@@ -33,7 +33,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 
 SCHEMA_VERSION = 1
 
@@ -133,6 +133,12 @@ PRIMITIVES = {
     "attest",
     "judge",
 }
+
+# attest (a Stop-hook checklist box) and judge (an LLM-judge prompt) are advisory BY NATURE:
+# they decide over no diff/command FACT, so they can NEVER block — regardless of the author's
+# `kind` label. The moat checks the label; this set is the single source that also rejects a
+# `kind="fact"` LIE on them (a never-firing `block`) and derives the test-side fact set.
+_ADVISORY_ONLY = frozenset({"attest", "judge"})
 
 
 class ConfigError(Exception):
@@ -370,6 +376,14 @@ class Config:
                     f"check `{c.id}`: severity=block requires kind=fact (only "
                     f"diff/command/PR-metadata facts may block; advisory checks are "
                     f"gameable by the gated agent)"
+                )
+            # The moat trusts the `kind` LABEL, but attest/judge decide over no fact — a
+            # `kind="fact"` on them is a lie that ships a `block` which silently never fires
+            # (they aren't in the diff dispatch). Reject the mislabel at parse time.
+            if c.primitive in _ADVISORY_ONLY and c.kind != "advisory":
+                raise ConfigError(
+                    f"check `{c.id}`: {c.primitive} is advisory by nature — kind must be "
+                    f'"advisory" (it decides over no ungameable fact, so it can never block)'
                 )
             # A `run` block is authoritative only at the change layer (repo author
             # controls the script there); never let it block from the agent layer.
@@ -1811,17 +1825,12 @@ _DRAFT_BANNER = (
 _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 _MATCH_EVERYTHING = frozenset({"", ".*", ".+", ".*?", "(.*)", "^.*$", ".*$", "^.*"})
 _SAFE_CMD_CORPUS = ("git push origin feat", "git commit -m x", "git status", "npm test", "cargo test")
-# Every accepted [[check]] TOML key (the args _from_raw reads) — so draft-lint can reject a
-# hallucinated/typo'd key that _from_raw would otherwise silently `.get()`-drop.
-_KNOWN_CHECK_KEYS = frozenset({
-    "id", "kind", "severity", "primitive", "layer", "pattern", "scope", "exempt", "strip_comments",
-    "when", "need", "ignore", "when_marker", "marker", "cmd", "trigger", "require", "custom",
-    "forbid_paths", "paths", "require_approval", "unless_paired_add", "branch", "ops", "allow",
-    "tokens", "msg_scope", "deny", "key", "direction", "floor", "max_added", "max_removed",
-    "max_files", "max_file_added", "status", "maxkb", "allow_binary", "require_approval_from",
-    "exclude_author", "exclude_bot", "require_fresh", "no_changes_requested",
-    "min_approvals", "class", "box", "prompt",
-})
+# The two `Check` fields whose TOML key differs from the attribute name.
+_FIELD_ALIASES = {"approvers": "require_approval_from", "cls": "class"}
+# Every accepted [[check]] TOML key — DERIVED from the Check dataclass (+ the two aliases) so a
+# new field is auto-allowlisted and a removed one auto-drops: the parse/known-key/dataclass trio
+# can't drift (the dead-`where` class). draft-lint rejects any key not in here.
+_KNOWN_CHECK_KEYS = frozenset(_FIELD_ALIASES.get(f.name, f.name) for f in fields(Check))
 
 
 def _toml_str(s: str) -> str:
