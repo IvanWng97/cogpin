@@ -2832,3 +2832,174 @@ class TestUpdate(_GitRepo):
             self.assertEqual(rc, 1)
             self.assertIn("not a git repository", err)
             self.assertFalse(os.path.exists(os.path.join(nogit, ".ratchet", "ratchet.py")))
+
+
+# ── #17: report-only rollout switch + backtest-over-history ──
+_BLOCK_CFG = ('schema = 1\n[repo]\ndefault_branch = "main"\ncode = ["*.py"]\n[meta]\n'
+              'base_pinned = true\n[[check]]\nid = "no-secret"\nkind = "fact"\nseverity = "block"\n'
+              'layer = "change"\nprimitive = "forbid_pattern"\npattern = "SECRET"\nscope = "code"\n')
+
+
+class TestReportOnly(_GitRepo):
+    def _commit(self, msg, **files):
+        for rel, txt in files.items():
+            self._w(rel, txt)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", msg)
+
+    def _blocking(self):
+        # C0 carries the (base-pinned) config; C1 adds a SECRET in a code file → change-layer block
+        self._commit("base", **{"ratchet.toml": _BLOCK_CFG, "keep.txt": "x"})
+        self._commit("leak", **{"leak.py": "API_SECRET = 1\n"})
+
+    def test_report_only_returns_0_despite_block(self):
+        self._blocking()
+        rc, out = _quiet(R.cmd_check, self.d, report_only=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("[BLOCK]", out)
+        self.assertIn("report-only", out)
+        rc2, _ = _quiet(R.cmd_check, self.d)        # same repo, enforcing → fails
+        self.assertEqual(rc2, 1)
+
+    def test_report_only_clean_repo_returns_0(self):
+        self._commit("base", **{"ratchet.toml": _BLOCK_CFG, "keep.txt": "x"})
+        self._commit("clean", **{"ok.py": "value = 1\n"})
+        rc, out = _quiet(R.cmd_check, self.d, report_only=True)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("[BLOCK]", out)
+
+    def test_report_only_still_fails_on_base_unreachable(self):
+        # authoritative base (a --default-branch CI never fetched) MUST still fail closed,
+        # even under report-only — it's an infra error, not a policy finding
+        self._commit("c0", **{"ratchet.toml": _BLOCK_CFG, "a.txt": "1"})
+        self._commit("c1", **{"b.txt": "2"})
+        rc, _, err = _cap3(R.cmd_check, self.d, report_only=True, default_branch_arg="ghost-branch")
+        self.assertEqual(rc, 1)
+        self.assertIn("unreachable", err)
+
+    def test_report_only_still_fails_on_bad_config(self):
+        # an unloadable base-pinned config fails closed even under report-only
+        bad = ('schema = 1\n[repo]\ndefault_branch = "main"\ncode=["*.py"]\n[meta]\nbase_pinned=true\n'
+               '[[check]]\nid="x"\nkind="judge"\nseverity="block"\nprimitive="secret_scan"\n')  # block w/o fact
+        self._commit("c0", **{"ratchet.toml": bad, "a.txt": "1"})
+        self._commit("c1", **{"b.txt": "2"})   # HEAD~1 (the base) carries the bad config
+        rc, _, err = _cap3(R.cmd_check, self.d, report_only=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("cannot load", err)
+
+
+class TestBacktest(_GitRepo):
+    def _commit(self, msg, **files):
+        for rel, txt in files.items():
+            self._w(rel, txt)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", msg)
+
+    def test_flags_blocking_commit(self):
+        self._commit("c0", **{"ratchet.toml": _BLOCK_CFG})
+        self._commit("c1", **{"a.py": "ok = 1\n"})
+        self._commit("c2", **{"b.py": "X_SECRET = 2\n"})   # the offender
+        self._commit("c3", **{"c.py": "fine = 3\n"})
+        rc, out = _quiet(R.cmd_backtest, self.d, "HEAD~3..HEAD")
+        self.assertEqual(rc, 0)
+        self.assertIn("1/3 commit(s) would block", out)
+        self.assertIn("no-secret", out)
+        self.assertEqual(out.count("✗"), 1)
+
+    def test_clean_history(self):
+        self._commit("c0", **{"ratchet.toml": _BLOCK_CFG})
+        self._commit("c1", **{"a.py": "ok = 1\n"})
+        self._commit("c2", **{"b.py": "fine = 2\n"})
+        rc, out = _quiet(R.cmd_backtest, self.d, "HEAD~2..HEAD")
+        self.assertEqual(rc, 0)
+        self.assertIn("0/2 commit(s) would block", out)
+
+    def test_invalid_range_exits_2(self):
+        self._commit("c0", **{"ratchet.toml": _BLOCK_CFG})
+        rc, _, err = _cap3(R.cmd_backtest, self.d, "no-such-ref-xyz..HEAD")
+        self.assertEqual(rc, 2)
+        self.assertIn("invalid range", err)
+
+    def test_empty_range_exits_0(self):
+        self._commit("c0", **{"ratchet.toml": _BLOCK_CFG})
+        rc, out = _quiet(R.cmd_backtest, self.d, "HEAD..HEAD")
+        self.assertEqual(rc, 0)
+        self.assertIn("no commits in range", out)
+
+    def test_skips_root_no_crash(self):
+        # a range spanning the root commit (empty %P) must skip it, never traceback
+        self._commit("c0", **{"ratchet.toml": _BLOCK_CFG})
+        self._commit("c1", **{"a.py": "ok = 1\n"})
+        rc, out = _quiet(R.cmd_backtest, self.d, "HEAD")   # all history incl. root
+        self.assertEqual(rc, 0)
+        self.assertIn("would block", out)
+
+    def test_fail_on_block_exits_1(self):
+        self._commit("c0", **{"ratchet.toml": _BLOCK_CFG})
+        self._commit("c1", **{"b.py": "Y_SECRET = 1\n"})
+        rc, _ = _quiet(R.cmd_backtest, self.d, "HEAD~1..HEAD", fail_on_block=True)
+        self.assertEqual(rc, 1)
+
+    def test_uses_working_config_over_history(self):
+        # a commit predating the config is still judged by the CURRENT working config
+        self._commit("c0", **{"seed.txt": "1"})
+        self._commit("c1", **{"old.py": "Z_SECRET = 1\n"})   # added BEFORE the config existed
+        self._commit("c2", **{"ratchet.toml": _BLOCK_CFG})   # config arrives last
+        rc, out = _quiet(R.cmd_backtest, self.d, "HEAD~2..HEAD")
+        self.assertEqual(rc, 0)
+        self.assertIn("1/2 commit(s) would block", out)   # c1 flagged by today's policy
+
+    def test_max_added_file_bytes_covered(self):
+        # proves _populate_file_sizes runs per commit (else size gates silently skip)
+        cfg = ('schema = 1\n[repo]\ndefault_branch = "main"\ncode = ["*.dat"]\n[meta]\nbase_pinned = true\n'
+               '[[check]]\nid = "no-big"\nkind = "fact"\nseverity = "block"\nlayer = "change"\n'
+               'primitive = "max_added_file_bytes"\nmaxkb = 1\nscope = "code"\n')
+        self._commit("c0", **{"ratchet.toml": cfg})
+        self._commit("c1", **{"big.dat": "x" * 2048})   # 2KB > 1KB cap
+        rc, out = _quiet(R.cmd_backtest, self.d, "HEAD~1..HEAD")
+        self.assertEqual(rc, 0)
+        self.assertIn("1/1 commit(s) would block", out)
+        self.assertIn("no-big", out)
+
+    def test_run_check_skipped_and_noted(self):
+        # a `run` block is never executed by backtest (allow_run=False) and is named as blind
+        cfg = (_BLOCK_CFG + '[[check]]\nid = "suite"\nkind = "fact"\nseverity = "block"\n'
+               'layer = "change"\nprimitive = "run"\ncmd = "exit 1"\n')
+        self._commit("c0", **{"ratchet.toml": cfg})
+        self._commit("c1", **{"a.py": "ok = 1\n"})        # no SECRET; run would fail IF executed
+        rc, out = _quiet(R.cmd_backtest, self.d, "HEAD~1..HEAD")
+        self.assertEqual(rc, 0)
+        self.assertIn("0/1 commit(s) would block", out)   # run NOT executed → not blocked
+        self.assertIn("suite", out)                       # named in the blind note
+        self.assertIn("NOT evaluated", out)
+
+    def test_cli_invalid_range(self):
+        self._commit("c0", **{"ratchet.toml": _BLOCK_CFG})
+        out = subprocess.run([sys.executable, os.path.join(os.path.dirname(R.__file__), "ratchet.py"),
+                              "backtest", "--cwd", self.d, "--range", "bogus..HEAD"],
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 2)
+
+    def test_blind_names_pr_body_and_run_block_checks(self):
+        # a clean backtest must NOT overstate coverage: a `run` block and a pr_body-triggered
+        # path_requires(when_marker) are both un-evaluable → named; a plain diff-fact check isn't
+        toml = ('schema=1\n[repo]\ndefault_branch="main"\ncode=["*.py"]\ndocs=["docs/**"]\n[meta]\n'
+                'base_pinned=true\n'
+                '[[check]]\nid="secret"\nkind="fact"\nseverity="block"\nlayer="change"\n'
+                'primitive="forbid_pattern"\npattern="X"\nscope="code"\n'
+                '[[check]]\nid="suite"\nkind="fact"\nseverity="block"\nlayer="change"\n'
+                'primitive="run"\ncmd="true"\n'
+                '[[check]]\nid="migrate-docs"\nkind="fact"\nseverity="block"\n'
+                'primitive="path_requires"\nwhen_marker="MIGRATION"\nneed=["docs"]\n')
+        blind = R._backtest_blind(R.Config.parse(toml))
+        self.assertIn("suite", blind)            # run — needs a checkout
+        self.assertIn("migrate-docs", blind)     # pr_body trigger backtest can't supply
+        self.assertNotIn("secret", blind)        # plain diff-fact check IS evaluated
+
+    def test_missing_config_file_names_it(self):
+        # a typo'd --config must say "no such file", not the misleading "schema version 0"
+        self._commit("c0", **{"ratchet.toml": _BLOCK_CFG})
+        rc, _, err = _cap3(R.cmd_backtest, self.d, "HEAD", config=os.path.join(self.d, "nope.toml"))
+        self.assertEqual(rc, 2)
+        self.assertIn("no such config file", err)
+        self.assertNotIn("schema version", err)

@@ -2437,6 +2437,7 @@ def cmd_check(
     checks_file: str | None = None,
     allow_bypass: bool = False,
     default_branch_arg: str | None = None,
+    report_only: bool = False,
 ) -> int:
     """CHANGE layer: 1 = blocking findings, 0 = clean (warns print, never fail).
 
@@ -2505,10 +2506,110 @@ def cmd_check(
         print(f"  [{tag}] {f.id}: {f.reason}")
     if has_block(findings):
         n = sum(1 for f in findings if f.severity == "block")
+        # report-only is the global ROLLOUT switch (distinct from per-check severity="warn"):
+        # run the AUTHORITATIVE policy non-failing over real PRs, then flip it off to enforce.
+        # It suppresses ONLY blocking-FINDING failures — the fail-CLOSED infra errors above
+        # (BaseUnreachable, an unloadable base-pinned config) still return 1, so a shadow run
+        # can't go green while the gate never actually evaluated the diff.
+        if report_only:
+            print(f"ratchet: report-only — {n} blocking finding(s) WOULD fail "
+                  "(exit 0; remove --report-only / set report-only:false to enforce)")
+            return 0
         print(f"ratchet: definition-of-done NOT met ({n} blocking)", file=sys.stderr)
         return 1
     print(f"ratchet: ok ({len(findings)} advisory warning(s))")
     return 0
+
+
+# change-layer checks backtest can't evaluate without a checkout (`run`) or PR context
+# (approvals / reviews / status checks). Counted + named so a clean backtest is never
+# misread as "fully calibrated" when the real teeth weren't exercised.
+_BACKTEST_BLIND = frozenset({
+    "run", "protected_path", "require_approval_from", "pattern_requires_approval",
+    "approval_policy", "require_checks_green",
+})
+
+
+def _backtest_blind(cfg: Config) -> list[str]:
+    """Check ids backtest CANNOT evaluate (no checkout → no `run`; no PR context → no
+    approvals/reviews/checks). Beyond the run/approval primitives this also names the
+    pr_body-TRIGGERED block variants — a path_requires gated on a `when_marker`, and a message
+    check scoped ONLY to `pr_body` — because both read facts.pr_body, which backtest leaves
+    empty, so they'd silently never fire and a clean report would overstate coverage."""
+    out = []
+    for c in cfg.checks:
+        if c.primitive in _BACKTEST_BLIND:
+            out.append(c.id)
+        elif c.primitive == "path_requires" and c.when_marker:
+            out.append(c.id)
+        elif (c.primitive in ("require_message_pattern", "forbid_in_message")
+              and c.msg_scope and all(s == "pr_body" for s in c.msg_scope)):
+            out.append(c.id)
+    return sorted(out)
+
+
+def cmd_backtest(cwd: str = ".", rng: str = "", config: str | None = None,
+                 fail_on_block: bool = False) -> int:
+    """Replay the CURRENT change-layer policy over a range of merged history — the
+    "would this policy have false-blocked?" calibration (#17). A pure REPORT (exit 0) unless
+    --fail-on-block (1 if any commit would block); exit 2 = couldn't run (bad range / shallow
+    clone / unloadable config). Uses the WORKING-tree config (you're testing your CANDIDATE
+    policy against history, not auditing what the old gate did) and covers only DIFF-FACT
+    checks — `run` and PR-context checks are skipped (and named in the summary)."""
+    if config and not os.path.exists(config):
+        # _slurp swallows OSError → "" → a typo'd path would misreport as "schema version 0";
+        # name the real cause instead. Still fail-CLOSED (exit 2), never a false-clean.
+        print(f"ratchet: no such config file: {config}", file=sys.stderr)
+        return 2
+    try:
+        cfg = Config.parse(_slurp(config)) if config else _read_working_config(cwd)
+    except (OSError, ConfigError) as e:
+        print(f"ratchet: cannot load config: {e}", file=sys.stderr)
+        return 2
+    if (_git(cwd, ["rev-parse", "--is-shallow-repository"]) or "").strip() == "true":
+        print("ratchet: shallow clone — backtest can't diff commits against their parents; "
+              "fetch full history first (`git fetch --unshallow`)", file=sys.stderr)
+        return 2
+    # One enumeration call. %x1e field framing (a subject can contain a tab) + split('\n')
+    # records — NOT splitlines(), which over-breaks on \v\f\x85/U+2028/9 a subject may carry.
+    # --first-parent so each node is one merged PR (squash) or the full net merge diff
+    # (merge-commit), never a dive into second-parent ancestry.
+    raw = _git(cwd, ["log", "--reverse", "--first-parent", "--format=%H%x1e%h%x1e%P%x1e%s", rng])
+    if raw is None:   # git error (bad range) — distinct from "" (valid, zero commits)
+        print(f"ratchet: invalid range `{rng}` (git could not resolve it)", file=sys.stderr)
+        return 2
+    rows = [r for r in raw.split("\n") if r]
+    if not rows:
+        print(f"ratchet: no commits in range `{rng}`")
+        return 0
+    sizes_needed = any(c.primitive == "max_added_file_bytes" for c in cfg.checks)
+    blind = _backtest_blind(cfg)
+    would_block = evaluated = 0
+    for rec in rows:
+        parts = rec.split("\x1e")
+        if len(parts) < 4:
+            continue
+        full, short, parents, subject = parts[0], parts[1], parts[2].split(), parts[3]
+        if not parents:   # root commit has no parent → no diff to evaluate
+            continue
+        parent = parents[0]
+        evaluated += 1
+        facts = DiffFacts.from_range(cwd, parent, full)
+        if sizes_needed:
+            _populate_file_sizes(cwd, parent, full, facts)
+        blocks = sorted({f.id for f in run_change(cfg, facts, allow_run=False)
+                         if f.severity == "block"})
+        if blocks:
+            would_block += 1
+            print(f"  ✗ {short} {subject[:60]} → {', '.join(blocks)}")
+        else:
+            print(f"  ✓ {short} {subject[:60]}")
+    print(f"\nratchet backtest: {would_block}/{evaluated} commit(s) would block "
+          "(first-parent; per-commit ≈ per-PR on squash/merge-commit workflows)")
+    if blind:
+        print(f"  note: {len(blind)} check(s) NOT evaluated by backtest — they need a `run` or "
+              f"PR context (approvals/reviews/checks): {', '.join(blind)}")
+    return 1 if (fail_on_block and would_block) else 0
 
 
 def _config_advisories(cfg: Config) -> list[str]:
@@ -3382,6 +3483,12 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--checks-file", help="JSON from `gh pr checks --json name,state` (require_checks_green; CI only)")
     c.add_argument("--default-branch", help="trusted base branch name (CI passes the repo's real default; overrides ratchet.toml so the base can't be redirected from the PR head)")
     c.add_argument("--allow-bypass", action="store_true", help="honour the agent-layer bypass (pre-push only)")
+    c.add_argument("--report-only", action="store_true", help="print findings + a summary but always exit 0 (global rollout switch; infra/config errors still fail)")
+    bt = sub.add_parser("backtest", help="replay the policy over merged history: which past commits would block? (calibration)")
+    bt.add_argument("--cwd", default=".")
+    bt.add_argument("--range", required=True, dest="rng", metavar="REV-RANGE", help="git rev-range, e.g. main~50..main")
+    bt.add_argument("--config", default=None, help="config to backtest (default: the working ratchet.toml; e.g. ratchet.toml.draft)")
+    bt.add_argument("--fail-on-block", action="store_true", help="exit 1 if any commit would block (default: pure report, exit 0)")
     j = sub.add_parser("judge", help="emit the advisory LLM-judge prompt(s) to stdout (CI)")
     j.add_argument("--cwd", default=".")
     v = sub.add_parser("validate", help="parse + validate ratchet.toml (the block-requires-fact invariant)")
@@ -3437,7 +3544,10 @@ def main(argv: list[str] | None = None) -> int:
             checks_file=args.checks_file,
             allow_bypass=args.allow_bypass,
             default_branch_arg=args.default_branch,
+            report_only=args.report_only,
         )
+    if args.cmd == "backtest":
+        return cmd_backtest(args.cwd, args.rng, config=args.config, fail_on_block=args.fail_on_block)
     if args.cmd == "judge":
         return cmd_judge(args.cwd)
     if args.cmd == "validate":
