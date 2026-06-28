@@ -9,6 +9,13 @@ breaking config change.
 ## [Unreleased]
 
 ### Fixed
+- **`validate` now rejects a check that is missing a load-bearing param** ([#45](https://github.com/IvanWng97/cogpin/issues/45))
+  — the third-party adopter audit's silent-no-op class. A `forbid_pattern` with no `pattern`, a
+  `numeric_floor` with no `key`, a `require_approval_from` with no approver list, etc. used to load
+  clean and then never fire — a toothless gate the adopter believes holds. `validate` now raises
+  `ConfigError` (naming the field) for every primitive whose evaluator early-returns without its
+  required param. Primitives with a documented empty/default mode are exempt. `SCHEMA.md` lists the
+  per-primitive requirement. (`change_budget` cap of `0` counts as supplied — a real strict ceiling.)
 - **Quoting or splitting a gated git verb no longer evades the agent-layer deny** — the M4
   finding. The git-op tokenizer stripped whole quoted *spans* before scanning, so `git "push"`,
   `git p"ush"`, `git 'commit'`, and a backslash-newline continuation lost their verb token and
