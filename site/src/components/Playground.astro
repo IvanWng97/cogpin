@@ -428,16 +428,21 @@ prompt = "is the code good?"
     for (const ta of [toml, scen]) {
       ta.addEventListener('input', () => paint(ta));
     }
-    // Re-fit after a width change (rewrap changes height) and after fonts settle.
-    // Coalesce into one rAF so a resize/rotation storm doesn't thrash layout (each
-    // fit() forces a write→read→write; rotation fires resize continuously).
+    // Re-fit only on an actual WIDTH change (rewrap changes height) and after fonts
+    // settle. Guarding on width is what breaks the feedback edge: fit() writes height,
+    // which on mobile fires `resize` (URL-bar show/hide, vertical pinch); without this
+    // guard each such resize would refit → write height → resize → … an oscillation.
+    // Coalesce into one rAF so a width-resize storm (rotation) doesn't thrash layout.
     let raf = 0;
+    let lastW = window.innerWidth;
     const refit = () => {
+      if (window.innerWidth === lastW) return; // height-only resize → no rewrap → no refit
+      lastW = window.innerWidth;
       if (raf) return;
       raf = requestAnimationFrame(() => { raf = 0; fit(toml); fit(scen); });
     };
     window.addEventListener('resize', refit);
-    window.addEventListener('load', refit);
+    window.addEventListener('load', () => { lastW = window.innerWidth; fit(toml); fit(scen); });
     const setVal = (ta: HTMLTextAreaElement, v: string) => { ta.value = v; paint(ta); };
 
     setVal(toml, PRESETS.strip.toml);
