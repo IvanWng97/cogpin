@@ -19,10 +19,6 @@ permissions:
   id-token: write
   actions: read
 
-concurrency:
-  group: claude-review-${{ github.event.issue.number || github.event.pull_request.number }}
-  cancel-in-progress: true
-
 jobs:
   review:
     # Two trust-gated entry points, both restricted to this repo's own trusted actors so the
@@ -43,6 +39,13 @@ jobs:
        contains(github.event.comment.body, '/claude-review') &&
        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
     runs-on: ubuntu-latest
+    # Concurrency is JOB-level on purpose (not workflow-level): a job the `if` above skips never
+    # enters the group, so a non-/claude-review bot comment (issue_comment — e.g. a GitGuardian PR
+    # comment) can't cancel an in-flight pull_request review and leave a spurious red "cancelled"
+    # check. Among runs that DO start, a newer one still supersedes the older.
+    concurrency:
+      group: claude-review-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: true
     timeout-minutes: 15
     env:
       HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}

@@ -1,0 +1,44 @@
+name: Bug report
+description: A gate fired wrong, the engine errored, or install/doctor misbehaved.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A **false fire** (a `block` that shouldn't have) or a **false pass** (a gate that let
+        something through) is the most useful report — cogpin's whole value is the gate being
+        right. If it's a way to *bypass* a guarantee, treat it as security (see SECURITY.md), not
+        a public issue.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The check `id`, the command you ran, and the finding — or the finding that was missing.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal repro
+      description: The relevant `cogpin.toml` `[[check]]`, the diff/command, and ideally the `cogpin check` output. The smaller the better.
+      render: shell
+  - type: input
+    id: version
+    attributes:
+      label: cogpin version / ref
+      description: The Action ref (`@v0` or a pinned SHA), the plugin version (`.claude-plugin/plugin.json`), or the commit you vendored `.cogpin/cogpin.py` from.
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Python & OS
+      description: e.g. Python 3.12 · macOS 15 — or "GitHub Action · ubuntu-latest".
+    validations:
+      required: true

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 Report a gate bypass / security issue
+    url: https://github.com/IvanWng97/cogpin/security/advisories/new
+    about: A way to DEFEAT a `block` check's guarantee is a security issue — report it privately here, not as a public issue (see SECURITY.md).
+  - name: 📖 Docs, tutorial & playground
+    url: https://ivanwng97.github.io/cogpin/
+    about: The guide, the config schema, and the in-browser playground running the real engine.

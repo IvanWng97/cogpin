@@ -1,0 +1,14 @@
+# zizmor (https://docs.zizmor.sh) config. cogpin is a security gate, so it lints its OWN CI for
+# the workflow-security class it exists to catch — script injection, dangerous triggers, broad
+# permissions (the #14 fix was exactly one of these). lint.yml gates on medium+ confidence.
+#
+# One deliberate policy choice:
+#   unpinned-uses → require a REF (tag) pin, not a full commit hash. We pin actions to tags and
+#   let Dependabot (.github/dependabot.yml) bump them — the maintainable middle ground for a solo
+#   repo. Hash-pinning is stricter but noisier to maintain by hand; tags + automated bumps keep
+#   the supply chain current without a wall of 40-char SHAs.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        "*": ref-pin

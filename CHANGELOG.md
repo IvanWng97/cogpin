@@ -9,6 +9,31 @@ reproducibility. The config `schema` version is separate and bumps only on a bre
 
 ## [Unreleased]
 
+### Added
+- **Repo maturity / community-health.** `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1),
+  `.editorconfig`, `.gitattributes` (LF normalization so the Windows CI runner can't introduce
+  CRLF), `.github/CODEOWNERS` (the owner-map cogpin's own `approval_policy` reads), a PR template
+  (prompts the `two-lens-review` marker + the gate checklist), and issue forms (bug · feature /
+  primitive request · a security contact-link routing bypass reports to the advisories form).
+- **`.github/dependabot.yml`** — keeps the pinned GitHub Actions (and the site's npm toolchain)
+  current. The engine stays zero-dependency, so there is no pip surface to watch.
+- **`release.yml`** — a `vX.Y.Z` tag push re-runs the full DoD gate, cuts the GitHub Release from
+  that version's CHANGELOG section, and moves the floating major tag the Action ships under (`@v0`).
+
+### Security
+- **CodeQL** (`codeql.yml`) + **zizmor** (workflow-security static analysis, wired into `lint.yml`).
+  zizmor lints cogpin's own CI for the script-injection / broad-permission / dangerous-trigger class
+  it exists to catch — the same class as the #14 fix. The Pages deploy now scopes its `pages: write`
+  / `id-token: write` to the deploy job (least privilege); actions are tag-pinned and Dependabot-bumped
+  (policy in `.github/zizmor.yml`).
+
+### Fixed
+- **`claude-review.yml` no longer self-cancels.** Its `concurrency` block was at the workflow level,
+  so any PR comment (a GitGuardian-style bot fires `issue_comment`) entered the same group and
+  `cancel-in-progress` killed the in-flight `pull_request` review — a spurious red "cancelled" check
+  on every commented PR. Moved concurrency to the **job** level (matching the pixtuoid reference): a
+  job the `if` gate skips never enters the group, so a non-`/claude-review` comment can't cancel it.
+
 ### Changed
 - **Renamed the project `ratchet` → `cogpin`.** Engine (`ratchet.py` → `cogpin.py`), config
   (`ratchet.toml` → `cogpin.toml`), vendored dir (`.ratchet/` → `.cogpin/`), the CLI (`cogpin …`),

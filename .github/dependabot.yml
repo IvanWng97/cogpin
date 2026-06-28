@@ -1,0 +1,29 @@
+# cogpin's engine has ZERO runtime dependencies (stdlib-only, by design — see CLAUDE.md), so
+# there is no pip/requirements surface to watch. The dependencies that DO exist are the pinned
+# GitHub Actions in the workflows + the composite action.yml, and the site's docs toolchain.
+# Dependabot keeps those pins fresh (and the action pins current is a real supply-chain signal).
+version: 2
+updates:
+  # The `uses:` pins in .github/workflows/** and the root composite action.yml.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+
+  # The Astro/Starlight tutorial site — a separate toolchain, not the product. Monthly,
+  # grouped, capped: keep it current without drowning a solo maintainer in PRs.
+  - package-ecosystem: npm
+    directory: /site
+    schedule:
+      interval: monthly
+    groups:
+      site:
+        patterns: ["*"]
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: chore(site)

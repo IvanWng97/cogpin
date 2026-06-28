@@ -1,0 +1,32 @@
+name: codeql
+
+# Static analysis (SAST) over the engine. cogpin is one stdlib-only file, so the scan is fast
+# and low-noise — it populates the Security tab and is the SAST signal a mature repo carries.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "27 4 * * 1"   # Mondays 04:27 UTC — surface newly-published queries on a quiet repo.
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: analyze (python)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write   # upload SARIF to code scanning
+    steps:
+      - uses: actions/checkout@v7
+      - name: initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          queries: security-and-quality
+      - name: analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"

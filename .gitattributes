@@ -1,0 +1,20 @@
+# Normalize line endings to LF on commit/checkout. The repo is LF everywhere; ci.yml runs a
+# Windows runner and a Windows contributor must not introduce CRLF that would break a path or
+# diff assertion (or the pre-push hook the engine writes).
+* text=auto eol=lf
+
+# Python gets the python diff driver (smarter @@ hunk headers).
+*.py text diff=python
+
+# Shell + hooks stay LF even on a Windows checkout — they run under bash.
+*.sh    text eol=lf
+*.mjs   text eol=lf
+
+# Binary assets — never normalize, never diff as text.
+*.png   binary
+*.ico   binary
+*.icns  binary
+*.woff2 binary
+
+# Generated/vendored — collapse in PR diffs and exclude from language stats.
+site/package-lock.json linguist-generated=true
