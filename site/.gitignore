@@ -3,6 +3,6 @@ dist/
 .astro/
 
 # vendored into public/ by sync-engine at predev/prebuild — regenerated, not source
-public/ratchet.py
+public/cogpin.py
 public/glue.py
 public/assets/

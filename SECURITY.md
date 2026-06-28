@@ -1,6 +1,6 @@
 # Security model
 
-ratchet is itself a security control — a gate meant to resist a capable adversary (an
+cogpin is itself a security control — a gate meant to resist a capable adversary (an
 AI agent, or a human, trying to close a task by cutting a corner). So its threat model
 *is* the product. This page states what it guarantees, what it doesn't, and how to
 report a bypass.
@@ -24,10 +24,10 @@ guarantee can't silently erode by editing the config to "block on vibes".
 
 Two properties make it bypass-resistant against the diff it gates:
 
-- **Base-pinning.** The change layer reads `ratchet.toml` and the gate-defining files
+- **Base-pinning.** The change layer reads `cogpin.toml` and the gate-defining files
   from the pinned **base** ref, not the PR head. You cannot loosen the gate inside the
   same diff the gate is judging.
-- **Protected paths.** Changing a gate-defining file (`ratchet.toml`, the engine, the
+- **Protected paths.** Changing a gate-defining file (`cogpin.toml`, the engine, the
   hooks, the CI) requires an independent approval (`protected_path`), and an in-session
   edit to one is denied at `PreToolUse` (`self_protect`).
 
@@ -40,7 +40,7 @@ Two properties make it bypass-resistant against the diff it gates:
   (assertion-loosening, fake-impl, guard-removal) are *advisory* on purpose — no fact
   can prove them, so they surface to a human/LLM reviewer rather than block.
 - **Not protection against a trusted admin.** Someone with repo-admin rights can change
-  the base policy *through review*. ratchet draws the line at what an agent can do
+  the base policy *through review*. cogpin draws the line at what an agent can do
   **mid-task without review**, not at what an authorized human can do deliberately.
 
 ## Agent-layer bypass is by design (and logged)
@@ -56,9 +56,9 @@ If you find a way to make a `fact` **block** pass while the underlying corner-cu
 present — i.e. a true bypass of the guarantee, not a value-gameable case already
 documented above — please report it privately first:
 
-- Open a **GitHub security advisory** on `IvanWng97/ratchet` (Security → Report a
+- Open a **GitHub security advisory** on `IvanWng97/cogpin` (Security → Report a
   vulnerability), or email the address on the maintainer's GitHub profile.
-- Include a minimal `ratchet.toml` + the diff/command that should have blocked but
+- Include a minimal `cogpin.toml` + the diff/command that should have blocked but
   didn't.
 
 Please don't open a public issue for a guarantee-bypass until it's fixed. Value-gameable

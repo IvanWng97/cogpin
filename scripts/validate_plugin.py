@@ -84,11 +84,11 @@ def main() -> int:
             errors.append("hooks.json: missing `hooks` object")
         else:
             blob = json.dumps(h)
-            if "ratchet.py" not in blob:
-                errors.append("hooks.json: no hook invokes ratchet.py")
+            if "cogpin.py" not in blob:
+                errors.append("hooks.json: no hook invokes cogpin.py")
 
     # the skill + commands carry name/description frontmatter the loader needs
-    fm, e = _frontmatter("skills/ratchet/SKILL.md")
+    fm, e = _frontmatter("skills/cogpin/SKILL.md")
     errors += e
     for key in ("name", "description"):
         if not fm.get(key):
@@ -115,8 +115,8 @@ def main() -> int:
             blob = fh.read()
         if "using: composite" not in blob:
             errors.append("action.yml: not a composite action (`using: composite`)")
-        if "ratchet.py" not in blob:
-            errors.append("action.yml: never invokes ratchet.py")
+        if "cogpin.py" not in blob:
+            errors.append("action.yml: never invokes cogpin.py")
 
     if errors:
         print("plugin validation FAILED:")

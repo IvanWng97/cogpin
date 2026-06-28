@@ -1,7 +1,7 @@
-# `ratchet.toml` — schema reference
+# `cogpin.toml` — schema reference
 
 The complete config surface. One TOML file per repo, read by the engine
-([`ratchet.py`](ratchet.py)) — never your code. `python3 ratchet.py validate`
+([`cogpin.py`](cogpin.py)) — never your code. `python3 cogpin.py validate`
 enforces everything below at parse time.
 
 ## The one rule
@@ -58,22 +58,22 @@ to expand to these globs, or give a literal glob directly.
 
 | key | type | default | meaning |
 |---|---|---|---|
-| `base_pinned` | bool | `true` | read `ratchet.toml` + gate-defining files from the pinned **base** ref, not the PR head (bypass-proof). Turning this off is itself a gate-defining change |
-| `bypass_env` | string | — | the agent-layer escape-hatch env var (e.g. `RATCHET_BYPASS`). A non-empty value (or a `<ENV-with-dashes>: <reason>` line in the attestation) skips the **agent** layer — always logged. The **change** layer ignores it |
+| `base_pinned` | bool | `true` | read `cogpin.toml` + gate-defining files from the pinned **base** ref, not the PR head (bypass-proof). Turning this off is itself a gate-defining change |
+| `bypass_env` | string | — | the agent-layer escape-hatch env var (e.g. `COGPIN_BYPASS`). A non-empty value (or a `<ENV-with-dashes>: <reason>` line in the attestation) skips the **agent** layer — always logged. The **change** layer ignores it |
 | `commit_footer` | string (regex) | — | the footer every commit must carry (read by the `commit_footer` primitive) |
-| `attestation_file` | string | `.ratchet/attestation.md` | the Stop-hook checklist file the `attest` boxes look in |
+| `attestation_file` | string | `.cogpin/attestation.md` | the Stop-hook checklist file the `attest` boxes look in |
 | `feature_files` | int | `3` | a change is "feature-shaped" at ≥ this many changed files (or a new code module) — gates the `feature` attestation class |
 
 ---
 
 ## `[capability]` (optional)
 
-A **declared** capability floor — *policy, not enforcement*. ratchet records and compares
+A **declared** capability floor — *policy, not enforcement*. cogpin records and compares
 this stanza and can **compile** it to a harness's native enforcement
-(`ratchet capability emit`), but it **never** reads it during gate/check evaluation and
-**never** confines a syscall itself. The OS / harness is the boundary; ratchet only declares
+(`cogpin capability emit`), but it **never** reads it during gate/check evaluation and
+**never** confines a syscall itself. The OS / harness is the boundary; cogpin only declares
 the posture (see [`docs/composition.md`](docs/composition.md) and the
-[#24 re-brand](README.md)). Because it lives in `ratchet.toml`, it is `self_protect`'d and
+[#24 re-brand](README.md)). Because it lives in `cogpin.toml`, it is `self_protect`'d and
 read from the pinned base ref for free.
 
 | key | type | default | meaning |
@@ -85,12 +85,12 @@ read from the pinned base ref for free.
 | `deny_commands` | list(verb) | `[]` | command-verb denylist (a declaration to *compile out*, not a hook match) |
 | `backend` | string | `claude-code` | the `emit` target (`claude-code` \| `bubblewrap` \| `docker` \| `seccomp`); only `claude-code` is rendered today |
 
-`ratchet capability emit` (claude-code) translates the floor into `.claude/settings.json`
+`cogpin capability emit` (claude-code) translates the floor into `.claude/settings.json`
 `permissions` (`deny_paths` → `Read/Edit/Write(<p>)`; `deny_commands` → `Bash(<verb>:*)`;
 `no_network` → deny `WebFetch`/`WebSearch`/`curl`/`wget`/`nc` **+ a warning that settings.json
 cannot *guarantee* no egress**). It is idempotent and **non-clobbering** — it manages only
-the entries it itself emitted (recorded in `.ratchet/capability-emitted.json`), never your
-own. A non-`claude-code` backend is *documented, not emitted* (ratchet declares; you wire the
+the entries it itself emitted (recorded in `.cogpin/capability-emitted.json`), never your
+own. A non-`claude-code` backend is *documented, not emitted* (cogpin declares; you wire the
 sandbox). **`emit` generates; it never contains.** `--dry-run` prints the merged settings
 without writing.
 
@@ -125,7 +125,7 @@ That blocks any diff that *deletes* a `def test_…` line under `tests/`. Two of
 subtler primitives, inline:
 
 ```toml
-# coverage can't ratchet down — blocks if `fail_under = N` drops across the diff
+# coverage can only hold or rise — blocks if `fail_under = N` drops across the diff
 [[check]]
 id = "coverage-floor"
 kind = "fact"
@@ -211,14 +211,14 @@ The agent's command string.
 | `approval_policy` | `require_fresh`, `no_changes_requested`, `exclude_author`, `exclude_bot`, `min_approvals` | the count of **distinct** qualifying approvers is below `min_approvals`, or an outstanding `CHANGES_REQUESTED` remains |
 | `require_checks_green` | `need` (allowlist of check names; empty = all), `ignore` (denylist) | a required status check did not conclude `success` — a `need`-listed check that never reported counts as **missing** and blocks (no vacuous pass) |
 
-> **Same-workflow race:** when ratchet runs as a job in the *same* workflow it gates, its
+> **Same-workflow race:** when cogpin runs as a job in the *same* workflow it gates, its
 > own check is still pending at query time and a bare `require_checks_green` (no `need`/`ignore`)
-> would self-block. Exclude it with `ignore = ["<ratchet job name>"]`, or `need` only the other
-> checks. `ratchet validate` prints a `note:` when neither is set. Both lists match the **rendered**
-> check name exactly — a matrix job carries its suffix (e.g. `ratchet (ubuntu-latest)`), so use the
+> would self-block. Exclude it with `ignore = ["<cogpin job name>"]`, or `need` only the other
+> checks. `cogpin validate` prints a `note:` when neither is set. Both lists match the **rendered**
+> check name exactly — a matrix job carries its suffix (e.g. `cogpin (ubuntu-latest)`), so use the
 > name as it appears in `gh pr checks`.
 
-These read CI-supplied facts via `ratchet check` flags: `--pr-body-file`,
+These read CI-supplied facts via `cogpin check` flags: `--pr-body-file`,
 `--approvals`, `--reviews-file` (a `gh pr view --json reviews` dump), `--head-sha`,
 `--pr-author`, `--checks-file` (a `gh pr checks --json name,state` dump). Omitted →
 the check skips rather than false-fires.
@@ -229,7 +229,7 @@ the check skips rather than false-fires.
 |---|---|---|---|
 | `run` | fact\* | `cmd` | shells out; the exit code is the fact. `block` only at the change layer |
 | `attest` | advisory | `box`, `class`, `prompt` | a class-gated Stop-hook checklist box; blocks turn-end until ticked (forcing function only) |
-| `judge` | advisory | `prompt` | emitted by `ratchet judge` for a CI `continue-on-error` LLM substance check |
+| `judge` | advisory | `prompt` | emitted by `cogpin judge` for a CI `continue-on-error` LLM substance check |
 
 `attest` classes: `always` (any code change) · `feature` (≥ `feature_files` or a new
 module) · `public_surface` · `claude_md`. `box` defaults to the check `id`.
@@ -240,17 +240,17 @@ module) · `public_surface` · `claude_md`. `box` defaults to the check `id`.
 
 ```
 # enforce
-ratchet gate                    # agent layer: PreToolUse hook (reads the tool envelope on stdin)
-ratchet stop --cwd .            # agent layer: Stop hook (blocks turn-end on unmet DoD)
-ratchet check --cwd .           # change layer: gate the committed range (authoritative)
+cogpin gate                    # agent layer: PreToolUse hook (reads the tool envelope on stdin)
+cogpin stop --cwd .            # agent layer: Stop hook (blocks turn-end on unmet DoD)
+cogpin check --cwd .           # change layer: gate the committed range (authoritative)
     [--no-run] [--allow-bypass] [--report-only]
     [--pr-body-file F] [--approvals a,b] [--reviews-file F]
     [--head-sha S] [--pr-author L] [--checks-file F]
     # --report-only: print findings + a summary but exit 0 (global, temporary rollout switch;
     #   distinct from per-check severity="warn"). Infra/config errors (unreachable base,
     #   unloadable config) STILL fail closed. The action exposes it as `report-only:`.
-ratchet check --cwd . --diff-file F  # config-as-code: evaluate a crafted unified-diff FIXTURE
-    [--expect-block a,b] [--expect-clean c,d]    # instead of the git range (tests ratchet.toml)
+cogpin check --cwd . --diff-file F  # config-as-code: evaluate a crafted unified-diff FIXTURE
+    [--expect-block a,b] [--expect-clean c,d]    # instead of the git range (tests cogpin.toml)
     [--commit-msg M] [--pr-body-file F] [--reviews-file F] [--checks-file F] [--approvals a,b] [--head-sha S] [--pr-author L]
     # Uses the WORKING config (you test the policy you're editing, not a base pin) and never runs
     #   `run` blocks. --expect-block/--expect-clean assert which checks fire: exit 0 = all met,
@@ -263,17 +263,17 @@ ratchet check --cwd . --diff-file F  # config-as-code: evaluate a crafted unifie
     #   attest|judge checks are blind always (no diff can decide them). A supplied-but-unreadable
     #   context file is exit 2 (a test-authoring error), never coerced to empty. With no --expect
     #   flags it's a preview: print what would fire, exit 0.
-ratchet backtest --cwd . --range main~50..main  # replay the policy over merged history (calibration)
+cogpin backtest --cwd . --range main~50..main  # replay the policy over merged history (calibration)
     [--config F] [--fail-on-block]
     # which past commits WOULD this policy block? Pure report (exit 0) unless --fail-on-block;
     # exit 2 = couldn't run (bad range / shallow clone / unloadable config). Uses the WORKING
     # config; covers diff-fact checks only (`run` + PR-context checks are skipped + named).
-ratchet judge --cwd .           # emit advisory judge prompts (CI pipes to a model)
+cogpin judge --cwd .           # emit advisory judge prompts (CI pipes to a model)
 
 # author
-ratchet init --config ratchet.toml          # write a minimal starter config
-ratchet validate --config ratchet.toml      # parse + the block-requires-fact invariant
-ratchet suggest --cwd . [--format json|toml]  # repo facts → ranked draft (CLAUDE.md house-rules → primitives); writes NOTHING
+cogpin init --config cogpin.toml          # write a minimal starter config
+cogpin validate --config cogpin.toml      # parse + the block-requires-fact invariant
+cogpin suggest --cwd . [--format json|toml]  # repo facts → ranked draft (CLAUDE.md house-rules → primitives); writes NOTHING
     # POLYGLOT (#19): detects the top-K languages, not just the dominant one. The flat [repo].
     #   code/tests are the union over every detected language (a secondary enters at >=
     #   _SECONDARY_MIN_FILES=10 files — an ABSOLUTE floor, not a fraction, so a real 200-file
@@ -283,15 +283,15 @@ ratchet suggest --cwd . [--format json|toml]  # repo facts → ranked draft (CLA
     #   a host agent can author PER-SUBTREE checks (a `console.log` forbid on JS-only, `println!` on
     #   Rust-only) that the merged blob can't express; --format toml adds a `# detected:` comment.
     #   See examples/monorepo/ for the literal-per-subtree recipe + its --diff-file coverage fixtures.
-ratchet draft-lint --cwd . [--config ratchet.toml.draft] [--simulate]  # strict superset of validate; gates on # TODO(ratchet:review) markers
-ratchet gaps --cwd . [--format text|json]   # advisory: which house-rules no check binds
+cogpin draft-lint --cwd . [--config cogpin.toml.draft] [--simulate]  # strict superset of validate; gates on # TODO(cogpin:review) markers
+cogpin gaps --cwd . [--format text|json]   # advisory: which house-rules no check binds
 
 # wire (the adoption surface)
-ratchet install --cwd .         # vendor .ratchet/ratchet.py + scaffold config/hook/CI/gitignore (idempotent)
+cogpin install --cwd .         # vendor .cogpin/cogpin.py + scaffold config/hook/CI/gitignore (idempotent)
     [--no-vendor] [--no-config] [--no-hook] [--no-ci] [--no-gitignore]
-ratchet uninstall --cwd .       # strip the local pre-push managed block (never removes committed source)
-ratchet update --cwd .          # re-vendor the active engine → .ratchet/ratchet.py (fixes a stale-engine skew #16)
-ratchet doctor --cwd . [--json] # diagnose both layers; one-line fix per finding
+cogpin uninstall --cwd .       # strip the local pre-push managed block (never removes committed source)
+cogpin update --cwd .          # re-vendor the active engine → .cogpin/cogpin.py (fixes a stale-engine skew #16)
+cogpin doctor --cwd . [--json] # diagnose both layers; one-line fix per finding
 ```
 
 Exit codes: `gate` → `2` denies (stderr shown to the agent), `0` allows. `check` →
@@ -299,20 +299,20 @@ Exit codes: `gate` → `2` denies (stderr shown to the agent), `0` allows. `chec
 exits `0`; the block rides in the JSON decision the hook contract reads.
 `draft-lint` → `1` while any structural problem or review marker remains, else `0`.
 `doctor` → `1` only on a hard change-layer failure (engine missing / won't compile,
-or `ratchet.toml` invalid); everything else is advisory. `suggest` / `gaps` always
+or `cogpin.toml` invalid); everything else is advisory. `suggest` / `gaps` always
 exit `0`.
 
 ### Distribution & engine trust
 
-`install` **vendors** the engine to `.ratchet/ratchet.py` (committed, base-pinnable,
+`install` **vendors** the engine to `.cogpin/cogpin.py` (committed, base-pinnable,
 offline) rather than referencing `${CLAUDE_PLUGIN_ROOT}` — that var exists only in a
 live Claude session, while the change layer must run in CI / a teammate's pre-push /
-a fresh clone. The composite GitHub Action (`uses: IvanWng97/ratchet@v0`) runs its
-**own rev-pinned `ratchet.py`** over your **base-pinned config** by default
+a fresh clone. The composite GitHub Action (`uses: IvanWng97/cogpin@v0`) runs its
+**own rev-pinned `cogpin.py`** over your **base-pinned config** by default
 (`engine: pinned`), so neither the judge (engine) nor the policy (config) is read
 from the PR head — a PR can't self-neuter the gate. `engine: vendored` runs the
-consumer's HEAD `.ratchet/ratchet.py` instead, for teams that pin `.ratchet/**` via
+consumer's HEAD `.cogpin/cogpin.py` instead, for teams that pin `.cogpin/**` via
 `protected_path` + branch protection — the action **refuses `engine: vendored` under
 `pull_request_target`** (it would execute untrusted PR-head code with a privileged
-token). Pin the action to a release SHA (`uses: IvanWng97/ratchet@<sha>`) for a
+token). Pin the action to a release SHA (`uses: IvanWng97/cogpin@<sha>`) for a
 fully reproducible engine; the `@v0` floating major tag is convenience, not a pin.

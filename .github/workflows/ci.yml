@@ -23,7 +23,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: byte-compile the engine (stdlib-only, zero deps)
-        run: python -m py_compile ratchet.py
+        run: python -m py_compile cogpin.py
       - name: unit tests
         run: python -m unittest discover -s tests -p 'test_*.py' -v
       - name: validate every shipped config
@@ -31,8 +31,8 @@ jobs:
         run: |
           set -euo pipefail
           rc=0
-          for f in ratchet.toml examples/*/ratchet.toml; do
+          for f in cogpin.toml examples/*/cogpin.toml; do
             echo "── $f"
-            python ratchet.py validate --config "$f" || rc=1
+            python cogpin.py validate --config "$f" || rc=1
           done
           exit $rc

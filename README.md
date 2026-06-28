@@ -1,16 +1,16 @@
-<p align="center"><img src="assets/logo.svg" alt="ratchet" width="96" height="96"></p>
-<h1 align="center">ratchet</h1>
+<p align="center"><img src="assets/logo.svg" alt="cogpin" width="96" height="96"></p>
+<h1 align="center">cogpin</h1>
 
 <p align="center"><b>A Definition-of-Done gate for AI coding agents.</b><br>
-Prose binds intention. Only mechanism binds behavior.</p>
+Your AI agent says “done.” cogpin makes sure it is.</p>
 
-<p align="center"><img src="assets/concept.svg" alt="Prose asks; ratchet enforces" width="840"></p>
+<p align="center"><img src="assets/concept.svg" alt="Prose asks; cogpin enforces" width="840"></p>
 
 When an AI agent closes a task it tends to skip the unglamorous last mile —
 forgets the test, bypasses the hook with `--no-verify`, deletes the failing test
 to go green, leaves the docs stale, or *says* it reviewed when it didn't. A
 `CLAUDE.md` that says "always run the tests" is a suggestion the same model can
-rationalize past. **ratchet turns that closing-discipline into a gate the agent
+rationalize past. **cogpin turns that closing-discipline into a gate the agent
 can't talk its way around** — a Claude Code plugin you install once.
 
 It rests on one rule:
@@ -23,7 +23,7 @@ A **fact** decides only over things the agent can't fake — the normalized diff
 the command it's about to run, PR/commit metadata, reviewer approvals. Those may
 hard-block. Anything that needs *judgment* (an LLM-judge, a self-attestation) is
 **advisory** — it warns or nudges, never blocks. That single invariant is the
-whole guarantee — ratchet's "moat": a forgetful or over-confident agent can't pass a block it didn't
+whole guarantee — cogpin's "moat": a forgetful or over-confident agent can't pass a block it didn't
 actually satisfy, because **it never authored the evidence the block reads.**
 
 Precisely: `block` requires `kind="fact"` **and** `provenance="environment"` — the fact must
@@ -31,10 +31,10 @@ come from git / the harness / the PR API, not a token the agent *types* that mer
 out-of-band event. So a self-typed `marker_present` (a "two-lens-review:" line) can only **warn**;
 to actually gate a review, block on a real non-author approval. See [docs/composition.md](docs/composition.md).
 
-One language-agnostic engine, one per-repo `ratchet.toml`. The engine reads git
+One language-agnostic engine, one per-repo `cogpin.toml`. The engine reads git
 facts + your config; it never imports your project code. Anything
 language-specific goes through the one `run` escape hatch. The engine itself is a
-single stdlib-only `ratchet.py` — auditable in plain text, zero dependencies, no
+single stdlib-only `cogpin.py` — auditable in plain text, zero dependencies, no
 package manager.
 
 ## What it catches
@@ -91,19 +91,19 @@ of **enforcing** the closing-discipline, and writing more of it doesn't fix that
    precisely when the instruction is faintest.
 3. **Prose can't reject an action.** It cannot return a non-zero exit code. The
    agent can run `git commit --no-verify` and no `CLAUDE.md` will stop the tool
-   call. ratchet's `PreToolUse` hook *denies* it, in real time, before it runs.
+   call. cogpin's `PreToolUse` hook *denies* it, in real time, before it runs.
 4. **Self-report is gameable.** "I did a two-lens review" / "docs updated" is
    authored by the gated agent. A check that trusts the agent's own claim is no
-   check. ratchet blocks only on facts the agent can't author.
+   check. cogpin blocks only on facts the agent can't author.
 5. **More prose ≠ more binding.** Splitting rules across many `CLAUDE.md` files
    improves locality of *intent*, not enforcement. Ten unenforced rules are
    bypassed as easily as one. You can't patch an enforcement gap with docs.
 6. **The rulebook is editable in the same breath.** An agent can delete the
    "no `--no-verify`" line from `CLAUDE.md` in the very change that uses it.
-   ratchet reads its policy from the pinned base ref — the gate you're under is
+   cogpin reads its policy from the pinned base ref — the gate you're under is
    the one that existed *before* your diff ([proof below](#why-its-bypass-proof)).
 
-ratchet doesn't replace `CLAUDE.md`; it's the mechanism half of the idea your
+cogpin doesn't replace `CLAUDE.md`; it's the mechanism half of the idea your
 `CLAUDE.md` already states.
 
 ## Two layers, one config
@@ -140,8 +140,8 @@ green.
 > audit trail against an honest agent, but they are defeated by indirection (a
 > subprocess, a helper script, an obfuscated verb) and only fire if the harness invokes
 > the hook. **They are not a security/capability boundary.** The boundary is the OS /
-> harness sandbox — which ratchet *declares* (`[capability]`) and *emits* to
-> (`ratchet capability emit`), but never **is**. See
+> harness sandbox — which cogpin *declares* (`[capability]`) and *emits* to
+> (`cogpin capability emit`), but never **is**. See
 > [docs/composition.md](docs/composition.md) for the full defense-in-depth map.
 
 ## Install
@@ -153,10 +153,10 @@ setups. If it isn't, nothing errors; the always-on gate just stays quiet.
 ### 1 · Add the plugin (Claude Code)
 
 ```
-/plugin marketplace add IvanWng97/ratchet
+/plugin marketplace add IvanWng97/cogpin
 ```
 ```
-/plugin install ratchet@ratchet
+/plugin install cogpin@cogpin
 ```
 (Two separate prompts — send them one at a time.)
 
@@ -164,7 +164,7 @@ setups. If it isn't, nothing errors; the always-on gate just stays quiet.
 > plugins → Create plugin and add marketplace → Add from repository → the repo URL.
 
 That gives you the **agent layer** immediately — the `PreToolUse` deny + `Stop`
-nudge fire every session, and `/ratchet-init` / `/ratchet-check` become
+nudge fire every session, and `/cogpin-init` / `/cogpin-check` become
 available. "Default-on" means enforcement is a property of your client + the
 repo, not a step the agent has to remember.
 
@@ -174,18 +174,18 @@ The agent layer is per-developer; the authoritative **change layer** (pre-push +
 CI, base-pinned, un-bypassable) is per-repo. Run once, inside Claude Code:
 
 ```
-/ratchet-init
+/cogpin-init
 ```
 
-That single command runs `ratchet install`, which (idempotently, never clobbering):
+That single command runs `cogpin install`, which (idempotently, never clobbering):
 
-- **vendors** the engine to `.ratchet/ratchet.py` — committed, so every clone has it;
-- **scaffolds** a starter `ratchet.toml`;
+- **vendors** the engine to `.cogpin/cogpin.py` — committed, so every clone has it;
+- **scaffolds** a starter `cogpin.toml`;
 - **appends** a pre-push managed block to your effective hooks dir (coexists with husky / lefthook / pre-commit);
-- **scaffolds** `.github/workflows/ratchet.yml`;
-- **drafts** a project-specific policy from your `CLAUDE.md` house rules as `ratchet.toml.draft`, for you to review and rename.
-Commit `.ratchet/ratchet.py`, `ratchet.toml`, and the workflow, and every clone —
-every agent, every PR — meets the same gate. Then `/ratchet-doctor` confirms both
+- **scaffolds** `.github/workflows/cogpin.yml`;
+- **drafts** a project-specific policy from your `CLAUDE.md` house rules as `cogpin.toml.draft`, for you to review and rename.
+Commit `.cogpin/cogpin.py`, `cogpin.toml`, and the workflow, and every clone —
+every agent, every PR — meets the same gate. Then `/cogpin-doctor` confirms both
 layers are live. No npm, no package manager, no binary download — one
 stdlib-Python file, committed.
 
@@ -194,16 +194,16 @@ The scaffolded CI is two steps over the composite action:
 ```yaml
 permissions: { contents: read, pull-requests: read, checks: read }  # reviews/checks SKIP without these
 jobs:
-  ratchet:
+  cogpin:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with: { fetch-depth: 0 }          # base-pinning needs history
-      - uses: IvanWng97/ratchet@v0         # rev-pinned engine over your base-pinned config
+      - uses: IvanWng97/cogpin@v0         # rev-pinned engine over your base-pinned config
 ```
 
-The action runs its **own rev-pinned `ratchet.py`** (not the repo's head-side copy)
-over your **base-pinned `ratchet.toml`** — so a PR can neither rewrite the engine to
+The action runs its **own rev-pinned `cogpin.py`** (not the repo's head-side copy)
+over your **base-pinned `cogpin.toml`** — so a PR can neither rewrite the engine to
 `exit 0` nor relax the policy in the same diff it's gated on. It also gathers the PR
 facts (body, reviews, checks, approvals) so the reviewer-identity and checks-green
 primitives work with zero extra config.
@@ -212,18 +212,18 @@ primitives work with zero extra config.
 
 **Not on GitHub Actions?** The engine is the same everywhere. A teammate who wants
 their *local* pre-push (CI already gates them) runs
-`python3 .ratchet/ratchet.py install --no-vendor --no-config --no-ci`. On GitLab CI,
+`python3 .cogpin/cogpin.py install --no-vendor --no-config --no-ci`. On GitLab CI,
 five lines do it: `GIT_DEPTH: 0`, `git fetch origin "$CI_DEFAULT_BRANCH"`, then
-`python3 .ratchet/ratchet.py check` (PR-review facts degrade-to-skip off-GitHub).
+`python3 .cogpin/cogpin.py check` (PR-review facts degrade-to-skip off-GitHub).
 Using **pre-commit**? It regenerates its own hook, so add a `repo: local` entry
-pointing at the same vendored engine (`entry: python3 .ratchet/ratchet.py check`,
-`stages: [pre-push]`) — `ratchet install` prints the exact snippet.
+pointing at the same vendored engine (`entry: python3 .cogpin/cogpin.py check`,
+`stages: [pre-push]`) — `cogpin install` prints the exact snippet.
 
 > **No Claude Code?** The change layer is tool-agnostic. Vendor the engine once
 > without the plugin — pin a tag and fetch the one file, then `install --no-vendor`:
 > ```sh
-> mkdir -p .ratchet && curl -fsSL https://raw.githubusercontent.com/IvanWng97/ratchet/v0/ratchet.py -o .ratchet/ratchet.py
-> python3 .ratchet/ratchet.py install --no-vendor   # wires hook + CI + gitignore
+> mkdir -p .cogpin && curl -fsSL https://raw.githubusercontent.com/IvanWng97/cogpin/v0/cogpin.py -o .cogpin/cogpin.py
+> python3 .cogpin/cogpin.py install --no-vendor   # wires hook + CI + gitignore
 > ```
 > It's a documented one-liner, not a bootstrapper to maintain — every later install
 > re-runs the already-committed engine.
@@ -238,17 +238,17 @@ diff it's being gated on**.
 ```mermaid
 flowchart LR
     subgraph prhead["the agent's PR (head)"]
-      cfg["ratchet.toml<br/>blocks → warns"]
+      cfg["cogpin.toml<br/>blocks → warns"]
       secret["the diff<br/>adds a secret"]
     end
-    base["ratchet.toml at the BASE ref<br/>blocks intact"]
+    base["cogpin.toml at the BASE ref<br/>blocks intact"]
     cfg -. "ignored — policy is never<br/>read from the PR head" .-> check
-    base ==> check{{"ratchet check"}}
+    base ==> check{{"cogpin check"}}
     secret ==> check
     check ==> out["🔒 secret still BLOCKED<br/>the diff can't loosen<br/>the gate that gates it"]
 ```
 
-1. **Base-pinning** — `ratchet.toml` (and your gate-defining files) are read from
+1. **Base-pinning** — `cogpin.toml` (and your gate-defining files) are read from
    the pinned base ref, never the PR head. A same-PR edit that relaxes a check is
    evaluated against the *old* policy, so it can't disarm itself.
 2. **`protected_path`** — changing those gate-defining files needs an independent
@@ -261,25 +261,25 @@ flowchart LR
 3. **Isolated `run`** — invoke tools isolated (`ruff --isolated`, a pinned
    `pytest -c …`) so head-side config can't defang the teeth.
 
-ratchet dogfoods itself. Here it refuses to be disarmed — one commit that adds a
-secret **and** rewrites `ratchet.toml` to turn every block into a warn:
+cogpin dogfoods itself. Here it refuses to be disarmed — one commit that adds a
+secret **and** rewrites `cogpin.toml` to turn every block into a warn:
 
 ```console
-$ python3 ratchet.py check                 # a clean commit
-ratchet: ok (0 advisory warning(s))        # exit 0
+$ python3 cogpin.py check                 # a clean commit
+cogpin: ok (0 advisory warning(s))        # exit 0
 
 $ printf 'AWS_KEY = "AKIA…EXAMPLE"\n' > leak.py          # leak a key, and…
-$ sed -i 's/severity = "block"/severity = "warn"/' ratchet.toml   # …disarm the gate
-$ grep -c 'severity = "block"' ratchet.toml
+$ sed -i 's/severity = "block"/severity = "warn"/' cogpin.toml   # …disarm the gate
+$ grep -c 'severity = "block"' cogpin.toml
 0                                      # HEAD's config now has ZERO blocks
 $ git commit -am "feat: add module and 'tune' the gate"
 
-$ python3 ratchet.py check
-ratchet: definition-of-done NOT met (1 blocking)
+$ python3 cogpin.py check
+cogpin: definition-of-done NOT met (1 blocking)
   [BLOCK] secret-scan: possible secret in added line (leak.py)   # exit 1
 ```
 
-The head-side `ratchet.toml` has no blocks left — yet the secret is still caught,
+The head-side `cogpin.toml` has no blocks left — yet the secret is still caught,
 because the policy is read from the **base ref**. That is the difference between a
 rule and a gate.
 
@@ -293,7 +293,7 @@ Claude Code, in the maintainers' own tracker, name it exactly:
   rules**"*
 
 Both describe a prose rule the agent read and then ignored. That is precisely the
-gap ratchet closes: a prose rule *asks*; ratchet makes the unwanted outcome a
+gap cogpin closes: a prose rule *asks*; cogpin makes the unwanted outcome a
 non-event — the `--no-verify` call is denied before it runs, and the skipped step
 reds a gate it can't edit.
 
@@ -331,7 +331,7 @@ Every check reads only facts — never your code.
 | `require_approval_from{paths,require_approval_from,exclude_author,exclude_bot}` | fact | a change under `paths` needs an APPROVED review from a named owner (CODEOWNERS-lite; CI) |
 | `pattern_requires_approval{pattern,scope,exclude_author,exclude_bot}` | fact | an added line matching `pattern` (a new dep, an `unsafe`) needs an independent approval (CI) |
 | `approval_policy{require_fresh,no_changes_requested,exclude_author,exclude_bot,min_approvals}` | fact | the approval is fresh (on head), human, non-author, with no outstanding changes-requested; `min_approvals` counts **distinct** reviewers (CI) |
-| `require_checks_green{need,ignore}` | fact | every (required) status check concluded `success` (CI); `ignore` excludes ratchet's own same-run job |
+| `require_checks_green{need,ignore}` | fact | every (required) status check concluded `success` (CI); `ignore` excludes cogpin's own same-run job |
 | `run{cmd}` | fact\* | shell-out; the exit code is the fact (**`block` only at the change layer**) |
 | `attest{box,class}` | advisory | a class-gated `Stop`-hook checklist box — blocks turn-end until ticked (forcing function; the change layer is the ungameable gate) |
 | `judge{prompt}` | advisory | an advisory LLM-judge prompt (CI `continue-on-error` substance check) |
@@ -340,71 +340,71 @@ Every check reads only facts — never your code.
 
 ### What it does and doesn't claim
 
-ratchet guarantees the **forcing function**, not omniscience. A `fact` block can't
+cogpin guarantees the **forcing function**, not omniscience. A `fact` block can't
 be talked past — that's the strong claim, and it holds. But `secret_scan` is
 best-effort pattern matching (pair it with `gitleaks` via a `run` block for
 depth); `forbid_removal`/`forbid_pattern` are presence-ungameable but
 value-gameable (`assert!(true)` satisfies a naive "has an assert"); `attest` /
 `judge` are advisory by construction; and a determined human with repo-admin
-rights can always change the base policy through review. The line ratchet draws:
+rights can always change the base policy through review. The line cogpin draws:
 **anything an agent can do mid-task to cut a corner, it stops; anything that needs
 human judgment stays advisory and visible.** That boundary is enforced by the
 schema itself (`block` requires `fact`), so the guarantee can't silently erode.
 
 ## Config & recipes
 
-Let `/ratchet-init` draft a policy from your `CLAUDE.md`, or start from a scaffold:
+Let `/cogpin-init` draft a policy from your `CLAUDE.md`, or start from a scaffold:
 
 ```
-python3 ratchet.py install    # vendor + scaffold + hook + CI (or /ratchet-init in Claude Code)
-python3 ratchet.py update     # re-vendor the active engine → .ratchet/ratchet.py (fix a stale-engine skew)
-python3 ratchet.py suggest    # repo facts → a ranked draft policy (CLAUDE.md house-rules → primitives)
-python3 ratchet.py draft-lint # gate ratchet.toml.draft (the moat + outstanding review markers) before the rename
-python3 ratchet.py gaps       # which CLAUDE.md rules are still prose with no mechanism
-python3 ratchet.py doctor     # diagnose both layers (or /ratchet-doctor)
-python3 ratchet.py validate   # checks the block-requires-fact invariant + structural sanity
-python3 ratchet.py backtest --range main~50..main  # replay the policy over history: which past commits would block?
-python3 ratchet.py check --diff-file fix.diff --expect-block secret-scan  # config-as-code: assert a crafted diff fires a check
-python3 ratchet.py capability emit  # compile [capability] → the harness (declare → emit; the OS enforces)
+python3 cogpin.py install    # vendor + scaffold + hook + CI (or /cogpin-init in Claude Code)
+python3 cogpin.py update     # re-vendor the active engine → .cogpin/cogpin.py (fix a stale-engine skew)
+python3 cogpin.py suggest    # repo facts → a ranked draft policy (CLAUDE.md house-rules → primitives)
+python3 cogpin.py draft-lint # gate cogpin.toml.draft (the moat + outstanding review markers) before the rename
+python3 cogpin.py gaps       # which CLAUDE.md rules are still prose with no mechanism
+python3 cogpin.py doctor     # diagnose both layers (or /cogpin-doctor)
+python3 cogpin.py validate   # checks the block-requires-fact invariant + structural sanity
+python3 cogpin.py backtest --range main~50..main  # replay the policy over history: which past commits would block?
+python3 cogpin.py check --diff-file fix.diff --expect-block secret-scan  # config-as-code: assert a crafted diff fires a check
+python3 cogpin.py capability emit  # compile [capability] → the harness (declare → emit; the OS enforces)
 ```
 
-Safe rollout: ride the **authoritative** policy non-failing first — `ratchet check
+Safe rollout: ride the **authoritative** policy non-failing first — `cogpin check
 --report-only` (or `report-only: true` on the action) prints findings + a summary but
 always exits 0 (infra/config errors still fail); calibrate with `backtest` over real
 merged history, then flip the switch to enforce. `--report-only` is a *global, temporary*
 rollout switch — distinct from a per-check `severity = "warn"` (permanent, per-check).
 
-Test `ratchet.toml` as code: `ratchet check --diff-file fixtures/leak.diff
+Test `cogpin.toml` as code: `cogpin check --diff-file fixtures/leak.diff
 --expect-block secret-scan --expect-clean two-lens` evaluates your **working** policy
 against a crafted unified diff and asserts which checks fire — exit 0 = met, 1 = a
 violated expectation (the regression net), 2 = couldn't run (typo'd / un-evaluable
 `--expect` id). Generate a fixture with `git diff > fixtures/leak.diff`; supply
 `--pr-body-file`/`--reviews-file`/`--checks-file` to exercise PR-context checks too.
 
-The AI drafts to `ratchet.toml.draft`, never the live config; only the five
+The AI drafts to `cogpin.toml.draft`, never the live config; only the five
 safe-core blocks may be born enforcing, and `draft-lint` blocks the rename until
-every other block carries a cleared `# TODO(ratchet:review)` marker — the human's
+every other block carries a cleared `# TODO(cogpin:review)` marker — the human's
 `mv …draft …toml` is the sign-off.
 
 Ready-to-lift policies:
 
-- [`examples/pixtuoid/ratchet.toml`](examples/pixtuoid/ratchet.toml) — a faithful
+- [`examples/pixtuoid/cogpin.toml`](examples/pixtuoid/cogpin.toml) — a faithful
   port of an 890-line bespoke DoD gate (Rust workspace) into 22 declarative checks.
-- [`examples/node-ts/ratchet.toml`](examples/node-ts/ratchet.toml) — a Node/TS repo,
+- [`examples/node-ts/cogpin.toml`](examples/node-ts/cogpin.toml) — a Node/TS repo,
   including the team / PR-review layer (CODEOWNERS-lite, fresh-approval, checks-green).
-- [`examples/python/ratchet.toml`](examples/python/ratchet.toml) — a Python repo.
-- [`examples/monorepo/ratchet.toml`](examples/monorepo/ratchet.toml) — a **polyglot
+- [`examples/python/cogpin.toml`](examples/python/cogpin.toml) — a Python repo.
+- [`examples/monorepo/cogpin.toml`](examples/monorepo/cogpin.toml) — a **polyglot
   monorepo** (Rust + TS site/extension + Python scripts): per-subtree denylists via
   literal globs (the same "no debug prints" rule, a different pattern + scope per
   language), each proven by a `--diff-file` coverage fixture. `suggest` detects the
   top-K languages (not just the dominant one) and emits a per-language `languages`
   breakdown to author these from.
-- [`examples/advisory/ratchet.toml`](examples/advisory/ratchet.toml) — the advisory
+- [`examples/advisory/cogpin.toml`](examples/advisory/cogpin.toml) — the advisory
   **judge** library: the eight semantic-weakening prompts (assertion-loosening,
   fake-impl, regex-relaxing, guard-removal, …) a diff fact can't prove, mined from
   real AI-authored PR history. Compose them with the blocking facts above.
 
-ratchet dogfoods itself — see [`ratchet.toml`](ratchet.toml): its own change layer
+cogpin dogfoods itself — see [`cogpin.toml`](cogpin.toml): its own change layer
 re-runs its own test suite from the base-pinned policy; `self-protect` denies an
 in-session edit to the gate files; `branch-first` + `keep-tests` + `no-test-delete`
 guard this very repo with the primitives it ships.
@@ -412,7 +412,7 @@ guard this very repo with the primitives it ships.
 ## Docs
 
 - **Tutorial + live playground** (the real engine in your browser via Pyodide):
-  <https://ivanwng97.github.io/ratchet/>
+  <https://ivanwng97.github.io/cogpin/>
 - **[`docs/adopting.md`](docs/adopting.md)** — the end-to-end adoption path (install →
   draft → ride at warn → promote → fixtures), what to gate vs. leave to CI, and migrating
   off an existing gate. **Start here.**
@@ -426,7 +426,7 @@ guard this very repo with the primitives it ships.
 
 **v0.3.0 — early stage (0.x; the primitive / CLI surface may still change between
 minors).** Engine (26 primitives) + Claude Code plugin (agent layer) + one-command
-`/ratchet-init` wiring (`install` / `uninstall` / `doctor`) + AI-assisted config
+`/cogpin-init` wiring (`install` / `uninstall` / `doctor`) + AI-assisted config
 draft (`suggest` / `draft-lint` / `gaps`) + a rev-pinned composite GitHub Action
 (`@v0`, change layer) + tutorial site. Stdlib Python (3.11+), no third-party deps,
 no package manager. MIT.

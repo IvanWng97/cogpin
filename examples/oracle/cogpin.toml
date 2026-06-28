@@ -1,4 +1,4 @@
-# ratchet recipe — THE ORACLE DELEGATION LIBRARY.
+# cogpin recipe — THE ORACLE DELEGATION LIBRARY.
 #
 # The only moat-legal way to gate the *substance* band (does it typecheck, did it
 # build, did coverage hold, do the tests have teeth) is to block on the output of an
@@ -15,9 +15,9 @@
 #   severity="block"  REQUIRES  kind="fact"  AND  provenance="environment"
 # they are the *only* primitives here allowed to hard-block on substance.
 #
-# NO in-engine per-oracle parsers: ratchet never reads coverage.xml / lcov /
+# NO in-engine per-oracle parsers: cogpin never reads coverage.xml / lcov /
 # cargo-mutants JSON / mypy text. The oracle parses its own format and exits non-zero;
-# ratchet reads the exit code (or the CI conclusion) and nothing else. The threshold /
+# cogpin reads the exit code (or the CI conclusion) and nothing else. The threshold /
 # regex stays consumer-supplied (in the `run` cmd or the oracle's own config file).
 #
 # ⚠ THIS IS A POLYGLOT MENU (python · ts · rust), NOT a drop-in config. Copied WHOLESALE it
@@ -27,7 +27,7 @@
 #   BOTH enabled. `validate` only checks shape — it never runs them — so a wrong row passes
 #   validate and bites in CI. ADOPT IT BY DELETING: keep the rows for YOUR stack, pick ONE of
 #   each OR-pair, wire the matching CI jobs, and (solo repo, no independent approver) downgrade
-#   the approval-gated `protect-oracle-ci` to `warn`. Then:  python3 .ratchet/ratchet.py validate
+#   the approval-gated `protect-oracle-ci` to `warn`. Then:  python3 .cogpin/cogpin.py validate
 schema = 1
 
 [repo]
@@ -41,7 +41,7 @@ docs  = ["**/*.md", "docs/**"]
 [meta]
 base_pinned    = true                  # change layer reads policy from the pinned BASE ref:
                                        # a PR can't loosen the oracle in the same diff it gates.
-bypass_env     = "RATCHET_BYPASS"      # AGENT-layer escape hatch only (always logged); the
+bypass_env     = "COGPIN_BYPASS"      # AGENT-layer escape hatch only (always logged); the
                                        # change layer (the real oracle gate) IGNORES it.
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -81,7 +81,7 @@ severity = "block"
 layer = "agent"
 primitive = "self_protect"
 paths = [
-  "ratchet.toml", ".ratchet/**", ".github/workflows/**",
+  "cogpin.toml", ".cogpin/**", ".github/workflows/**",
   "pyproject.toml", "setup.cfg", ".coveragerc", "tox.ini",
   "package.json", "tsconfig.json", "vitest.config.*", "jest.config.*",
   "Cargo.toml", "deny.toml",
@@ -134,7 +134,7 @@ cmd = "cargo build --locked --all-targets"
 # (2a) The CI coverage job's CONCLUSION is the fact. need=["coverage"] means a coverage
 # check that never reported counts as MISSING and blocks (no vacuous pass) — fail-closed.
 # moat: require_checks_green reads the PR API conclusion (environment) → block-legal.
-# need is set (not empty) so ratchet's own still-pending job can't self-block this run.
+# need is set (not empty) so cogpin's own still-pending job can't self-block this run.
 [[check]]
 id = "oracle-coverage-ci"
 kind = "fact"
@@ -144,7 +144,7 @@ primitive = "require_checks_green"
 need = ["coverage"]
 
 # (2b) Or run the coverage oracle directly: the threshold lives in the TOOL's flag, not in
-# ratchet — pytest/c8 parse their own format and exit non-zero below fail_under. The exit
+# cogpin — pytest/c8 parse their own format and exit non-zero below fail_under. The exit
 # code is the fact. (Pick 2a OR 2b for your repo; both shown for the menu.)
 [[check]]
 id = "oracle-coverage-run"
@@ -185,7 +185,7 @@ scope = ["pyproject.toml", "setup.cfg", ".coveragerc", "tox.ini", ".github/workf
 # Mutation testing is expensive and flaky, so it's a SIGNAL first, not a gate. severity=
 # warn means it never blocks regardless of provenance — a fact check at warn is honest
 # even while the oracle stabilizes. The CI job runs cargo-mutants / mutmut and the
-# conclusion is surfaced; ratchet just reads it.
+# conclusion is surfaced; cogpin just reads it.
 # PROMOTE TO BLOCK once the mutation job is deterministic and fast enough: flip severity
 # to "block" — it's already kind=fact + a require_checks_green conclusion (environment),
 # so it clears the moat the moment you do.
@@ -203,7 +203,7 @@ need = ["mutation"]
 # it as a CEILING: it blocks if the measured value GROWS across the diff, and `floor`
 # doubles as the absolute ceiling (block when the value rises past it). moat: the tracked
 # number is committed text (environment) → block-legal. No parser in the engine — the
-# perf oracle produces the number; ratchet only compares it.
+# perf oracle produces the number; cogpin only compares it.
 [[check]]
 id = "oracle-size-budget-no-increase"
 kind = "fact"
@@ -258,7 +258,7 @@ kind = "fact"
 severity = "block"
 layer = "change"
 primitive = "protected_path"
-paths = [".github/workflows/**", "ratchet.toml", ".ratchet/**"]
+paths = [".github/workflows/**", "cogpin.toml", ".cogpin/**"]
 require_approval = true
 
 # (5c) Block NEWLY-ADDED suppression markers that defeat the TYPE oracle (mypy / tsc).

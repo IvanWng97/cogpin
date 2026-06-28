@@ -1,5 +1,5 @@
-# ratchet recipe — a Node / TypeScript repo. Lift it, adjust the globs, validate:
-#   python3 .ratchet/ratchet.py validate
+# cogpin recipe — a Node / TypeScript repo. Lift it, adjust the globs, validate:
+#   python3 .cogpin/cogpin.py validate
 # The one rule: severity="block" REQUIRES kind="fact".
 schema = 1
 
@@ -11,7 +11,7 @@ docs = ["**/*.md", "docs/**"]
 
 [meta]
 base_pinned = true
-bypass_env = "RATCHET_BYPASS"          # agent-layer escape hatch (always logged)
+bypass_env = "COGPIN_BYPASS"          # agent-layer escape hatch (always logged)
 
 # ── agent layer (real-time PreToolUse) ───────────────────────────────────────
 [[check]]
@@ -41,7 +41,7 @@ kind = "fact"
 severity = "block"
 layer = "agent"
 primitive = "self_protect"
-paths = ["ratchet.toml", ".ratchet/**", ".github/workflows/**", ".husky/**", "package.json"]
+paths = ["cogpin.toml", ".cogpin/**", ".github/workflows/**", ".husky/**", "package.json"]
 
 # ── change layer (pre-push + CI, authoritative, base-pinned) ─────────────────
 [[check]]
@@ -150,7 +150,7 @@ id = "require-owner-approval"
 kind = "fact"
 severity = "block"
 primitive = "require_approval_from"
-paths = ["src/auth/**", "**/migrations/**", ".github/workflows/**", "ratchet.toml"]
+paths = ["src/auth/**", "**/migrations/**", ".github/workflows/**", "cogpin.toml"]
 require_approval_from = ["security-lead", "tech-lead"]
 exclude_author = true
 

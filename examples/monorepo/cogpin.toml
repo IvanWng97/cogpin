@@ -1,4 +1,4 @@
-# ratchet recipe — a POLYGLOT MONOREPO (Rust workspace + Astro/TS site + a TS extension
+# cogpin recipe — a POLYGLOT MONOREPO (Rust workspace + Astro/TS site + a TS extension
 # + a Python scripts/ dir). The engine is language-agnostic: per-subtree policy is just
 # literal globs on each check's `scope`. The point of this recipe is a rule that is correct
 # on ONE subtree and wrong on another — `println!` is a debug leak in Rust, meaningless in
@@ -6,9 +6,9 @@
 # host agent can author these per-subtree checks (#19).
 #
 # Lift it, adjust the subtree globs, and PROVE each scope with a fixture (see fixtures/ +
-# `ratchet check --diff-file`), because `validate` can't catch a glob TYPO — only a fixture can:
-#   python3 .ratchet/ratchet.py validate --config ratchet.toml
-#   python3 .ratchet/ratchet.py check --diff-file fixtures/rust-dbg.diff --expect-block no-rust-dbg
+# `cogpin check --diff-file`), because `validate` can't catch a glob TYPO — only a fixture can:
+#   python3 .cogpin/cogpin.py validate --config cogpin.toml
+#   python3 .cogpin/cogpin.py check --diff-file fixtures/rust-dbg.diff --expect-block no-rust-dbg
 #
 # If you find yourself repeating the same subtree glob across many checks, named sub-scopes
 # (`[scope.site]` referenced by `@site`) are tracked in #19 — until then, literal globs.
@@ -24,7 +24,7 @@ docs = ["**/*.md", "docs/**"]
 
 [meta]
 base_pinned = true
-bypass_env = "RATCHET_BYPASS"          # agent-layer escape hatch (always logged)
+bypass_env = "COGPIN_BYPASS"          # agent-layer escape hatch (always logged)
 
 # ── safe core: always armed, all kind=fact ───────────────────────────────────
 [[check]]
@@ -50,7 +50,7 @@ kind = "fact"
 severity = "block"
 layer = "agent"
 primitive = "self_protect"
-paths = ["ratchet.toml", ".ratchet/**", ".github/workflows/**"]
+paths = ["cogpin.toml", ".cogpin/**", ".github/workflows/**"]
 
 [[check]]
 id = "secret-scan"

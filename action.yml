@@ -1,7 +1,7 @@
-name: ratchet
+name: cogpin
 description: >-
-  Definition-of-Done gate for AI coding agents. Runs the rev-pinned ratchet engine
-  over your base-pinned ratchet.toml — neither the judge (engine) nor the policy
+  Definition-of-Done gate for AI coding agents. Runs the rev-pinned cogpin engine
+  over your base-pinned cogpin.toml — neither the judge (engine) nor the policy
   (config) is read from the PR head, so only ungameable diff/PR facts decide.
 branding:
   icon: check-square
@@ -10,13 +10,13 @@ branding:
 inputs:
   engine:
     description: >-
-      Which engine evaluates: 'pinned' (the action's own rev-pinned ratchet.py —
+      Which engine evaluates: 'pinned' (the action's own rev-pinned cogpin.py —
       recommended; a PR can't self-neuter it) or 'vendored' (the consumer's HEAD
-      .ratchet/ratchet.py — only if you pin .ratchet/** via protected_path + branch
+      .cogpin/cogpin.py — only if you pin .cogpin/** via protected_path + branch
       protection).
     default: pinned
   config-dir:
-    description: Directory holding ratchet.toml (and, for engine=vendored, .ratchet/).
+    description: Directory holding cogpin.toml (and, for engine=vendored, .cogpin/).
     default: "."
   default-branch:
     description: >-
@@ -58,12 +58,12 @@ runs:
             echo "::error::engine=vendored under pull_request_target executes untrusted PR-head code with a privileged token. Use engine=pinned (default), or the pull_request trigger."
             exit 1
           fi
-          engine="$CONFIG_DIR/.ratchet/ratchet.py"
+          engine="$CONFIG_DIR/.cogpin/cogpin.py"
         else
-          engine="$ACTION_PATH/ratchet.py"
+          engine="$ACTION_PATH/cogpin.py"
         fi
         if [ ! -f "$engine" ]; then
-          echo "::error::ratchet engine not found at $engine (engine=$ENGINE_INPUT)"
+          echo "::error::cogpin engine not found at $engine (engine=$ENGINE_INPUT)"
           exit 1
         fi
         echo "engine=$engine" >> "$GITHUB_OUTPUT"
@@ -72,7 +72,7 @@ runs:
           echo "::warning::base ref origin/$DEFAULT_BRANCH unreachable — base-pinning degrades; set 'fetch-depth: 0' on actions/checkout."
         fi
 
-    - name: ratchet check (pull request)
+    - name: cogpin check (pull request)
       if: github.event_name == 'pull_request'
       shell: bash
       env:
@@ -90,12 +90,12 @@ runs:
         set -euo pipefail
         report=""
         if [ "$REPORT_ONLY" = "true" ]; then
-          echo "::warning title=ratchet report-only::ratchet is in REPORT-ONLY mode — findings are reported but the gate will NOT fail. Set report-only:false to enforce."
+          echo "::warning title=cogpin report-only::cogpin is in REPORT-ONLY mode — findings are reported but the gate will NOT fail. Set report-only:false to enforce."
           report="--report-only"
         fi
-        body="$CONFIG_DIR/.ratchet-pr-body.txt"
-        reviews="$CONFIG_DIR/.ratchet-reviews.json"
-        checks="$CONFIG_DIR/.ratchet-checks.json"
+        body="$CONFIG_DIR/.cogpin-pr-body.txt"
+        reviews="$CONFIG_DIR/.cogpin-reviews.json"
+        checks="$CONFIG_DIR/.cogpin-checks.json"
         gh pr view "$PR" --json body -q .body > "$body" || true
         # Reviews via GraphQL → the flat {login,state,commit_id,is_bot,author_association}
         # shape the engine consumes (REST/`gh pr view` can't surface is_bot / the review's commit oid).
@@ -130,7 +130,7 @@ runs:
           --default-branch "$DEFAULT_BRANCH" \
           $report
 
-    - name: ratchet check (push)
+    - name: cogpin check (push)
       if: github.event_name != 'pull_request'
       shell: bash
       env:
@@ -142,7 +142,7 @@ runs:
         set -euo pipefail
         report=""
         if [ "$REPORT_ONLY" = "true" ]; then
-          echo "::warning title=ratchet report-only::ratchet is in REPORT-ONLY mode — findings are reported but the gate will NOT fail. Set report-only:false to enforce."
+          echo "::warning title=cogpin report-only::cogpin is in REPORT-ONLY mode — findings are reported but the gate will NOT fail. Set report-only:false to enforce."
           report="--report-only"
         fi
         python3 "$ENGINE" check --cwd "$CONFIG_DIR" --default-branch "$DEFAULT_BRANCH" $report

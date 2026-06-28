@@ -1,7 +1,7 @@
-# pixtuoid — ratchet policy, a faithful port of scripts/check_dod.py (890 lines) into
-# the ratchet primitive library. Each check notes its check_dod.py origin.
+# pixtuoid — cogpin policy, a faithful port of scripts/check_dod.py (890 lines) into
+# the cogpin primitive library. Each check notes its check_dod.py origin.
 #
-# Scope note: ratchet replaces the *closing-discipline* gate (the non-code-shaped
+# Scope note: cogpin replaces the *closing-discipline* gate (the non-code-shaped
 # lifecycle checks check_dod.py mechanizes) — NOT pixtuoid's ~25 CI jobs +
 # `just preflight`, which remain the compiled-code teeth. So there is no `run`
 # block here; the teeth are pixtuoid's existing CI.
@@ -59,7 +59,7 @@ kind = "fact"
 severity = "block"
 layer = "agent"
 primitive = "self_protect"
-paths = ["ratchet.toml", ".ratchet/ratchet.py", "justfile", ".github/workflows/**", ".claude/settings.json", ".githooks/**", ".dod/**"]
+paths = ["cogpin.toml", ".cogpin/cogpin.py", "justfile", ".github/workflows/**", ".claude/settings.json", ".githooks/**", ".dod/**"]
 
 # ── change layer (pre-push + CI, authoritative, base-pinned) ─────────────────
 
@@ -166,7 +166,7 @@ kind = "fact"
 severity = "warn"
 primitive = "commit_footer"
 
-# ── beyond check_dod.py: free ratchet baselines pixtuoid should want ─────────────
+# ── beyond check_dod.py: free cogpin baselines pixtuoid should want ─────────────
 # Not in check_dod.py, but cheap defense the engine gives for free.
 [[check]]
 id = "secret-scan"
@@ -183,7 +183,7 @@ kind = "fact"
 severity = "block"
 primitive = "protected_path"
 # post-adoption gate-defining files (check_dod.py is gone; the engine is vendored)
-paths = ["ratchet.toml", ".ratchet/ratchet.py", "justfile", ".github/workflows/**", ".claude/settings.json", ".githooks/**", ".dod/**"]
+paths = ["cogpin.toml", ".cogpin/cogpin.py", "justfile", ".github/workflows/**", ".claude/settings.json", ".githooks/**", ".dod/**"]
 
 # "Don't delete a test to go green." WARN (not block) here: pixtuoid reorganizes its
 # 8 test binaries often, and `unless_paired_add` already suppresses a paired
@@ -207,9 +207,9 @@ primitive = "forbid_removal"
 pattern = '#\[test\]|proptest!|\bassert(?:_eq|_ne|_matches)?!'
 scope = "tests"
 
-# ── agent-layer attestation (the Stop-hook checklist; `ratchet stop` enforces it) ──
+# ── agent-layer attestation (the Stop-hook checklist; `cogpin stop` enforces it) ──
 # check_dod.py: attestation_gaps() — class-gated DoD boxes the agent ticks in
-# .dod/attestation.md. `ratchet stop` blocks turn-end on an unticked REQUIRED box.
+# .dod/attestation.md. `cogpin stop` blocks turn-end on an unticked REQUIRED box.
 # always: TDD + Self-review · feature: + Design + Impl-plan · public_surface: + Docs-currency.
 [[check]]
 id = "attest-tdd"

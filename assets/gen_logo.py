@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Generate the ratchet logo: an asymmetric ratchet gear (one-way teeth) with a
-square socket-drive hole and a pawl catching a tooth — the name AND the thesis
-(a ratchet only turns one way; the gate can't be loosened). Stdlib only.
+"""Generate the cogpin logo: a cog with a square drive-pin hub and a pawl catching a
+tooth — the name AND the thesis (the pin holds the cog so it can't slip back; the gate
+can't be loosened). Stdlib only.
 
 Outputs:
   assets/logo.svg            the bare mark (brand blue, transparent) — README/hero
@@ -28,7 +28,7 @@ def _p(a, r):
 
 def gear_path():
     step = 2 * math.pi / N
-    # chunky asymmetric ratchet tooth: radial leading edge → short flat tip → ramp down.
+    # chunky asymmetric tooth: radial leading edge → short flat tip → ramp down.
     out = ["M %.2f %.2f" % _p(0.0, R_IN)]
     for i in range(N):
         a = i * step
@@ -44,7 +44,7 @@ def gear_path():
 
 
 def mark(color):
-    # the bold asymmetric ratchet gear + square socket-drive hole — one clean shape.
+    # the bold asymmetric gear + square drive-pin hole — one clean shape.
     return '<path d="%s" fill="%s" fill-rule="evenodd"/>' % (gear_path(), color)
 
 

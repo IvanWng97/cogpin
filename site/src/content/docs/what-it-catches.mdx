@@ -31,7 +31,7 @@ column is the signal each rule reads — and the agent writes none of it.
 - **`scope_lock`** — the positive A/M/D allowlist; the structural inverse of every denylist.
   *“Edit a subsystem outside the task.”* Scope creep is the single most-reported agent
   failure class, and no denylist can express “any file **not** in the allow-set.”
-- **`numeric_floor`** — the namesake ratchet. It pairs a number across the removed and added
+- **`numeric_floor`** — the one-way floor. It pairs a number across the removed and added
   lines on the same key, so *lowering* `fail_under` 85→75 (which looks byte-identical to a
   *raise* if you only scan the added lines) blocks. Disarms the very quality gate the DoD
   exists to protect.
@@ -48,12 +48,12 @@ two ways: a first-principles pass over how agents cut corners, then an **empiric
 of real AI-authored PR/commit/review history — a 30-agent sweep over nine corpora that
 surfaced 95 findings, synthesized 19 candidate gaps, and adversarially verified six as
 real, ungameable facts. The full evidence (with issue/commit citations) is the
-**[coverage map →](/ratchet/concepts/#coverage-map)**.
+**[coverage map →](/cogpin/concepts/#coverage-map)**.
 
 ## The full primitive library
 
 Every check reads only facts — never your code. The 23 below; full field reference in
-[`SCHEMA.md`](https://github.com/IvanWng97/ratchet/blob/main/SCHEMA.md).
+[`SCHEMA.md`](https://github.com/IvanWng97/cogpin/blob/main/SCHEMA.md).
 
 | primitive | kind | decides over |
 |---|---|---|
@@ -87,4 +87,4 @@ Every check reads only facts — never your code. The 23 below; full field refer
 The eight **semantic-weakening** classes a fact *can’t* prove (assertion-loosening,
 fake-impl, guard-removal, …) ship as the advisory `judge` library — see the coverage map.
 
-Want to feel it? **[Try it live →](/ratchet/try-it/)**
+Want to feel it? **[Try it live →](/cogpin/try-it/)**

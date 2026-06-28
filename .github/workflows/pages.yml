@@ -1,12 +1,12 @@
 name: pages
 
 # Build the Astro tutorial site (site/) and deploy it to GitHub Pages.
-# The playground bundles the REAL engine: prebuild vendors ../ratchet.py into
-# site/public/ratchet.py, so the page runs the exact shipped engine via Pyodide.
+# The playground bundles the REAL engine: prebuild vendors ../cogpin.py into
+# site/public/cogpin.py, so the page runs the exact shipped engine via Pyodide.
 on:
   push:
     branches: [main]
-    paths: ['site/**', 'ratchet.py', 'assets/**', '.github/workflows/pages.yml']
+    paths: ['site/**', 'cogpin.py', 'assets/**', '.github/workflows/pages.yml']
   workflow_dispatch:
 
 permissions:
@@ -33,7 +33,7 @@ jobs:
           cache: npm
           cache-dependency-path: site/package-lock.json
       - run: npm ci
-      - run: npm run build # prebuild runs sync-engine (vendors ratchet.py + glue.py + assets)
+      - run: npm run build # prebuild runs sync-engine (vendors cogpin.py + glue.py + assets)
       - uses: actions/upload-pages-artifact@v5
         with:
           path: site/dist

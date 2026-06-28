@@ -19,9 +19,9 @@ jobs:
       - name: install linters
         run: pip install ruff mypy
       - name: ruff (config in pyproject.toml)
-        run: ruff check ratchet.py tests
+        run: ruff check cogpin.py tests
       - name: mypy (engine only — the public surface)
-        run: mypy ratchet.py
+        run: mypy cogpin.py
 
   actions:
     name: actionlint

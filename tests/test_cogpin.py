@@ -1,4 +1,4 @@
-"""Stdlib-only test suite for ratchet (no pytest dependency — `python3 -m unittest`)."""
+"""Stdlib-only test suite for cogpin (no pytest dependency — `python3 -m unittest`)."""
 
 import contextlib
 import dataclasses
@@ -14,11 +14,11 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import ratchet as R  # noqa: E402
-from ratchet import (  # noqa: E402
+import cogpin as R  # noqa: E402
+from cogpin import (  # noqa: E402
+    COGPIN_BEGIN,
     HOUSE_RULE_MAP,
     PREPUSH_BLOCK,
-    RATCHET_BEGIN,
     SAFE_CORE_IDS,
     Check,
     CommandFacts,
@@ -202,12 +202,12 @@ class TestPrimitives(unittest.TestCase):
     def test_forbid_pattern_scopes_and_exempts(self):
         c = one_check(
             '[[check]]\nid="p"\nkind="fact"\nseverity="block"\nprimitive="forbid_pattern"\n'
-            'pattern="println!"\nscope="code"\nexempt="ratchet:allow"\nstrip_comments=false'
+            'pattern="println!"\nscope="code"\nexempt="cogpin:allow"\nstrip_comments=false'
         )
         r = repo()
         hit = DiffFacts(added=[("src/x.rs", '    println!("debug");')])
         self.assertIsNotNone(forbid_pattern(c, hit, r))
-        ex = DiffFacts(added=[("src/x.rs", '    println!("ok"); // ratchet:allow')])
+        ex = DiffFacts(added=[("src/x.rs", '    println!("ok"); // cogpin:allow')])
         self.assertIsNone(forbid_pattern(c, ex, r))
         oos = DiffFacts(added=[("tests/x.rs", '    println!("in test");')])
         self.assertIsNone(forbid_pattern(c, oos, r))
@@ -293,16 +293,16 @@ class TestPrimitives(unittest.TestCase):
     def test_protected_path_skips_without_pr_context(self):
         c = one_check(
             '[[check]]\nid="pp"\nkind="fact"\nseverity="block"\nprimitive="protected_path"\n'
-            'paths=["ratchet.toml","justfile"]'
+            'paths=["cogpin.toml","justfile"]'
         )
         # no PR context (approvals None) → skip, defer to CI
-        local = DiffFacts(changed=[("M", "ratchet.toml")])
+        local = DiffFacts(changed=[("M", "cogpin.toml")])
         self.assertIsNone(protected_path(c, local))
         # PR context, gate file changed, zero approvals → block
-        unapproved = DiffFacts(changed=[("M", "ratchet.toml")], approvals=[])
+        unapproved = DiffFacts(changed=[("M", "cogpin.toml")], approvals=[])
         self.assertIsNotNone(protected_path(c, unapproved))
         # PR context, gate file changed, an approval present → pass
-        approved = DiffFacts(changed=[("M", "ratchet.toml")], approvals=["reviewer-bob"])
+        approved = DiffFacts(changed=[("M", "cogpin.toml")], approvals=["reviewer-bob"])
         self.assertIsNone(protected_path(c, approved))
         # PR context, no gate file touched → pass
         unrelated = DiffFacts(changed=[("M", "src/a.rs")], approvals=[])
@@ -313,9 +313,9 @@ class TestPrimitives(unittest.TestCase):
         # NOT satisfy gate-file protection (the approve-benign-then-push-malicious bypass).
         c = one_check(
             '[[check]]\nid="pp"\nkind="fact"\nseverity="block"\nprimitive="protected_path"\n'
-            'paths=["ratchet.toml"]'
+            'paths=["cogpin.toml"]'
         )
-        touched = [("M", "ratchet.toml")]
+        touched = [("M", "cogpin.toml")]
         fresh = DiffFacts(changed=touched, head_sha="HEAD2", pr_author="alice",
                           reviews=[{"login": "bob", "state": "APPROVED", "commit_id": "HEAD2"}])
         self.assertIsNone(protected_path(c, fresh))  # fresh human non-author → pass
@@ -336,7 +336,7 @@ class TestPrimitives(unittest.TestCase):
         # under scope blocks — the "silently delete the assert/await/?" class.
         c = one_check(
             '[[check]]\nid="keep-guards"\nkind="fact"\nseverity="block"\nprimitive="forbid_removal"\n'
-            'pattern="assert|# nosec"\nscope="code"\nexempt="ratchet:allow"'
+            'pattern="assert|# nosec"\nscope="code"\nexempt="cogpin:allow"'
         )
         r = repo()
         hit = DiffFacts(removed=[("src/a.py", "    assert x == 1")])
@@ -348,7 +348,7 @@ class TestPrimitives(unittest.TestCase):
         plain = DiffFacts(removed=[("src/a.py", "    x = 1")])
         self.assertIsNone(forbid_removal(c, plain, r))
         # an exempt pragma on the removed line → allowed
-        ex = DiffFacts(removed=[("src/a.py", "    assert x  # ratchet:allow")])
+        ex = DiffFacts(removed=[("src/a.py", "    assert x  # cogpin:allow")])
         self.assertIsNone(forbid_removal(c, ex, r))
         # added lines are NOT the removed surface → pass even if they match
         added_only = DiffFacts(added=[("src/a.py", "    assert x == 1")])
@@ -826,12 +826,12 @@ class TestFullCoverage(unittest.TestCase):
     def test_self_protect(self):
         c = one_check(
             '[[check]]\nid="sp"\nkind="fact"\nseverity="block"\nlayer="agent"\nprimitive="self_protect"\n'
-            'paths=["ratchet.toml", ".ratchet/**", ".claude/settings.json"]'
+            'paths=["cogpin.toml", ".cogpin/**", ".claude/settings.json"]'
         )
-        self.assertIsNotNone(self_protect(c, "Edit", "ratchet.toml"))
-        self.assertIsNotNone(self_protect(c, "Write", ".ratchet/ratchet.py"))
+        self.assertIsNotNone(self_protect(c, "Edit", "cogpin.toml"))
+        self.assertIsNotNone(self_protect(c, "Write", ".cogpin/cogpin.py"))
         self.assertIsNone(self_protect(c, "Edit", "src/app.py"))    # not a protected path
-        self.assertIsNone(self_protect(c, "Bash", "ratchet.toml"))  # not a Write/Edit tool
+        self.assertIsNone(self_protect(c, "Bash", "cogpin.toml"))  # not a Write/Edit tool
 
     def test_require_approval_from(self):
         c = one_check(
@@ -900,14 +900,14 @@ class TestFullCoverage(unittest.TestCase):
         self.assertIsNotNone(require_checks_green(c, DiffFacts(checks=[{"name": "ci", "conclusion": None}])))  # pending
 
     def test_require_checks_green_ignore_excludes_self(self):
-        """#5: ratchet's own job is pending while it gates the same run; `ignore` drops it
+        """#5: cogpin's own job is pending while it gates the same run; `ignore` drops it
         from the all-green requirement so the gate doesn't self-block."""
         pending_self = [{"name": "ci", "conclusion": "success"},
-                        {"name": "ratchet", "conclusion": None}]  # its own job, pending
+                        {"name": "cogpin", "conclusion": None}]  # its own job, pending
         racy = one_check('[[check]]\nid="rcg"\nkind="fact"\nseverity="block"\nprimitive="require_checks_green"')
         self.assertIsNotNone(require_checks_green(racy, DiffFacts(checks=pending_self)))  # self-blocks
         guarded = one_check('[[check]]\nid="rcg"\nkind="fact"\nseverity="block"\n'
-                            'primitive="require_checks_green"\nignore=["ratchet"]')
+                            'primitive="require_checks_green"\nignore=["cogpin"]')
         self.assertIsNone(require_checks_green(guarded, DiffFacts(checks=pending_self)))  # excluded → green
         # ignore does NOT mask a genuinely failing OTHER check
         pending_self[0] = {"name": "ci", "conclusion": "failure"}
@@ -920,7 +920,7 @@ class TestFullCoverage(unittest.TestCase):
                             'kind="fact"\nseverity="block"\nprimitive="require_checks_green"')
         self.assertTrue(any("require_checks_green" in n for n in _config_advisories(racy)))
         guarded = Config.parse('schema=1\n[repo]\ndefault_branch="main"\n[[check]]\nid="rcg"\n'
-                               'kind="fact"\nseverity="block"\nprimitive="require_checks_green"\nignore=["ratchet"]')
+                               'kind="fact"\nseverity="block"\nprimitive="require_checks_green"\nignore=["cogpin"]')
         self.assertEqual(_config_advisories(guarded), [])
 
 
@@ -1188,7 +1188,7 @@ class TestHouseRuleScan(unittest.TestCase):
 
 
 def _reposcan(rules_text="", branch="main", cmd="just test"):
-    from ratchet import scan_house_rules
+    from cogpin import scan_house_rules
     return RepoScan(
         default_branch=branch, code=["src/**/*.py"], tests=["tests/**/*.py"], docs=["**/*.md"],
         test_cmd=cmd, test_cmd_source="justfile", claude_md_paths=["CLAUDE.md"],
@@ -1214,8 +1214,8 @@ class TestSuggestRender(unittest.TestCase):
 
     def test_render_has_draft_banner_and_todos(self):
         toml = render_suggest_toml(_reposcan("Use conventional commits."))
-        self.assertIn("ratchet.toml.draft", toml)
-        self.assertIn("# TODO(ratchet:review)", toml)
+        self.assertIn("cogpin.toml.draft", toml)
+        self.assertIn("# TODO(cogpin:review)", toml)
 
     def test_render_commented_blocks_for_run_and_approval(self):
         toml = render_suggest_toml(_reposcan("Run the tests. Owner approval from CODEOWNERS. Stay in scope."))
@@ -1262,10 +1262,10 @@ class TestDraftLint(unittest.TestCase):
     def test_marker_skips_blanks_not_comments(self):
         """#6: only blank lines may sit between a marker and its [[check]]. A marker above a
         commented-out check must NOT bind to a LATER live check (which would mis-flag it)."""
-        bound = '# TODO(ratchet:review)\n\n[[check]]\nid = "near"\nkind="fact"\nseverity="warn"\nprimitive="secret_scan"\n'
+        bound = '# TODO(cogpin:review)\n\n[[check]]\nid = "near"\nkind="fact"\nseverity="warn"\nprimitive="secret_scan"\n'
         self.assertEqual(_marked_ids(bound), {"near"})  # blank line still skipped
         spaced = (
-            '# TODO(ratchet:review)\n'
+            '# TODO(cogpin:review)\n'
             '# [[check]]\n'
             '# id = "commented"\n'
             '[[check]]\n'
@@ -1298,7 +1298,7 @@ class TestDraftLint(unittest.TestCase):
         self.assertIn("error", self._levels(weakened))
 
     def test_inferred_block_with_marker_rejected(self):
-        bad = self._clean() + '\n# TODO(ratchet:review): from CLAUDE.md\n[[check]]\nid = "x"\nkind = "fact"\nseverity = "block"\nprimitive = "forbid_pattern"\npattern = "foo"\nscope = "src/**/*.py"\n'
+        bad = self._clean() + '\n# TODO(cogpin:review): from CLAUDE.md\n[[check]]\nid = "x"\nkind = "fact"\nseverity = "block"\nprimitive = "forbid_pattern"\npattern = "foo"\nscope = "src/**/*.py"\n'
         self.assertIn("error", self._levels(bad))
 
     def test_weaken_existing_rejected(self):
@@ -1366,7 +1366,7 @@ class TestMoatPreservation(unittest.TestCase):
                 self.assertIn(rule.primitive, self._FACT_PRIMS, f"{rule.rid} renders block on a non-fact")
 
 
-_RATCHET = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ratchet.py")
+_COGPIN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cogpin.py")
 
 
 class TestSuggestGapsCLI(unittest.TestCase):
@@ -1375,8 +1375,8 @@ class TestSuggestGapsCLI(unittest.TestCase):
     def _git(self, *args):
         subprocess.run(["git", "-C", self.d, *args], check=True, capture_output=True, text=True)
 
-    def _ratchet(self, *args):
-        return subprocess.run([sys.executable, _RATCHET, *args, "--cwd", self.d],
+    def _cogpin(self, *args):
+        return subprocess.run([sys.executable, _COGPIN, *args, "--cwd", self.d],
                               capture_output=True, text=True, encoding="utf-8")
 
     def setUp(self):
@@ -1403,7 +1403,7 @@ class TestSuggestGapsCLI(unittest.TestCase):
             fh.write(text)
 
     def test_cli_suggest_on_python_repo(self):
-        r = self._ratchet("suggest", "--format", "json")
+        r = self._cogpin("suggest", "--format", "json")
         self.assertEqual(r.returncode, 0, r.stderr)
         import json as _json
         data = _json.loads(r.stdout)
@@ -1414,39 +1414,39 @@ class TestSuggestGapsCLI(unittest.TestCase):
         self.assertTrue(any(_glob_to_re(g).match("src/app.py") for g in data["code"]))
 
     def test_cli_suggest_toml_validates(self):
-        r = self._ratchet("suggest", "--format", "toml")
+        r = self._cogpin("suggest", "--format", "toml")
         self.assertEqual(r.returncode, 0, r.stderr)
-        draft = os.path.join(self.d, "ratchet.toml.draft")
+        draft = os.path.join(self.d, "cogpin.toml.draft")
         with open(draft, "w", encoding="utf-8") as fh:
             fh.write(r.stdout)
-        v = subprocess.run([sys.executable, _RATCHET, "validate", "--config", draft],
+        v = subprocess.run([sys.executable, _COGPIN, "validate", "--config", draft],
                            capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(v.returncode, 0, v.stdout + v.stderr)
 
     def test_cli_draft_lint_fails_on_markers(self):
-        r = self._ratchet("suggest", "--format", "toml")
-        with open(os.path.join(self.d, "ratchet.toml.draft"), "w", encoding="utf-8") as fh:
+        r = self._cogpin("suggest", "--format", "toml")
+        with open(os.path.join(self.d, "cogpin.toml.draft"), "w", encoding="utf-8") as fh:
             fh.write(r.stdout)
-        dl = self._ratchet("draft-lint")
+        dl = self._cogpin("draft-lint")
         self.assertEqual(dl.returncode, 1)  # markers remain
         self.assertIn("TODO", dl.stdout)
 
     def test_cli_draft_lint_clean_after_markers_removed(self):
-        r = self._ratchet("suggest", "--format", "toml")
+        r = self._cogpin("suggest", "--format", "toml")
         cleaned = "\n".join(ln for ln in r.stdout.splitlines()
-                            if not ln.lstrip().startswith("# TODO(ratchet:review)"))
-        with open(os.path.join(self.d, "ratchet.toml.draft"), "w", encoding="utf-8") as fh:
+                            if not ln.lstrip().startswith("# TODO(cogpin:review)"))
+        with open(os.path.join(self.d, "cogpin.toml.draft"), "w", encoding="utf-8") as fh:
             fh.write(cleaned)
-        dl = self._ratchet("draft-lint")
+        dl = self._cogpin("draft-lint")
         self.assertEqual(dl.returncode, 0, dl.stdout + dl.stderr)
 
     def test_cli_gaps_roundtrip(self):
-        r = self._ratchet("suggest", "--format", "toml")
+        r = self._cogpin("suggest", "--format", "toml")
         cleaned = "\n".join(ln for ln in r.stdout.splitlines()
-                            if not ln.lstrip().startswith("# TODO(ratchet:review)"))
-        with open(os.path.join(self.d, "ratchet.toml"), "w", encoding="utf-8") as fh:
+                            if not ln.lstrip().startswith("# TODO(cogpin:review)"))
+        with open(os.path.join(self.d, "cogpin.toml"), "w", encoding="utf-8") as fh:
             fh.write(cleaned)
-        g = self._ratchet("gaps")
+        g = self._cogpin("gaps")
         self.assertEqual(g.returncode, 0, g.stderr)
 
 
@@ -1464,29 +1464,29 @@ class TestBlockHelpers(unittest.TestCase):
     def test_append_when_absent(self):
         out = _replace_or_append_block("#!/bin/sh\necho hi\n", PREPUSH_BLOCK)
         self.assertTrue(out.startswith("#!/bin/sh\necho hi\n"))
-        self.assertIn(RATCHET_BEGIN, out)
+        self.assertIn(COGPIN_BEGIN, out)
 
     def test_replace_in_place_no_double_append(self):
         once = _replace_or_append_block("#!/bin/sh\n", PREPUSH_BLOCK)
         twice = _replace_or_append_block(once, PREPUSH_BLOCK)
         self.assertEqual(once, twice)  # byte-idempotent
-        self.assertEqual(once.count(RATCHET_BEGIN), 1)
+        self.assertEqual(once.count(COGPIN_BEGIN), 1)
 
     def test_append_adds_separator_when_no_trailing_newline(self):
         out = _replace_or_append_block("echo hi", PREPUSH_BLOCK)
-        self.assertIn("echo hi\n" + RATCHET_BEGIN, out)
+        self.assertIn("echo hi\n" + COGPIN_BEGIN, out)
 
     def test_replace_preserves_surrounding(self):
         cur = _replace_or_append_block("#!/bin/sh\nA\n", PREPUSH_BLOCK) + "Z\n"
         out = _replace_or_append_block(cur, PREPUSH_BLOCK)
         self.assertIn("#!/bin/sh\nA\n", out)
         self.assertTrue(out.rstrip().endswith("Z"))
-        self.assertEqual(out.count(RATCHET_BEGIN), 1)
+        self.assertEqual(out.count(COGPIN_BEGIN), 1)
 
     def test_strip_removes_exactly_the_span(self):
         cur = "#!/bin/sh\nA\n" + PREPUSH_BLOCK + "Z\n"
         out = _strip_block(cur)
-        self.assertNotIn(RATCHET_BEGIN, out)
+        self.assertNotIn(COGPIN_BEGIN, out)
         self.assertIn("A\n", out)
         self.assertIn("Z\n", out)
 
@@ -1574,16 +1574,16 @@ class TestEnsureGitignore(_GitRepo):
         _ensure_gitignore(self.d)
         _ensure_gitignore(self.d)
         gi = self._read(".gitignore")
-        self.assertIn(".ratchet/.state", gi)
-        self.assertNotIn(".ratchet/\n", gi)  # never the whole dir
-        self.assertEqual(gi.count(".ratchet/.state"), 1)  # no dup
+        self.assertIn(".cogpin/.state", gi)
+        self.assertNotIn(".cogpin/\n", gi)  # never the whole dir
+        self.assertEqual(gi.count(".cogpin/.state"), 1)  # no dup
 
     def test_preserves_existing(self):
         self._w(".gitignore", "node_modules\n")
         _ensure_gitignore(self.d)
         gi = self._read(".gitignore")
         self.assertIn("node_modules", gi)
-        self.assertIn(".ratchet/.state", gi)
+        self.assertIn(".cogpin/.state", gi)
 
 
 class TestHookTarget(_GitRepo):
@@ -1629,17 +1629,17 @@ class TestInstall(_GitRepo):
     def test_install_all(self):
         rc, _ = _quiet(cmd_install, self.d)
         self.assertEqual(rc, 0)
-        eng = os.path.join(self.d, ".ratchet", "ratchet.py")
+        eng = os.path.join(self.d, ".cogpin", "cogpin.py")
         self.assertTrue(os.path.exists(eng))
         subprocess.run([sys.executable, "-m", "py_compile", eng], check=True)
-        self.assertTrue(os.path.exists(os.path.join(self.d, "ratchet.toml")))
+        self.assertTrue(os.path.exists(os.path.join(self.d, "cogpin.toml")))
         pp = self._read(".git/hooks/pre-push")
-        self.assertIn(RATCHET_BEGIN, pp)
-        self.assertIn("[ -f .ratchet/ratchet.py ]", pp)  # inert guard
+        self.assertIn(COGPIN_BEGIN, pp)
+        self.assertIn("[ -f .cogpin/cogpin.py ]", pp)  # inert guard
         if os.name != "nt":  # Windows has no POSIX exec bit
             self.assertTrue(os.stat(self._prepush()).st_mode & 0o111)
-        self.assertTrue(os.path.exists(os.path.join(self.d, ".github", "workflows", "ratchet.yml")))
-        self.assertIn(".ratchet/.state", self._read(".gitignore"))
+        self.assertTrue(os.path.exists(os.path.join(self.d, ".github", "workflows", "cogpin.yml")))
+        self.assertIn(".cogpin/.state", self._read(".gitignore"))
 
     def test_idempotent(self):
         _quiet(cmd_install, self.d)
@@ -1654,30 +1654,30 @@ class TestInstall(_GitRepo):
         _quiet(cmd_install, self.d)
         pp = self._read(".git/hooks/pre-push")
         self.assertIn("echo custom", pp)
-        self.assertLess(pp.index("echo custom"), pp.index(RATCHET_BEGIN))  # runs first
+        self.assertLess(pp.index("echo custom"), pp.index(COGPIN_BEGIN))  # runs first
 
     def test_replaces_stale_block_in_place(self):
-        stale = "#!/bin/sh\necho keep\n" + RATCHET_BEGIN + "\nOLD GARBAGE\n# <<< ratchet <<<\n"
+        stale = "#!/bin/sh\necho keep\n" + COGPIN_BEGIN + "\nOLD GARBAGE\n# <<< cogpin <<<\n"
         self._w(".git/hooks/pre-push", stale)
         _quiet(cmd_install, self.d)
         pp = self._read(".git/hooks/pre-push")
         self.assertIn("echo keep", pp)
         self.assertNotIn("OLD GARBAGE", pp)
-        self.assertEqual(pp.count(RATCHET_BEGIN), 1)
+        self.assertEqual(pp.count(COGPIN_BEGIN), 1)
 
     def test_non_clobber_existing_config_and_ci(self):
-        self._w("ratchet.toml", "schema = 1\n# mine\n")
-        self._w(".github/workflows/ratchet.yml", "# mine\n")
+        self._w("cogpin.toml", "schema = 1\n# mine\n")
+        self._w(".github/workflows/cogpin.yml", "# mine\n")
         _quiet(cmd_install, self.d)
-        self.assertIn("# mine", self._read("ratchet.toml"))
-        self.assertIn("# mine", self._read(".github/workflows/ratchet.yml"))
+        self.assertIn("# mine", self._read("cogpin.toml"))
+        self.assertIn("# mine", self._read(".github/workflows/cogpin.yml"))
 
     def test_flag_scope_no_hook_no_ci(self):
         rc, _ = _quiet(cmd_install, self.d, hook=False, ci=False)
         self.assertEqual(rc, 0)
-        self.assertTrue(os.path.exists(os.path.join(self.d, ".ratchet", "ratchet.py")))
+        self.assertTrue(os.path.exists(os.path.join(self.d, ".cogpin", "cogpin.py")))
         self.assertFalse(os.path.exists(self._prepush()))
-        self.assertFalse(os.path.exists(os.path.join(self.d, ".github", "workflows", "ratchet.yml")))
+        self.assertFalse(os.path.exists(os.path.join(self.d, ".github", "workflows", "cogpin.yml")))
 
     def test_lefthook_writes_no_prepush(self):
         self._w("lefthook.yml", "pre-commit:\n")
@@ -1695,11 +1695,11 @@ class TestInstall(_GitRepo):
         os.chmod(pp, 0o640)  # rw-r----- : non-exec, narrower than 0o755
         _install_prepush(pp)
         self.assertEqual(os.stat(pp).st_mode & 0o777, 0o751)  # preserved 0o640 + ensured +x
-        self.assertIn(RATCHET_BEGIN, self._read(".git/hooks/pre-push"))
+        self.assertIn(COGPIN_BEGIN, self._read(".git/hooks/pre-push"))
 
     @unittest.skipIf(os.name == "nt", "Windows has no POSIX exec bit (git-for-windows sh runs the hook regardless)")
     def test_prepush_new_hook_is_executable(self):
-        """A hook ratchet authors from scratch is 0o755."""
+        """A hook cogpin authors from scratch is 0o755."""
         pp = self._prepush()
         os.makedirs(os.path.dirname(pp), exist_ok=True)
         _install_prepush(pp)
@@ -1708,7 +1708,7 @@ class TestInstall(_GitRepo):
     def test_self_vendor_short_circuits(self):
         """Running install FROM the already-vendored copy must not truncate it."""
         _quiet(cmd_install, self.d)
-        vendored = os.path.join(self.d, ".ratchet", "ratchet.py")
+        vendored = os.path.join(self.d, ".cogpin", "cogpin.py")
         size_before = os.path.getsize(vendored)
         r = subprocess.run([sys.executable, vendored, "install", "--cwd", self.d, "--no-config", "--no-hook", "--no-ci"],
                            capture_output=True, text=True, encoding="utf-8")
@@ -1724,9 +1724,9 @@ class TestInstall(_GitRepo):
     def test_install_substitutes_default_branch(self):
         self._git("checkout", "-q", "-b", "trunk")  # non-main default
         _quiet(cmd_install, self.d)
-        self.assertIn('default_branch = "trunk"', self._read("ratchet.toml"))
-        self.assertIn('branch = ["trunk"]', self._read("ratchet.toml"))
-        self.assertIn("branches: [trunk]", self._read(".github/workflows/ratchet.yml"))
+        self.assertIn('default_branch = "trunk"', self._read("cogpin.toml"))
+        self.assertIn('branch = ["trunk"]', self._read("cogpin.toml"))
+        self.assertIn("branches: [trunk]", self._read(".github/workflows/cogpin.yml"))
 
 
 class TestUninstall(_GitRepo):
@@ -1736,20 +1736,20 @@ class TestUninstall(_GitRepo):
         rc, _ = _quiet(cmd_uninstall, self.d)
         self.assertEqual(rc, 0)
         pp = self._read(".git/hooks/pre-push")
-        self.assertNotIn(RATCHET_BEGIN, pp)
+        self.assertNotIn(COGPIN_BEGIN, pp)
         self.assertIn("echo custom", pp)
 
     def test_deletes_only_authored_file(self):
-        _quiet(cmd_install, self.d)  # ratchet authored the whole pre-push
+        _quiet(cmd_install, self.d)  # cogpin authored the whole pre-push
         _quiet(cmd_uninstall, self.d)
         self.assertFalse(os.path.exists(self._prepush()))
 
     def test_never_removes_committed_source(self):
         _quiet(cmd_install, self.d)
         _quiet(cmd_uninstall, self.d)
-        self.assertTrue(os.path.exists(os.path.join(self.d, ".ratchet", "ratchet.py")))
-        self.assertTrue(os.path.exists(os.path.join(self.d, "ratchet.toml")))
-        self.assertTrue(os.path.exists(os.path.join(self.d, ".github", "workflows", "ratchet.yml")))
+        self.assertTrue(os.path.exists(os.path.join(self.d, ".cogpin", "cogpin.py")))
+        self.assertTrue(os.path.exists(os.path.join(self.d, "cogpin.toml")))
+        self.assertTrue(os.path.exists(os.path.join(self.d, ".github", "workflows", "cogpin.yml")))
 
 
 class TestDoctor(_GitRepo):
@@ -1760,14 +1760,14 @@ class TestDoctor(_GitRepo):
         self.assertIn("change layer ready", out)
 
     def test_missing_engine_exits_1(self):
-        self._w("ratchet.toml", "schema = 1\n[repo]\ndefault_branch=\"main\"\ncode=[\"src/**\"]\n")
+        self._w("cogpin.toml", "schema = 1\n[repo]\ndefault_branch=\"main\"\ncode=[\"src/**\"]\n")
         rc, _ = _quiet(cmd_doctor, self.d)
         self.assertEqual(rc, 1)
 
     def test_invalid_config_exits_1(self):
         _quiet(cmd_install, self.d)
         # a block without kind=fact violates the moat → Config.parse raises
-        self._w("ratchet.toml", 'schema = 1\n[repo]\ndefault_branch="main"\ncode=["src/**"]\n'
+        self._w("cogpin.toml", 'schema = 1\n[repo]\ndefault_branch="main"\ncode=["src/**"]\n'
                                 '[[check]]\nid="x"\nkind="judge"\nseverity="block"\nprimitive="secret_scan"\n')
         rc, _ = _quiet(cmd_doctor, self.d)
         self.assertEqual(rc, 1)
@@ -1793,11 +1793,11 @@ class TestProtectsGateFiles(unittest.TestCase):
 
     def test_requires_engine_config_and_ci(self):
         # engine + config but NO workflow coverage → not fully protected (the engine-neuter hole)
-        self.assertFalse(_protects_gate_files(self._cfg([".ratchet/**", "ratchet.toml"])))
+        self.assertFalse(_protects_gate_files(self._cfg([".cogpin/**", "cogpin.toml"])))
         # all three covered → protected
-        self.assertTrue(_protects_gate_files(self._cfg([".ratchet/**", "ratchet.toml", ".github/workflows/**"])))
-        # ratchet's own repo shape (root engine, not vendored) also counts
-        self.assertTrue(_protects_gate_files(self._cfg(["ratchet.py", "ratchet.toml", ".github/workflows/**"])))
+        self.assertTrue(_protects_gate_files(self._cfg([".cogpin/**", "cogpin.toml", ".github/workflows/**"])))
+        # cogpin's own repo shape (root engine, not vendored) also counts
+        self.assertTrue(_protects_gate_files(self._cfg(["cogpin.py", "cogpin.toml", ".github/workflows/**"])))
 
 
 if __name__ == "__main__":
@@ -1857,7 +1857,7 @@ class TestSelfProtectAbsolutePaths(unittest.TestCase):
     def _check(self):
         return one_check(
             '[[check]]\nid="sp"\nkind="fact"\nseverity="block"\nlayer="agent"\nprimitive="self_protect"\n'
-            'paths=["ratchet.toml", "ratchet.py", ".github/workflows/**", ".claude-plugin/**", "hooks/hooks.json"]'
+            'paths=["cogpin.toml", "cogpin.py", ".github/workflows/**", ".claude-plugin/**", "hooks/hooks.json"]'
         )
 
     def test_absolute_multisegment_paths_blocked(self):
@@ -1866,7 +1866,7 @@ class TestSelfProtectAbsolutePaths(unittest.TestCase):
             "/abs/repo/.github/workflows/self-gate.yml",
             "/abs/repo/.claude-plugin/marketplace.json",
             "/abs/repo/hooks/hooks.json",
-            "/abs/repo/ratchet.toml",
+            "/abs/repo/cogpin.toml",
         ):
             self.assertIsNotNone(self_protect(c, "Write", abspath), abspath)
         # a non-gate absolute path still passes, and backslash (Windows) paths are covered
@@ -1911,8 +1911,8 @@ class TestApprovalHardening(unittest.TestCase):
 
     def test_empty_login_never_qualifies_protected_path(self):
         c = one_check('[[check]]\nid="pp"\nkind="fact"\nseverity="block"\nprimitive="protected_path"\n'
-                      'paths=["ratchet.toml"]')
-        ghost = DiffFacts(changed=[("M", "ratchet.toml")], head_sha="H", pr_author="alice",
+                      'paths=["cogpin.toml"]')
+        ghost = DiffFacts(changed=[("M", "cogpin.toml")], head_sha="H", pr_author="alice",
                           reviews=[{"login": "", "state": "APPROVED", "commit_id": "H"}])
         self.assertIsNotNone(protected_path(c, ghost))  # deleted/ghost account (login "") → block
 
@@ -1934,8 +1934,8 @@ class TestApprovalHardening(unittest.TestCase):
 
     def test_protected_path_blocks_missing_or_empty_commit_id(self):
         c = one_check('[[check]]\nid="pp"\nkind="fact"\nseverity="block"\nprimitive="protected_path"\n'
-                      'paths=["ratchet.toml"]')
-        touched = [("M", "ratchet.toml")]
+                      'paths=["cogpin.toml"]')
+        touched = [("M", "cogpin.toml")]
         absent = DiffFacts(changed=touched, head_sha="H2", pr_author="alice",
                            reviews=[{"login": "bob", "state": "APPROVED"}])  # no commit_id key
         self.assertIsNotNone(protected_path(c, absent))
@@ -1996,7 +1996,7 @@ class TestReviewLoaders(unittest.TestCase):
         return p
 
     def test_load_reviews_nested_graphql_shape(self):
-        from ratchet import _load_reviews
+        from cogpin import _load_reviews
         p = self._tmp("r.json",
                       '[{"author":{"login":"bob","is_bot":false},"state":"APPROVED",'
                       '"commit":{"oid":"abc"},"authorAssociation":"MEMBER"}]')
@@ -2005,20 +2005,20 @@ class TestReviewLoaders(unittest.TestCase):
                                 "is_bot": False, "author_association": "MEMBER"}])
 
     def test_load_reviews_flat_shape(self):
-        from ratchet import _load_reviews
+        from cogpin import _load_reviews
         p = self._tmp("r.json", '[{"login":"amy","state":"APPROVED","commit_id":"def","is_bot":false}]')
         out = _load_reviews(p)
         self.assertEqual(out[0]["login"], "amy")
         self.assertEqual(out[0]["commit_id"], "def")
 
     def test_load_reviews_degrades_safe(self):
-        from ratchet import _load_reviews
+        from cogpin import _load_reviews
         self.assertIsNone(_load_reviews(self._tmp("r.json", "not json")))  # garbled → None (skip)
         self.assertIsNone(_load_reviews(self._tmp("r.json", '{"not":"a list"}')))
         self.assertIsNone(_load_reviews("/nonexistent/path.json"))
 
     def test_load_checks_conclusion_fallback_and_degrade(self):
-        from ratchet import _load_checks
+        from cogpin import _load_checks
         p = self._tmp("c.json", '[{"name":"ci","state":"SUCCESS"},{"context":"build","status":"FAILURE"}]')
         out = _load_checks(p)
         self.assertEqual(out[0], {"name": "ci", "conclusion": "SUCCESS"})
@@ -2036,7 +2036,7 @@ class TestHookEntrypoints(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.d = self.tmp.name
-        with open(os.path.join(self.d, "ratchet.toml"), "w", encoding="utf-8") as fh:
+        with open(os.path.join(self.d, "cogpin.toml"), "w", encoding="utf-8") as fh:
             fh.write('schema=1\n[repo]\ndefault_branch="main"\n[[check]]\nid="nv"\nkind="fact"\n'
                      'severity="block"\nlayer="agent"\nprimitive="forbid_command"\npattern="--no-verify"\n')
 
@@ -2044,7 +2044,7 @@ class TestHookEntrypoints(unittest.TestCase):
         self.tmp.cleanup()
 
     def _gate(self, stdin):
-        return subprocess.run([sys.executable, _RATCHET, "gate"], input=stdin,
+        return subprocess.run([sys.executable, _COGPIN, "gate"], input=stdin,
                               capture_output=True, text=True, cwd=self.d)
 
     def test_cmd_gate_malformed_payload_never_blocks(self):
@@ -2091,35 +2091,35 @@ class TestBasePinning(unittest.TestCase):
     LOOSE = 'schema=1\n[repo]\ndefault_branch="main"\n[meta]\nbase_pinned=true\n'
 
     def test_load_config_reads_base_not_working_tree(self):
-        from ratchet import load_config
-        self._w("ratchet.toml", self.STRICT)
+        from cogpin import load_config
+        self._w("cogpin.toml", self.STRICT)
         self._git("add", "-A")
         self._git("commit", "-qm", "base")
         base = self._sha()
-        self._w("ratchet.toml", self.LOOSE)  # dirty working tree loosens the policy
+        self._w("cogpin.toml", self.LOOSE)  # dirty working tree loosens the policy
         self.assertEqual(len(load_config(self.d, base).checks), 1, "must read the STRICT base config")
 
     def test_load_config_base_pinned_false_defers_to_working_tree(self):
-        from ratchet import load_config
+        from cogpin import load_config
         off = self.STRICT.replace("base_pinned=true", "base_pinned=false")
-        self._w("ratchet.toml", off)
+        self._w("cogpin.toml", off)
         self._git("add", "-A")
         self._git("commit", "-qm", "base")
         base = self._sha()
-        self._w("ratchet.toml", self.LOOSE)  # working tree: 0 checks
+        self._w("cogpin.toml", self.LOOSE)  # working tree: 0 checks
         self.assertEqual(len(load_config(self.d, base).checks), 0, "base_pinned=false → working-tree policy")
 
     def test_load_config_missing_base_toml_falls_back(self):
-        from ratchet import load_config
+        from cogpin import load_config
         self._w("README.md", "x")
         self._git("add", "-A")
         self._git("commit", "-qm", "no toml yet")
         base = self._sha()
-        self._w("ratchet.toml", self.STRICT)  # only in the working tree
-        self.assertEqual(len(load_config(self.d, base).checks), 1, "base lacks ratchet.toml → fallback")
+        self._w("cogpin.toml", self.STRICT)  # only in the working tree
+        self.assertEqual(len(load_config(self.d, base).checks), 1, "base lacks cogpin.toml → fallback")
 
     def test_resolve_base_authoritative_fails_closed(self):
-        from ratchet import BaseUnreachable, _resolve_base
+        from cogpin import BaseUnreachable, _resolve_base
         self._w("a.txt", "1")
         self._git("add", "-A")
         self._git("commit", "-qm", "c1")
@@ -2131,7 +2131,7 @@ class TestBasePinning(unittest.TestCase):
         self.assertEqual(_resolve_base(self.d, "ghost", authoritative=False), self._sha("HEAD~1"))
 
     def test_resolve_base_uses_remote_tracking_ref(self):
-        from ratchet import _resolve_base
+        from cogpin import _resolve_base
         self._w("a.txt", "1")
         self._git("add", "-A")
         self._git("commit", "-qm", "c1")
@@ -2146,8 +2146,8 @@ class TestBasePinning(unittest.TestCase):
         # The fix: with the trusted --default-branch, the base is the merge-base over origin/main,
         # so a forbidden file added in an EARLIER PR commit is still in range (can't be hidden
         # behind a later clean commit by redirecting the base).
-        from ratchet import cmd_check
-        self._w("ratchet.toml", self.STRICT)
+        from cogpin import cmd_check
+        self._w("cogpin.toml", self.STRICT)
         self._git("add", "-A")
         self._git("commit", "-qm", "base")
         self._git("update-ref", "refs/remotes/origin/main", self._sha())
@@ -2162,8 +2162,8 @@ class TestBasePinning(unittest.TestCase):
         self.assertEqual(rc, 1, "the .env added across the full base..HEAD range must be caught")
 
     def test_authoritative_unreachable_base_fails_closed_e2e(self):
-        from ratchet import cmd_check
-        self._w("ratchet.toml", self.STRICT)
+        from cogpin import cmd_check
+        self._w("cogpin.toml", self.STRICT)
         self._git("add", "-A")
         self._git("commit", "-qm", "base")
         self._w("clean.txt", "ok")
@@ -2188,7 +2188,7 @@ class TestNoDrift(unittest.TestCase):
     a false failure, only misses a dead field) — keep the convention or update the scan."""
 
     _ENGINE_SRC = inspect.getsource(R)
-    _ROOT = os.path.dirname(_RATCHET)
+    _ROOT = os.path.dirname(_COGPIN)
 
     def _doc(self, rel):
         with open(os.path.join(self._ROOT, rel), encoding="utf-8") as fh:
@@ -2292,7 +2292,7 @@ class TestPrimitiveSpecs(unittest.TestCase):
 
     def test_layer_placement_guard_is_table_driven(self):
         # live-signal primitives are rejected at the change layer; a normal fact primitive is fine
-        for prim, extra in (("self_protect", 'paths=["ratchet.toml"]'),
+        for prim, extra in (("self_protect", 'paths=["cogpin.toml"]'),
                             ("forbid_commit_on_branch", 'branch=["main"]')):
             bad = ('schema=1\n[repo]\ndefault_branch="main"\n[[check]]\nid="x"\nkind="fact"\n'
                    f'severity="warn"\nlayer="change"\nprimitive="{prim}"\n{extra}\n')
@@ -2412,7 +2412,7 @@ class TestReview5Robustness(unittest.TestCase):
 
     # checks-file — a present-but-GARBLED checks file fails CLOSED for a need-scoped check
     def test_garbled_checks_file_fails_closed(self):
-        self._write("ratchet.toml", self._RCG)
+        self._write("cogpin.toml", self._RCG)
         self._commit("base")
         self._git("update-ref", "refs/remotes/origin/main", self._head())
         self._write("clean.txt", "ok")
@@ -2426,7 +2426,7 @@ class TestReview5Robustness(unittest.TestCase):
 
     # checks-file — a genuinely ABSENT checks file still SKIPS (no false-block)
     def test_absent_checks_file_skips(self):
-        self._write("ratchet.toml", self._RCG)
+        self._write("cogpin.toml", self._RCG)
         self._commit("base")
         self._git("update-ref", "refs/remotes/origin/main", self._head())
         self._write("clean.txt", "ok")
@@ -2527,7 +2527,7 @@ class TestProvenanceMoat(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# #24 — [capability] is a DECLARED floor (policy), not enforcement: ratchet parses +
+# #24 — [capability] is a DECLARED floor (policy), not enforcement: cogpin parses +
 # validates it and compiles it to the harness via `capability emit`; it never contains.
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -2541,7 +2541,7 @@ class TestCapability(unittest.TestCase):
         self.tmp.cleanup()
 
     def _cfg(self, cap_toml):
-        with open(os.path.join(self.d, "ratchet.toml"), "w", encoding="utf-8") as fh:
+        with open(os.path.join(self.d, "cogpin.toml"), "w", encoding="utf-8") as fh:
             fh.write('schema=1\n[repo]\ndefault_branch="main"\n' + cap_toml)
 
     def _settings(self):
@@ -2612,7 +2612,7 @@ class TestCapability(unittest.TestCase):
         self._cfg('[capability]\nno_network=true\nbackend="docker"\n')
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(R.cmd_capability_emit(self.d), 0)
-        self.assertFalse(self._settings_exists())  # ratchet declares; it does not emit for docker
+        self.assertFalse(self._settings_exists())  # cogpin declares; it does not emit for docker
 
     def test_emit_dry_run_writes_nothing(self):
         self._cfg('[capability]\ndeny_commands=["curl"]\n')
@@ -2661,7 +2661,7 @@ class TestCapability(unittest.TestCase):
             self.assertNotIn(managed, s["permissions"].get("allow", []))
 
     def test_emit_full_empty_deletes_permissions_when_only_managed(self):
-        # if ratchet's entries were the ONLY thing in permissions, retraction drops the whole key
+        # if cogpin's entries were the ONLY thing in permissions, retraction drops the whole key
         self._cfg('[capability]\ndeny_commands=["curl"]\n')
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             R.cmd_capability_emit(self.d)
@@ -2706,7 +2706,7 @@ class TestCapability(unittest.TestCase):
 
     def test_emit_user_managed_collision_preserved_and_idempotent(self):
         # a user-authored entry that renders identically to a managed one must (a) be idempotent
-        # across repeated emits and (b) survive a later retract — ratchet must never claim it as
+        # across repeated emits and (b) survive a later retract — cogpin must never claim it as
         # managed (sidecar records owned-only, not the full render)
         os.makedirs(os.path.join(self.d, ".claude"))
         with open(os.path.join(self.d, ".claude", "settings.json"), "w") as fh:
@@ -2778,26 +2778,26 @@ class TestStopFailSafe(unittest.TestCase):
     def test_notices_on_unloadable_present_config(self):
         # a present-but-invalid config (unknown primitive — the stale-engine signature) must
         # tell the user the real-time gate is OFF, not vanish
-        with open(os.path.join(self.d, "ratchet.toml"), "w", encoding="utf-8") as fh:
+        with open(os.path.join(self.d, "cogpin.toml"), "w", encoding="utf-8") as fh:
             fh.write(_STALE_CFG)
         rc, out, err = _cap3(R.cmd_stop, self.d)
         self.assertEqual(rc, 0)
         self.assertEqual(out.strip(), "{}")          # decision contract intact
         self.assertIn("real-time gate OFF", err)     # notice on stderr
-        self.assertIn("ratchet doctor", err)
+        self.assertIn("cogpin doctor", err)
 
     def test_silent_when_no_config(self):
-        # no ratchet.toml → genuinely nothing to gate → no notice (would be noise)
+        # no cogpin.toml → genuinely nothing to gate → no notice (would be noise)
         rc, out, err = _cap3(R.cmd_stop, self.d)
         self.assertEqual(rc, 0)
         self.assertEqual(out.strip(), "{}")
         self.assertEqual(err, "")
 
     def test_notice_keyed_on_existence_not_exception_type(self):
-        # a present-but-UNREADABLE config (a directory named ratchet.toml → IsADirectoryError,
+        # a present-but-UNREADABLE config (a directory named cogpin.toml → IsADirectoryError,
         # an OSError not a ConfigError) must STILL notice — proves the branch keys on
         # os.path.exists, not on the exception class
-        os.mkdir(os.path.join(self.d, "ratchet.toml"))
+        os.mkdir(os.path.join(self.d, "cogpin.toml"))
         rc, out, err = _cap3(R.cmd_stop, self.d)
         self.assertEqual(rc, 0)
         self.assertEqual(out.strip(), "{}")
@@ -2805,7 +2805,7 @@ class TestStopFailSafe(unittest.TestCase):
 
     def test_decision_json_uncorrupted(self):
         # the notice must never leak onto stdout (it carries the Stop-hook JSON decision)
-        with open(os.path.join(self.d, "ratchet.toml"), "w", encoding="utf-8") as fh:
+        with open(os.path.join(self.d, "cogpin.toml"), "w", encoding="utf-8") as fh:
             fh.write(_STALE_CFG)
         _, out, err = _cap3(R.cmd_stop, self.d)
         self.assertEqual(out.strip(), "{}")          # byte-exact decision, no notice text
@@ -2885,8 +2885,8 @@ class TestDoctorSkew(_GitRepo):
     def test_reports_stale_vendored_engine(self):
         # vendored engine knows only secret_scan/forbid_command; config uses numeric_floor →
         # doctor must surface the stale-engine skew and fail (exit 1)
-        self._w(".ratchet/ratchet.py", self._OLD_ENGINE)
-        self._w("ratchet.toml", self._CFG)
+        self._w(".cogpin/cogpin.py", self._OLD_ENGINE)
+        self._w("cogpin.toml", self._CFG)
         rc, out = _quiet(cmd_doctor, self.d)
         self.assertEqual(rc, 1)
         self.assertIn("STALE", out)
@@ -2895,13 +2895,13 @@ class TestDoctorSkew(_GitRepo):
     def test_clean_when_engine_matches_config(self):
         # vendored == running engine knows everything the config uses → no STALE row
         _quiet(cmd_install, self.d)
-        self._w("ratchet.toml", self._CFG)
+        self._w("cogpin.toml", self._CFG)
         rc, out = _quiet(cmd_doctor, self.d)
         self.assertNotIn("STALE", out)
 
     def test_unsupported_schema_hint(self):
         _quiet(cmd_install, self.d)
-        self._w("ratchet.toml", 'schema = 999\n[repo]\ndefault_branch="main"\ncode=["src/**"]\n')
+        self._w("cogpin.toml", 'schema = 999\n[repo]\ndefault_branch="main"\ncode=["src/**"]\n')
         rc, out = _quiet(cmd_doctor, self.d)
         self.assertEqual(rc, 1)
         self.assertIn("running engine may be stale", out)
@@ -2909,7 +2909,7 @@ class TestDoctorSkew(_GitRepo):
 
 class TestUpdate(_GitRepo):
     def _eng(self):
-        return os.path.join(self.d, ".ratchet", "ratchet.py")
+        return os.path.join(self.d, ".cogpin", "cogpin.py")
 
     def test_revendors_and_reports(self):
         rc, out, _ = _cap3(R.cmd_update, self.d)
@@ -2939,7 +2939,7 @@ class TestUpdate(_GitRepo):
             rc, _, err = _cap3(R.cmd_update, nogit)
             self.assertEqual(rc, 1)
             self.assertIn("not a git repository", err)
-            self.assertFalse(os.path.exists(os.path.join(nogit, ".ratchet", "ratchet.py")))
+            self.assertFalse(os.path.exists(os.path.join(nogit, ".cogpin", "cogpin.py")))
 
 
 # ── #17: report-only rollout switch + backtest-over-history ──
@@ -2957,7 +2957,7 @@ class TestReportOnly(_GitRepo):
 
     def _blocking(self):
         # C0 carries the (base-pinned) config; C1 adds a SECRET in a code file → change-layer block
-        self._commit("base", **{"ratchet.toml": _BLOCK_CFG, "keep.txt": "x"})
+        self._commit("base", **{"cogpin.toml": _BLOCK_CFG, "keep.txt": "x"})
         self._commit("leak", **{"leak.py": "API_SECRET = 1\n"})
 
     def test_report_only_returns_0_despite_block(self):
@@ -2970,7 +2970,7 @@ class TestReportOnly(_GitRepo):
         self.assertEqual(rc2, 1)
 
     def test_report_only_clean_repo_returns_0(self):
-        self._commit("base", **{"ratchet.toml": _BLOCK_CFG, "keep.txt": "x"})
+        self._commit("base", **{"cogpin.toml": _BLOCK_CFG, "keep.txt": "x"})
         self._commit("clean", **{"ok.py": "value = 1\n"})
         rc, out = _quiet(R.cmd_check, self.d, report_only=True)
         self.assertEqual(rc, 0)
@@ -2979,7 +2979,7 @@ class TestReportOnly(_GitRepo):
     def test_report_only_still_fails_on_base_unreachable(self):
         # authoritative base (a --default-branch CI never fetched) MUST still fail closed,
         # even under report-only — it's an infra error, not a policy finding
-        self._commit("c0", **{"ratchet.toml": _BLOCK_CFG, "a.txt": "1"})
+        self._commit("c0", **{"cogpin.toml": _BLOCK_CFG, "a.txt": "1"})
         self._commit("c1", **{"b.txt": "2"})
         rc, _, err = _cap3(R.cmd_check, self.d, report_only=True, default_branch_arg="ghost-branch")
         self.assertEqual(rc, 1)
@@ -2989,7 +2989,7 @@ class TestReportOnly(_GitRepo):
         # an unloadable base-pinned config fails closed even under report-only
         bad = ('schema = 1\n[repo]\ndefault_branch = "main"\ncode=["*.py"]\n[meta]\nbase_pinned=true\n'
                '[[check]]\nid="x"\nkind="judge"\nseverity="block"\nprimitive="secret_scan"\n')  # block w/o fact
-        self._commit("c0", **{"ratchet.toml": bad, "a.txt": "1"})
+        self._commit("c0", **{"cogpin.toml": bad, "a.txt": "1"})
         self._commit("c1", **{"b.txt": "2"})   # HEAD~1 (the base) carries the bad config
         rc, _, err = _cap3(R.cmd_check, self.d, report_only=True)
         self.assertEqual(rc, 1)
@@ -3004,7 +3004,7 @@ class TestBacktest(_GitRepo):
         self._git("commit", "-q", "-m", msg)
 
     def test_flags_blocking_commit(self):
-        self._commit("c0", **{"ratchet.toml": _BLOCK_CFG})
+        self._commit("c0", **{"cogpin.toml": _BLOCK_CFG})
         self._commit("c1", **{"a.py": "ok = 1\n"})
         self._commit("c2", **{"b.py": "X_SECRET = 2\n"})   # the offender
         self._commit("c3", **{"c.py": "fine = 3\n"})
@@ -3015,7 +3015,7 @@ class TestBacktest(_GitRepo):
         self.assertEqual(out.count("✗"), 1)
 
     def test_clean_history(self):
-        self._commit("c0", **{"ratchet.toml": _BLOCK_CFG})
+        self._commit("c0", **{"cogpin.toml": _BLOCK_CFG})
         self._commit("c1", **{"a.py": "ok = 1\n"})
         self._commit("c2", **{"b.py": "fine = 2\n"})
         rc, out = _quiet(R.cmd_backtest, self.d, "HEAD~2..HEAD")
@@ -3023,27 +3023,27 @@ class TestBacktest(_GitRepo):
         self.assertIn("0/2 commit(s) would block", out)
 
     def test_invalid_range_exits_2(self):
-        self._commit("c0", **{"ratchet.toml": _BLOCK_CFG})
+        self._commit("c0", **{"cogpin.toml": _BLOCK_CFG})
         rc, _, err = _cap3(R.cmd_backtest, self.d, "no-such-ref-xyz..HEAD")
         self.assertEqual(rc, 2)
         self.assertIn("invalid range", err)
 
     def test_empty_range_exits_0(self):
-        self._commit("c0", **{"ratchet.toml": _BLOCK_CFG})
+        self._commit("c0", **{"cogpin.toml": _BLOCK_CFG})
         rc, out = _quiet(R.cmd_backtest, self.d, "HEAD..HEAD")
         self.assertEqual(rc, 0)
         self.assertIn("no commits in range", out)
 
     def test_skips_root_no_crash(self):
         # a range spanning the root commit (empty %P) must skip it, never traceback
-        self._commit("c0", **{"ratchet.toml": _BLOCK_CFG})
+        self._commit("c0", **{"cogpin.toml": _BLOCK_CFG})
         self._commit("c1", **{"a.py": "ok = 1\n"})
         rc, out = _quiet(R.cmd_backtest, self.d, "HEAD")   # all history incl. root
         self.assertEqual(rc, 0)
         self.assertIn("would block", out)
 
     def test_fail_on_block_exits_1(self):
-        self._commit("c0", **{"ratchet.toml": _BLOCK_CFG})
+        self._commit("c0", **{"cogpin.toml": _BLOCK_CFG})
         self._commit("c1", **{"b.py": "Y_SECRET = 1\n"})
         rc, _ = _quiet(R.cmd_backtest, self.d, "HEAD~1..HEAD", fail_on_block=True)
         self.assertEqual(rc, 1)
@@ -3052,7 +3052,7 @@ class TestBacktest(_GitRepo):
         # a commit predating the config is still judged by the CURRENT working config
         self._commit("c0", **{"seed.txt": "1"})
         self._commit("c1", **{"old.py": "Z_SECRET = 1\n"})   # added BEFORE the config existed
-        self._commit("c2", **{"ratchet.toml": _BLOCK_CFG})   # config arrives last
+        self._commit("c2", **{"cogpin.toml": _BLOCK_CFG})   # config arrives last
         rc, out = _quiet(R.cmd_backtest, self.d, "HEAD~2..HEAD")
         self.assertEqual(rc, 0)
         self.assertIn("1/2 commit(s) would block", out)   # c1 flagged by today's policy
@@ -3062,7 +3062,7 @@ class TestBacktest(_GitRepo):
         cfg = ('schema = 1\n[repo]\ndefault_branch = "main"\ncode = ["*.dat"]\n[meta]\nbase_pinned = true\n'
                '[[check]]\nid = "no-big"\nkind = "fact"\nseverity = "block"\nlayer = "change"\n'
                'primitive = "max_added_file_bytes"\nmaxkb = 1\nscope = "code"\n')
-        self._commit("c0", **{"ratchet.toml": cfg})
+        self._commit("c0", **{"cogpin.toml": cfg})
         self._commit("c1", **{"big.dat": "x" * 2048})   # 2KB > 1KB cap
         rc, out = _quiet(R.cmd_backtest, self.d, "HEAD~1..HEAD")
         self.assertEqual(rc, 0)
@@ -3073,7 +3073,7 @@ class TestBacktest(_GitRepo):
         # a `run` block is never executed by backtest (allow_run=False) and is named as blind
         cfg = (_BLOCK_CFG + '[[check]]\nid = "suite"\nkind = "fact"\nseverity = "block"\n'
                'layer = "change"\nprimitive = "run"\ncmd = "exit 1"\n')
-        self._commit("c0", **{"ratchet.toml": cfg})
+        self._commit("c0", **{"cogpin.toml": cfg})
         self._commit("c1", **{"a.py": "ok = 1\n"})        # no SECRET; run would fail IF executed
         rc, out = _quiet(R.cmd_backtest, self.d, "HEAD~1..HEAD")
         self.assertEqual(rc, 0)
@@ -3082,8 +3082,8 @@ class TestBacktest(_GitRepo):
         self.assertIn("NOT evaluated", out)
 
     def test_cli_invalid_range(self):
-        self._commit("c0", **{"ratchet.toml": _BLOCK_CFG})
-        out = subprocess.run([sys.executable, os.path.join(os.path.dirname(R.__file__), "ratchet.py"),
+        self._commit("c0", **{"cogpin.toml": _BLOCK_CFG})
+        out = subprocess.run([sys.executable, os.path.join(os.path.dirname(R.__file__), "cogpin.py"),
                               "backtest", "--cwd", self.d, "--range", "bogus..HEAD"],
                              capture_output=True, text=True)
         self.assertEqual(out.returncode, 2)
@@ -3106,7 +3106,7 @@ class TestBacktest(_GitRepo):
 
     def test_missing_config_file_names_it(self):
         # a typo'd --config must say "no such file", not the misleading "schema version 0"
-        self._commit("c0", **{"ratchet.toml": _BLOCK_CFG})
+        self._commit("c0", **{"cogpin.toml": _BLOCK_CFG})
         rc, _, err = _cap3(R.cmd_backtest, self.d, "HEAD", config=os.path.join(self.d, "nope.toml"))
         self.assertEqual(rc, 2)
         self.assertIn("no such config file", err)
@@ -3273,7 +3273,7 @@ class TestFixtureCmd(_GitRepo):
     def _fx(self, **files):
         for rel, txt in files.items():
             self._w(rel, txt)
-        self._w("ratchet.toml", _FX_CFG)
+        self._w("cogpin.toml", _FX_CFG)
 
     def test_expect_block_met(self):
         self._fx(**{"leak.diff": _FX_ADD})
@@ -3307,7 +3307,7 @@ class TestFixtureCmd(_GitRepo):
         rc, _, err = _cap3(R.cmd_fixture, self.d, os.path.join(self.d, "leak.diff"),
                            expect_block="ghost")
         self.assertEqual(rc, 2)
-        self.assertIn("not in ratchet.toml", err)
+        self.assertIn("not in cogpin.toml", err)
 
     def test_overlapping_expect_returns_2(self):
         self._fx(**{"leak.diff": _FX_ADD})
@@ -3318,7 +3318,7 @@ class TestFixtureCmd(_GitRepo):
 
     def test_blind_expect_returns_2(self):
         # expecting a `run` check (un-evaluable by a diff fixture) must error, not falsely pass
-        self._w("ratchet.toml", _FX_CFG + '[[check]]\nid = "suite"\nkind = "fact"\n'
+        self._w("cogpin.toml", _FX_CFG + '[[check]]\nid = "suite"\nkind = "fact"\n'
                 'severity = "block"\nlayer = "change"\nprimitive = "run"\ncmd = "true"\n')
         self._w("leak.diff", _FX_ADD)
         rc, _, err = _cap3(R.cmd_fixture, self.d, os.path.join(self.d, "leak.diff"),
@@ -3347,12 +3347,12 @@ class TestFixtureCmd(_GitRepo):
         self.assertIn("not a git-format unified diff", err)
 
     def test_bad_config_returns_2(self):
-        self._w("ratchet.toml", "this is not = valid toml [[[")
+        self._w("cogpin.toml", "this is not = valid toml [[[")
         self._w("leak.diff", _FX_ADD)
         rc, _, err = _cap3(R.cmd_fixture, self.d, os.path.join(self.d, "leak.diff"),
                            expect_block="no-secret")
         self.assertEqual(rc, 2)
-        self.assertIn("cannot load ratchet.toml", err)
+        self.assertIn("cannot load cogpin.toml", err)
 
     def test_preview_without_expectations_returns_0(self):
         self._fx(**{"leak.diff": _FX_ADD})
@@ -3365,7 +3365,7 @@ class TestFixtureCmd(_GitRepo):
         # a path_requires(when_marker) is blind WITHOUT a body file, evaluable WITH one
         cfg = (_FX_CFG + '[[check]]\nid = "migrate-docs"\nkind = "fact"\nseverity = "block"\n'
                'primitive = "path_requires"\nwhen_marker = "MIGRATION"\nneed = ["docs"]\n')
-        self._w("ratchet.toml", cfg)
+        self._w("cogpin.toml", cfg)
         self._w("leak.diff", _FX_ADD)   # touches new.py, NOT docs/
         self._w("body.md", "This PR does a MIGRATION\n")
         # without the body → blind → exit 2
@@ -3382,7 +3382,7 @@ class TestFixtureCmd(_GitRepo):
     def test_cli_diff_file_routes_to_fixture(self):
         # the `check --diff-file` surface must route through main() to cmd_fixture
         self._fx(**{"leak.diff": _FX_ADD})
-        engine = os.path.join(os.path.dirname(R.__file__), "ratchet.py")
+        engine = os.path.join(os.path.dirname(R.__file__), "cogpin.py")
         r = subprocess.run([sys.executable, engine, "check", "--cwd", self.d,
                             "--diff-file", os.path.join(self.d, "leak.diff"),
                             "--expect-block", "no-secret"], capture_output=True, text=True)
@@ -3464,7 +3464,7 @@ class TestFixtureReviewFixes(_GitRepo):
     """End-to-end cmd_fixture coverage for the review fixes."""
 
     def _w_cfg(self, extra=""):
-        self._w("ratchet.toml", _FXB_CFG + extra)
+        self._w("cogpin.toml", _FXB_CFG + extra)
 
     def test_expect_commit_footer_blind_without_msg(self):
         self._w_cfg()
@@ -3548,7 +3548,7 @@ class TestFixtureReviewFixes(_GitRepo):
 
     def test_expect_block_against_warn_check_fails_with_reason(self):
         # a block→warn demotion is a real regression a fixture should catch (exit 1, not 2)
-        self._w("ratchet.toml", _FX_CFG)   # no-todo is severity=warn
+        self._w("cogpin.toml", _FX_CFG)   # no-todo is severity=warn
         self._w("todo.diff", "diff --git a/x.py b/x.py\nnew file mode 100644\n--- /dev/null\n"
                 "+++ b/x.py\n@@ -0,0 +1 @@\n+x = 1  # TODO fix\n")
         rc, _, err = _cap3(R.cmd_fixture, self.d, os.path.join(self.d, "todo.diff"),
@@ -3584,16 +3584,16 @@ class TestMonorepoExample(unittest.TestCase):
     anti-under-coverage gate the example must ship with (not `validate --config` alone)."""
 
     def setUp(self):
-        root = os.path.dirname(os.path.abspath(R.__file__))   # ratchet.py sits at the repo root
+        root = os.path.dirname(os.path.abspath(R.__file__))   # cogpin.py sits at the repo root
         self.mono = os.path.join(root, "examples", "monorepo")
-        if not os.path.exists(os.path.join(self.mono, "ratchet.toml")):
+        if not os.path.exists(os.path.join(self.mono, "cogpin.toml")):
             self.skipTest("examples/monorepo not present")
 
     def _fx(self, name):
         return os.path.join(self.mono, "fixtures", name)
 
     def test_config_validates(self):
-        with open(os.path.join(self.mono, "ratchet.toml"), encoding="utf-8") as fh:
+        with open(os.path.join(self.mono, "cogpin.toml"), encoding="utf-8") as fh:
             cfg = Config.parse(fh.read())   # parses + passes the moat (raises ConfigError otherwise)
         ids = {c.id for c in cfg.checks}
         self.assertTrue({"no-rust-dbg", "no-js-console", "no-py-debugger"} <= ids)

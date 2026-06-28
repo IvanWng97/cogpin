@@ -1,29 +1,29 @@
 ---
 // The hero: an auto-looping "agent session" terminal. An AI agent reaches for three
-// corner-cuts — skip the hook, delete the failing test, commit to main — and ratchet
+// corner-cuts — skip the hook, delete the failing test, commit to main — and cogpin
 // intercepts each in real time, then the agent self-corrects. Pure CSS/JS, no deps.
 // SSR ships a static "caught" frame (works with JS off); the script hydrates it into
 // the loop, and honors prefers-reduced-motion by leaving the static frame in place.
 ---
 
-<div class="hd" role="img" aria-label="An AI agent tries to skip the hook, delete a failing test, and commit to main; ratchet blocks each in real time and the agent fixes it properly.">
+<div class="hd" role="img" aria-label="An AI agent tries to skip the hook, delete a failing test, and commit to main; cogpin blocks each in real time and the agent fixes it properly.">
   <div class="hd-term">
     <div class="hd-bar">
       <span class="hd-dot r"></span><span class="hd-dot y"></span><span class="hd-dot g"></span>
       <span class="hd-title">agent session</span>
-      <span class="hd-live"><i></i>ratchet armed</span>
+      <span class="hd-live"><i></i>cogpin armed</span>
     </div>
     <div class="hd-body" data-term>
       <div class="hd-ln cmd">git commit --no-verify -m "ship it"</div>
-      <div class="hd-ln block"><b>⛔ ratchet · blocked</b><span>--no-verify denied before it ran</span></div>
+      <div class="hd-ln block"><b>⛔ cogpin · blocked</b><span>--no-verify denied before it ran</span></div>
       <div class="hd-ln del">tests/test_auth.py</div>
-      <div class="hd-ln block"><b>⛔ ratchet · blocked</b><span>forbid_delete · don’t delete the failing test</span></div>
+      <div class="hd-ln block"><b>⛔ cogpin · blocked</b><span>forbid_delete · don’t delete the failing test</span></div>
       <div class="hd-ln cmd branch" data-branch="main">git commit -m wip</div>
-      <div class="hd-ln block"><b>⛔ ratchet · blocked</b><span>branch-first · you’re on main</span></div>
+      <div class="hd-ln block"><b>⛔ cogpin · blocked</b><span>branch-first · you’re on main</span></div>
       <div class="hd-ln ok"><b>✓ fixed properly</b><span>tests ran · on a branch · committed</span></div>
     </div>
   </div>
-  <p class="hd-cap">Prose asks. <b>ratchet enforces.</b> — over facts the agent can’t fake.</p>
+  <p class="hd-cap">Prose asks. <b>cogpin enforces.</b> — over facts the agent can’t fake.</p>
 </div>
 
 <style>
@@ -106,17 +106,17 @@
   const ACTS: Step[][] = [
     [
       { k: 'cmd', t: 'git commit --no-verify -m "ship it"' },
-      { k: 'block', t: '⛔ ratchet · blocked', d: '--no-verify denied before it ran' },
+      { k: 'block', t: '⛔ cogpin · blocked', d: '--no-verify denied before it ran' },
       { k: 'cmd', t: 'git commit -m "ship it"' },
       { k: 'ok', t: '✓ allowed', d: 'the hook ran · committed' },
     ],
     [
       { k: 'del', t: 'tests/test_auth.py' },
-      { k: 'block', t: '⛔ ratchet · blocked', d: 'forbid_delete · don’t delete the failing test' },
+      { k: 'block', t: '⛔ cogpin · blocked', d: 'forbid_delete · don’t delete the failing test' },
     ],
     [
       { k: 'cmd', t: 'git commit -m wip', branch: 'main' },
-      { k: 'block', t: '⛔ ratchet · blocked', d: 'branch-first · you’re on main' },
+      { k: 'block', t: '⛔ cogpin · blocked', d: 'branch-first · you’re on main' },
       { k: 'cmd', t: 'git checkout -b fix/auth', branch: 'main' },
       { k: 'ok', t: '✓ fixed properly', d: 'on a branch · tests ran · committed' },
     ],
