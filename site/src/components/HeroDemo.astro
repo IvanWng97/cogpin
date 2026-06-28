@@ -13,14 +13,30 @@
       <span class="hd-title">agent session</span>
       <span class="hd-live"><i></i>cogpin armed</span>
     </div>
-    <div class="hd-body" data-term>
-      <div class="hd-ln cmd">git commit --no-verify -m "ship it"</div>
-      <div class="hd-ln block"><b>⛔ cogpin · blocked</b><span>--no-verify denied before it ran</span></div>
-      <div class="hd-ln del">tests/test_auth.py</div>
-      <div class="hd-ln block"><b>⛔ cogpin · blocked</b><span>forbid_delete · don’t delete the failing test</span></div>
-      <div class="hd-ln cmd branch" data-branch="main">git commit -m wip</div>
-      <div class="hd-ln block"><b>⛔ cogpin · blocked</b><span>branch-first · you’re on main</span></div>
-      <div class="hd-ln ok"><b>✓ fixed properly</b><span>tests ran · on a branch · committed</span></div>
+    <div class="hd-body">
+      <!-- Height reserver: an inert, hidden clone of the tallest frame. The terminal
+           swaps between acts of different lengths; without a reserved height the card
+           grows/shrinks each loop — visible as a pulse once lines wrap on narrow
+           screens. The clone wraps identically at any width, so the card height is
+           always the tallest frame's: stable, no JS measurement, no resize listener. -->
+      <div class="hd-reserve" aria-hidden="true">
+        <div class="hd-ln cmd">git commit --no-verify -m "ship it"</div>
+        <div class="hd-ln block"><b>⛔ cogpin · blocked</b><span>--no-verify denied before it ran</span></div>
+        <div class="hd-ln del">tests/test_auth.py</div>
+        <div class="hd-ln block"><b>⛔ cogpin · blocked</b><span>forbid_delete · don’t delete the failing test</span></div>
+        <div class="hd-ln cmd branch" data-branch="main">git commit -m wip</div>
+        <div class="hd-ln block"><b>⛔ cogpin · blocked</b><span>branch-first · you’re on main</span></div>
+        <div class="hd-ln ok"><b>✓ fixed properly</b><span>tests ran · on a branch · committed</span></div>
+      </div>
+      <div class="hd-stage" data-term>
+        <div class="hd-ln cmd">git commit --no-verify -m "ship it"</div>
+        <div class="hd-ln block"><b>⛔ cogpin · blocked</b><span>--no-verify denied before it ran</span></div>
+        <div class="hd-ln del">tests/test_auth.py</div>
+        <div class="hd-ln block"><b>⛔ cogpin · blocked</b><span>forbid_delete · don’t delete the failing test</span></div>
+        <div class="hd-ln cmd branch" data-branch="main">git commit -m wip</div>
+        <div class="hd-ln block"><b>⛔ cogpin · blocked</b><span>branch-first · you’re on main</span></div>
+        <div class="hd-ln ok"><b>✓ fixed properly</b><span>tests ran · on a branch · committed</span></div>
+      </div>
     </div>
   </div>
   <p class="hd-cap">Prose asks. <b>cogpin enforces.</b> — over facts the agent can’t fake.</p>
@@ -55,7 +71,12 @@
   .hd-live i { width: 7px; height: 7px; border-radius: 50%; background: #4ea1ff; box-shadow: 0 0 8px #4ea1ff; animation: hd-pulse 1.6s ease-in-out infinite; }
   @keyframes hd-pulse { 50% { opacity: .35; } }
 
-  .hd-body { padding: 16px 18px; min-height: 232px; font-size: 13.5px; line-height: 1.5; }
+  /* Grid-stack the hidden reserver and the live stage in one cell: the card height
+     tracks the tallest frame (the reserver) at every width, so swapping acts never
+     reflows it. `contain: layout` isolates that from the rest of the page. */
+  .hd-body { padding: 16px 18px; font-size: 13.5px; line-height: 1.5; display: grid; contain: layout; }
+  .hd-body > .hd-reserve, .hd-body > .hd-stage { grid-area: 1 / 1; min-width: 0; }
+  .hd-reserve { visibility: hidden; }
   .hd-ln { margin: 3px 0; color: #c4cdda; white-space: pre-wrap; word-break: break-word; }
   .hd-ln.cmd::before { content: "$ "; color: #5b6675; }
   .hd-ln.cmd { color: #e7edf5; }
@@ -85,7 +106,7 @@
   @keyframes hd-blink { 50% { opacity: 0; } }
   @keyframes hd-shake { 0%,100%{transform:translateX(0)} 20%{transform:translateX(-4px)} 40%{transform:translateX(4px)} 60%{transform:translateX(-2px)} 80%{transform:translateX(2px)} }
 
-  @media (max-width: 480px) { .hd-body { min-height: 270px; font-size: 12.5px; } }
+  @media (max-width: 480px) { .hd-body { font-size: 12.5px; } }
 
   /* The JS leaves the static frame for reduced-motion; also stop the decorative
      chrome (rotating glow, pulsing dot, blinking cursor). */

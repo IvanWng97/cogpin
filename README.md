@@ -4,6 +4,22 @@
 <p align="center"><b>A Definition-of-Done gate for AI coding agents.</b><br>
 Your AI agent says “done.” cogpin makes sure it is.</p>
 
+<p align="center">
+  <a href="https://github.com/IvanWng97/cogpin/actions/workflows/ci.yml"><img src="https://github.com/IvanWng97/cogpin/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue.svg" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/dependencies-0-brightgreen.svg" alt="zero dependencies">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT"></a>
+  <img src="https://img.shields.io/badge/Claude%20Code-plugin-8A63D2.svg" alt="Claude Code plugin">
+</p>
+
+<p align="center">
+  <a href="https://ivanwng97.github.io/cogpin/try-it/"><b>▶ Try it live</b></a> ·
+  <a href="https://ivanwng97.github.io/cogpin/"><b>Tutorial</b></a> ·
+  <a href="#install"><b>Install</b></a> ·
+  <a href="#why-its-bypass-proof"><b>Why it’s bypass-proof</b></a> ·
+  <a href="#the-primitive-library"><b>Primitives</b></a>
+</p>
+
 <p align="center"><img src="assets/concept.svg" alt="Prose asks; cogpin enforces" width="840"></p>
 
 When an AI agent closes a task it tends to skip the unglamorous last mile —
