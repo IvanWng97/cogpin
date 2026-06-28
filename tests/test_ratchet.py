@@ -253,8 +253,8 @@ class TestPrimitives(unittest.TestCase):
         self.assertIsNone(marker_present(c, DiffFacts(), r))
 
     def test_marker_present_when_gated_to_code(self):
-        c = one_check(
-            '[[check]]\nid="m"\nkind="fact"\nseverity="block"\nprimitive="marker_present"\n'
+        c = one_check(  # warn: marker_present is agent-provenance, cannot block (the #22 moat)
+            '[[check]]\nid="m"\nkind="fact"\nseverity="warn"\nprimitive="marker_present"\n'
             'marker="Two-lens-review:"\nwhen="code"'
         )
         r = repo()
@@ -2354,3 +2354,64 @@ class TestReview5Introspection(unittest.TestCase):
         with open(os.path.join(self.d, "justfile"), "wb") as fh:
             fh.write(b"# \xff a latin-1 comment\nbuild:\n\techo hi\n")  # no `test:` target
         self.assertEqual(R.detect_test_command(self.d), (None, None))  # must not raise UnicodeDecodeError
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #22 — the tightened moat: severity=block REQUIRES kind=fact AND provenance=environment.
+# An agent-authored claim token (a self-typed marker, a ticked box) is gameable by the
+# gated agent → it may only warn/attest, never hard-block. Closes the principal-agent
+# hole INSIDE the fact set (a self-typed two-lens marker could hard-block before).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestProvenanceMoat(unittest.TestCase):
+    def _block(self, primitive, extra=""):
+        return (f'[[check]]\nid="x"\nkind="fact"\nseverity="block"\nprimitive="{primitive}"\n{extra}')
+
+    def test_spec_provenance_pinned(self):
+        # exactly these three are agent-provenance; everything else is environment
+        self.assertEqual(R._AGENT_PROVENANCE, {"marker_present", "attest", "judge"})
+        for p in ("secret_scan", "require_checks_green", "run", "forbid_in_message",
+                  "require_message_pattern", "commit_footer", "cooccur", "path_requires"):
+            self.assertEqual(R.PRIMITIVE_SPECS[p].provenance, "environment", f"{p} must be environment")
+        for p in ("marker_present", "attest", "judge"):
+            self.assertEqual(R.PRIMITIVE_SPECS[p].provenance, "agent", f"{p} must be agent")
+
+    def test_marker_present_block_rejected(self):
+        # the #22 exhibit: a self-typed PR-body marker may no longer hard-block
+        with self.assertRaises(ConfigError):
+            Config.parse('schema=1\n[repo]\ndefault_branch="main"\n' +
+                         self._block("marker_present", "marker='(?i)two-lens-review\\\\s*:'"))
+
+    def test_marker_present_warn_still_valid(self):
+        cfg = Config.parse('schema=1\n[repo]\ndefault_branch="main"\n[[check]]\nid="x"\nkind="fact"\n'
+                            'severity="warn"\nprimitive="marker_present"\nmarker="X"\n')
+        self.assertEqual(len(cfg.checks), 1)
+
+    def test_every_agent_provenance_primitive_cannot_block(self):
+        # the moat invariant, table-driven: no agent-provenance primitive may be authored block
+        for p in R._AGENT_PROVENANCE:
+            with self.assertRaises(ConfigError, msg=f"{p} block must be rejected"):
+                Config.parse('schema=1\n[repo]\ndefault_branch="main"\n' +
+                             self._block(p, "marker=\"X\"\npattern=\"X\"\nprompt=\"X\""))
+
+    def test_cooccur_block_ignores_agent_authored_text(self):
+        # a BLOCK cooccur must rest only on the diff (environment): the require token typed
+        # into the PR body / a commit message must NOT satisfy it — else the gated agent
+        # clears the gate by typing the token (the marker_present hole, re-opened via cooccur).
+        blk = one_check('[[check]]\nid="co"\nkind="fact"\nseverity="block"\nprimitive="cooccur"\n'
+                        'trigger="MIGRATION"\nrequire="rollback"')
+        # trigger in the diff (environment) so the rule fires; require ONLY in agent text → blocks
+        typed = DiffFacts(added=[("db.sql", "-- MIGRATION add table")],
+                          pr_body="rollback: see below", commit_msgs=["chore: rollback ready"])
+        self.assertIsNotNone(cooccur(blk, typed), "PR-body/commit token must NOT satisfy a block cooccur")
+        # require actually in the diff → satisfied
+        indiff = DiffFacts(added=[("db.sql", "-- MIGRATION add table"), ("down.sql", "rollback steps")])
+        self.assertIsNone(cooccur(blk, indiff))
+
+    def test_cooccur_warn_still_accepts_pr_body(self):
+        # a WARN cooccur keeps the forcing-function convenience: PR-body/commit text satisfies it
+        wrn = one_check('[[check]]\nid="co"\nkind="fact"\nseverity="warn"\nprimitive="cooccur"\n'
+                        'trigger="BREAKING"\nrequire="CHANGELOG"')
+        self.assertIsNone(cooccur(wrn, DiffFacts(pr_body="BREAKING", commit_msgs=["docs: CHANGELOG"])))
+        self.assertIsNotNone(cooccur(wrn, DiffFacts(pr_body="BREAKING change only")))

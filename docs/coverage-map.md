@@ -89,6 +89,20 @@ can always change the base policy *through review*. The line ratchet draws: anyt
 agent can do **mid-task** to cut a corner, it stops; anything that needs **human
 judgment** stays advisory and visible — a boundary the schema itself enforces.
 
+**Provenance — the second clause of the moat.** `block` requires not just `kind="fact"` but
+`provenance="environment"`: the fact must be produced by git / the harness / the PR API, never
+a token the gated agent *types*. This closes a hole *inside* the fact set — a self-typed
+`marker_present` ("two-lens-review:") is a verifiable string, yet it only **claims** an
+out-of-band event the agent can fabricate, so it may only **warn**, not block. To gate a review,
+block on a real non-author approval (`require_approval_from` / `approval_policy`). The honest
+edges: the message/number families (`require_message_pattern`, `commit_footer`,
+`file_must_contain`, `forbid_in_message`, `numeric_floor`) stay `environment` because the
+regulated artifact *is* the committed text/number — but an author can abuse them to encode an
+event-claim as a required phrase or hand-edit a metric; that abuse is structurally invisible to
+provenance, so point event-claims at `attest`/`judge` and pair `numeric_floor` with a
+`run`-generated metric file. The `marker_present`-vs-message line is drawn on *typical use*, not
+raw fabricability.
+
 **Fail-closed acquisition.** A fact gate only holds if it sees the *whole* change. So the
 change layer refuses rather than passes when it can't: an unresolvable `base..HEAD` range
 (a shallow clone — `actions/checkout`'s depth-1 default — or an unfetched base ref) exits

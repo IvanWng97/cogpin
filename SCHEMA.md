@@ -7,12 +7,28 @@ enforces everything below at parse time.
 ## The one rule
 
 ```
-severity = "block"   REQUIRES   kind = "fact"
+severity = "block"   REQUIRES   kind = "fact"  AND  provenance = "environment"
 ```
 
-Only an ungameable **fact** may hard-block. A judgment (`judge`, `attest`) can
-warn or nudge but never blocks. `validate` rejects any `block` + non-`fact`
-check — the guarantee can't silently erode through config.
+Only an ungameable, **environment-authored** fact may hard-block — two clauses, both
+enforced by `validate`:
+
+1. **`kind="fact"`** — a judgment (`judge`, `attest`) can warn or nudge but never blocks.
+2. **`provenance="environment"`** — the fact must be produced by git / the harness / the PR
+   API (a real diff, file status, branch, CI conclusion, a non-author approval), **not** a
+   token the gated agent *types* that merely claims an out-of-band event. So `marker_present`
+   (a self-typed PR-body marker) is `kind="fact"` but `provenance="agent"` → it may only
+   **warn**. To actually *gate* a review, block on a real non-author approval
+   (`require_approval_from` / `approval_policy`).
+
+Provenance is a property of each primitive's `Spec`; the guarantee can't silently erode
+through config. **Caveat (not enforceable structurally):** the message/number families
+(`require_message_pattern`, `file_must_contain`, `commit_footer`, `forbid_in_message`,
+`numeric_floor`) are `provenance="environment"` because the regulated artifact *is* the
+committed text/number — but an author can still abuse them to encode an event-claim as a
+required phrase (`"Tested: yes"`) or hand-edit a metric. For event-claims, use `attest`/`judge`;
+pair `numeric_floor` with a `run`-generated metric file. The `marker_present`-vs-message line is
+drawn on *typical use* (a marker has no non-attestation use), not on raw fabricability.
 
 ---
 
@@ -56,7 +72,7 @@ to expand to these globs, or give a literal glob directly.
 |---|---|---|---|
 | `id` | string | ✓ | unique identifier (duplicate ids are a config error) |
 | `kind` | `fact` \| `advisory` | ✓ | `fact` = ungameable; `advisory` = judged |
-| `severity` | `block` \| `warn` \| `attest` \| `judge` | ✓ | `block` requires `kind="fact"` |
+| `severity` | `block` \| `warn` \| `attest` \| `judge` | ✓ | `block` requires `kind="fact"` **and** `provenance="environment"` (see The one rule) |
 | `primitive` | string | ✓ | one of the primitives below |
 | `layer` | `agent` \| `change` \| `both` | `change` | where it fires |
 
@@ -148,7 +164,7 @@ The agent's command string.
 |---|---|---|
 | `path_requires` | `when`, `need`, `when_marker` | a `when`-scoped path changed (or `when_marker` matched the PR body) but no `need` path did |
 | `cooccur` | `trigger`, `require` | `trigger` appears (diff/PR/commit) but `require` does not |
-| `marker_present` | `marker`, `when` | a `when`-scoped change lacks `marker` in the PR body (skips with no PR context) |
+| `marker_present` | `marker`, `when` | a `when`-scoped change lacks `marker` in the PR body (skips with no PR context). **`provenance="agent"` → `warn` only**: the marker is self-typed, so it can't hard-block (use a real approval to gate review) |
 | `forbid_in_message` | `tokens`, `msg_scope` | a forbidden literal token is in the selected message scope(s) |
 | `require_message_pattern` | `pattern`, `msg_scope` (default `commit_subject`) | a selected message does **not** match `pattern` |
 | `commit_footer` | — (uses `[meta].commit_footer`) | a commit lacks the footer |
