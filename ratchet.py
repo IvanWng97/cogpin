@@ -465,16 +465,23 @@ class DiffFacts:
     def from_range(cwd: str, base: str, head: str = "HEAD") -> "DiffFacts":
         rng = f"{base}..{head}"
         f = DiffFacts()
-        ns = _git(cwd, ["diff", "--name-status", rng])
+        # core.quotepath=false emits non-ASCII paths RAW (UTF-8), not octal-escaped as
+        # `"caf\303\251.txt"`, so a path round-trips to `cat-file -s` (max_added_file_bytes)
+        # and to scope matching. Control chars (newline/tab/quote) stay escaped regardless,
+        # so the tab/newline record framing below is never broken by a path.
+        ns = _git(cwd, ["-c", "core.quotepath=false", "diff", "--name-status", rng])
         if ns:
-            for line in ns.splitlines():
+            # split("\n"), NOT splitlines(): the latter also breaks on \v \f \x1c-\x1e \x85
+            # U+2028/U+2029 — bytes git emits verbatim inside a unicode path, which would
+            # split one record into two and drop the tail (a false-negative).
+            for line in ns.split("\n"):
                 parts = line.split("\t")
                 if len(parts) < 2:
                     continue
                 st = parts[0][:1]
                 status = {"A": ADDED, "D": DELETED}.get(st, MODIFIED)
                 f.changed.append((status, parts[-1]))
-        diff = _git(cwd, ["diff", "--unified=0", rng])
+        diff = _git(cwd, ["-c", "core.quotepath=false", "diff", "--unified=0", rng])
         if diff:
             # +++ b/<path> / --- a/<path> are FILE HEADERS, but a removed/added CONTENT line
             # can itself start with `--- `/`+++ ` (an SQL/Lua `-- ` comment renders as
@@ -484,7 +491,12 @@ class DiffFacts:
             # file — a scoped forbid_removal/secret_scan false-negative.
             new_path = old_path = ""
             in_hunk = False
-            for line in diff.splitlines():
+            for raw in diff.split("\n"):
+                # split("\n") + rstrip("\r"): preserve CRLF normalization (git terminates
+                # lines with \n; a CRLF file's content keeps its trailing \r) WITHOUT
+                # splitlines()'s over-eager break on \v \f \x85 U+2028/9 inside a content
+                # line, which would sever an added line and drop the post-separator token.
+                line = raw.rstrip("\r")
                 if line.startswith("diff --git "):
                     in_hunk = False  # next file's preamble begins
                 elif line.startswith("@@"):
@@ -542,6 +554,15 @@ def _git(cwd: str, args: list[str]) -> str | None:
             ["git", "-C", cwd, *args],
             capture_output=True,
             text=True,
+            # surrogateescape round-trips ANY bytes losslessly: a non-UTF-8 byte in the
+            # diff (a latin-1 source line, a near-binary blob git treats as text) must NOT
+            # raise the strict locale decode — that's a ValueError, swallowed below to None,
+            # which empties DiffFacts and SILENTLY PASSES the content scanners on the
+            # authoritative layer. ASCII-shaped facts (secrets, tokens) still match the
+            # valid spans; the engine's own stdout uses errors="replace" (cmd CLI setup),
+            # so a stray surrogate can't crash a later print.
+            encoding="utf-8",
+            errors="surrogateescape",
             check=False,
         )
     except (OSError, ValueError):
@@ -720,7 +741,7 @@ def _msg_targets(facts: DiffFacts, scopes: set[str]) -> list[str]:
     """The commit/PR message strings selected by `scopes` (commit_subject/body/pr_body)."""
     out: list[str] = []
     for msg in facts.commit_msgs:
-        lines = msg.splitlines()
+        lines = msg.split("\n")  # not splitlines(): a U+2028/NEL in a body must not re-split
         if "commit_subject" in scopes and lines:
             out.append(lines[0])
         if "commit_body" in scopes and len(lines) > 1:
@@ -1447,6 +1468,7 @@ def _gh_pr_body(cwd: str) -> str | None:
         p = subprocess.run(
             ["gh", "pr", "view", "--json", "body", "-q", ".body"],
             cwd=cwd, capture_output=True, text=True,
+            encoding="utf-8", errors="surrogateescape",  # never strict-decode-crash on a body byte
         )
     except OSError:
         return None
@@ -1512,8 +1534,11 @@ def _populate_file_sizes(cwd: str, base: str, head: str, facts: DiffFacts) -> No
     `-\t-`). Only run when a max_added_file_bytes check exists (N `cat-file` calls)."""
     sizes: dict[str, int] = {}
     binary: set[str] = set()
-    numstat = _git(cwd, ["diff", "--numstat", f"{base}..{head}"]) or ""
-    for line in numstat.splitlines():
+    # core.quotepath=false so a non-ASCII path matches facts.changed (same setting in
+    # from_range) AND resolves under `cat-file -s` below — else the blob is silently
+    # dropped from `sizes` and an over-cap file with a unicode name escapes the ceiling.
+    numstat = _git(cwd, ["-c", "core.quotepath=false", "diff", "--numstat", f"{base}..{head}"]) or ""
+    for line in numstat.split("\n"):
         parts = line.split("\t")
         if len(parts) >= 3 and parts[0] == "-" and parts[1] == "-":
             binary.add(parts[-1])
@@ -1600,7 +1625,10 @@ def detect_test_command(cwd: str) -> tuple[str | None, str | None]:
     next source (never raises)."""
     def rd(name: str) -> str | None:
         try:
-            with open(os.path.join(cwd, name), encoding="utf-8") as fh:
+            # errors="replace": a non-UTF-8 byte in an incidental manifest must DEGRADE to
+            # the next source, not raise — UnicodeDecodeError is a ValueError, not an
+            # OSError, so a bare `except OSError` would break the "never raises" contract.
+            with open(os.path.join(cwd, name), encoding="utf-8", errors="replace") as fh:
                 return fh.read()
         except OSError:
             return None
@@ -1621,7 +1649,11 @@ def detect_test_command(cwd: str) -> tuple[str | None, str | None]:
     if pp:
         try:
             tool = tomllib.loads(pp).get("tool", {})
-            if any(k.startswith("pytest") for k in tool) or "poetry" in tool:
+            # `tool` is normally a table, but valid TOML allows `tool = 5`; guard the type
+            # before iterating so a scalar/array doesn't raise TypeError past the except.
+            if isinstance(tool, dict) and (
+                any(k.startswith("pytest") for k in tool) or "poetry" in tool
+            ):
                 return ("python3 -m pytest -q", "pyproject.toml")
         except tomllib.TOMLDecodeError:
             pass
@@ -1812,7 +1844,10 @@ def scan_repo(cwd: str) -> RepoScan:
     seen: set[str] = set()
     for cp in cm_paths:
         try:
-            with open(os.path.join(cwd, cp), encoding="utf-8") as fh:
+            # errors="replace": a non-UTF-8 byte in a CLAUDE.md/AGENTS.md must skip-or-degrade
+            # (the scanner is regex-over-text), never crash the whole introspection sweep with
+            # an uncaught UnicodeDecodeError (a ValueError, not the OSError caught here).
+            with open(os.path.join(cwd, cp), encoding="utf-8", errors="replace") as fh:
                 txt = fh.read()
         except OSError:
             continue
@@ -2168,12 +2203,19 @@ def _resolve_base(cwd: str, default_branch: str, *, authoritative: bool = False)
         return mb.strip()
     head_parent = _git(cwd, ["rev-parse", "HEAD~1"])
     parent = head_parent.strip() if head_parent and head_parent.strip() else None
-    if authoritative and parent is not None:
-        # CI passed a TRUSTED --default-branch, so origin/<it> MUST be fetchable; it isn't,
-        # yet HEAD has history. Narrowing to HEAD~1 would diff against a PR-controlled commit
-        # (the base-pinning bypass). Refuse. (A true root commit → parent is None → degrade to
-        # the working tree, which has no prior commit to hide a weakening in.)
-        raise BaseUnreachable(default_branch)
+    if authoritative:
+        if parent is not None:
+            # CI passed a TRUSTED --default-branch, so origin/<it> MUST be fetchable; it
+            # isn't, yet HEAD has history. Narrowing to HEAD~1 would diff against a
+            # PR-controlled commit (the base-pinning bypass). Refuse.
+            raise BaseUnreachable(default_branch)
+        # parent is None for TWO reasons: a true ROOT commit (no prior commit to hide a
+        # weakening in → safe to degrade to the working tree) OR a SHALLOW clone
+        # (actions/checkout's DEFAULT is depth-1, so HEAD~1 is simply unfetched). The
+        # latter MUST fail closed — an empty/narrowed diff would silently PASS a change
+        # the full diff blocks. `--is-shallow-repository` tells them apart.
+        if (_git(cwd, ["rev-parse", "--is-shallow-repository"]) or "").strip() == "true":
+            raise BaseUnreachable(default_branch)
     return parent  # local/best-effort: the previous commit, or None at the repo root
 
 
@@ -2352,8 +2394,12 @@ def cmd_check(
         facts.reviews = _load_reviews(reviews_file) or []
     facts.head_sha = head_sha or (_git(cwd, ["rev-parse", head]) or "").strip() or None
     facts.pr_author = pr_author
-    if checks_file:
-        facts.checks = _load_checks(checks_file)
+    if checks_file and os.path.exists(checks_file):
+        # Requested AND present: a garbled/unreadable file FAILS CLOSED (→ [], so a
+        # `need`-scoped require_checks_green blocks `missing`) rather than silently skipping
+        # a check we were told to enforce. A genuinely ABSENT path leaves checks=None →
+        # skip (no PR context) — the documented degrade, never a false-block.
+        facts.checks = _load_checks(checks_file) or []
     if any(c.primitive == "max_added_file_bytes" for c in cfg.checks):
         _populate_file_sizes(cwd, base or "HEAD~1", head, facts)
     findings = run_change(cfg, facts, allow_run=allow_run)
@@ -2409,7 +2455,10 @@ def cmd_init(path: str) -> int:
 
 
 def _read_working_config(cwd: str) -> Config:
-    with open(os.path.join(cwd, "ratchet.toml"), encoding="utf-8") as fh:
+    # errors="replace" so a non-UTF-8 ratchet.toml surfaces as a ConfigError (bad TOML),
+    # which callers already handle, rather than an uncaught UnicodeDecodeError that would
+    # crash the gate hook (the gate must never block/traceback on a malformed config).
+    with open(os.path.join(cwd, "ratchet.toml"), encoding="utf-8", errors="replace") as fh:
         return Config.parse(fh.read())
 
 
@@ -2476,7 +2525,9 @@ def cmd_draft_lint(cwd: str = ".", config: str = "ratchet.toml.draft", simulate:
     """Strict-validate the agent-authored draft (superset of validate). Exit 0 iff
     structure is clean AND zero review markers remain; else 1."""
     try:
-        with open(os.path.join(cwd, config), encoding="utf-8") as fh:
+        # errors="replace" so a non-UTF-8 draft fails as a clean ConfigError (bad structure)
+        # below, not an uncaught UnicodeDecodeError traceback.
+        with open(os.path.join(cwd, config), encoding="utf-8", errors="replace") as fh:
             text = fh.read()
     except OSError:
         print(f"ratchet: no draft at {config} — run `ratchet suggest` / `/ratchet-init` first", file=sys.stderr)
