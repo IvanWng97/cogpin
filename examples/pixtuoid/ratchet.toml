@@ -104,14 +104,17 @@ scope = "code"
 strip_comments = true
 exempt = 'crates/pixtuoid/src/install/io\.rs$|_tests?\.rs$|/tests?\.rs$|(^|/)tests/|[Tt]mp|tempdir'
 
-# check_dod.py: two_lens_ok() at the merge/CI scope — a code PR must carry a
-# Two-lens-review block. EXISTENCE FLOOR (forcing function); whether the lenses are
-# substantive is the advisory judge below. `when="code"` → docs-only PRs are exempt;
-# `pr_body is None` locally → skipped, CI is the real gate.
+# check_dod.py: two_lens_ok() — a code PR should carry a Two-lens-review block. This is a
+# self-typed PR-body marker (agent-provenance): the gated agent can type it without a review
+# happening, so it is a forcing-function WARN, never a hard block (the moat forbids blocking on
+# an agent-authored claim — see docs/composition.md). The EXISTENCE nag lives here; whether the
+# lenses are substantive is the advisory judge below; to actually GATE review, require a real
+# non-author approval (require_approval_from / approval_policy). `when="code"` → docs-only PRs
+# exempt; `pr_body is None` locally → skipped.
 [[check]]
 id = "two-lens-review"
 kind = "fact"
-severity = "block"
+severity = "warn"
 primitive = "marker_present"
 marker = '(?i)two-lens-review\s*:'
 when = "code"

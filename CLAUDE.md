@@ -46,10 +46,16 @@ Adding/altering a subcommand updates the README CLI list + `SCHEMA.md` (docs-cur
 
 ## Architecture invariants (load-bearing — don't break these)
 
-1. **The moat: `severity="block"` REQUIRES `kind="fact"`.** Only an ungameable fact
-   may hard-block. `validate` enforces it at parse time. Never add a `block` path that
-   decides over a judgment (an LLM-judge, a self-attestation) — that's advisory by
-   construction. This single rule is the product; protect it.
+1. **The moat: `severity="block"` REQUIRES `kind="fact"` AND `provenance="environment"`.**
+   Only an ungameable, *environment-authored* fact may hard-block. Two clauses, both in
+   `validate`: (a) `kind="fact"` — a judgment (LLM-judge, self-attestation) is gameable, so
+   advisory by construction; (b) `provenance="environment"` — the fact must be produced by
+   git / the harness / the PR API (a real diff, file status, branch, CI conclusion, non-author
+   approval), NOT a self-authored token the gated agent types that merely *claims* an out-of-band
+   event (`marker_present`, `attest`). The second clause closes the principal-agent hole *inside*
+   the fact set (a self-typed two-lens marker is `kind="fact"` yet agent-fabricable → it may only
+   warn). Provenance lives in each primitive's `Spec`; `_AGENT_PROVENANCE` derives the deny set.
+   This rule is the product; protect it. (See `docs/composition.md` for the honest-claims map.)
 2. **One file, zero runtime deps.** `ratchet.py` is stdlib-only (`tomllib` sets the
    3.11 floor). This is a *product value* — the plugin IS the auditable repo. Do not
    split it into a package, add a dependency, or introduce a build step. `pyproject.toml`

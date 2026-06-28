@@ -115,9 +115,17 @@ class Spec:
     `kind` is its NATURE: an advisory primitive decides over no fact, so it can never block,
     whatever the author labels (the moat checks the label; _ADVISORY_ONLY rejects the lie).
     `layers` is the allowed placement — a live-signal primitive (it reads an agent-layer fact)
-    is agent-only, so a change-layer placement would silently never fire."""
+    is agent-only, so a change-layer placement would silently never fire.
+    `provenance` is the NATURE OF THE FACT SOURCE: an "environment" fact is produced by
+    git / the harness / the PR API independent of the gated agent's say-so (a real diff, a
+    file status, a branch, a CI conclusion, a non-author approval) — it cannot be fabricated,
+    so it MAY hard-block. An "agent" fact is a self-authored token that merely CLAIMS an
+    out-of-band event happened (a typed review marker, a ticked attestation box) — the agent
+    can satisfy it without the requirement holding, so it may only warn/attest. The tightened
+    moat (invariant #1): `block` REQUIRES `kind="fact"` AND `provenance="environment"`."""
     kind: str
     layers: frozenset[str] = _ANY_LAYER
+    provenance: str = "environment"
 
 
 # THE primitive registry: one Spec per primitive is the single source for the name set
@@ -142,7 +150,11 @@ PRIMITIVE_SPECS: dict[str, "Spec"] = {
     "max_added_file_bytes": Spec("fact"),
     "path_requires": Spec("fact"),
     "cooccur": Spec("fact"),
-    "marker_present": Spec("fact"),
+    # marker_present's PASS is a self-typed marker the agent writes that merely CLAIMS an
+    # out-of-band event (a two-lens review occurred) — it can be satisfied without the event,
+    # so it is agent-provenance: a forcing-function nag (warn), never a hard block. To truly
+    # gate a review, use a real non-author approval (require_approval_from / approval_policy).
+    "marker_present": Spec("fact", provenance="agent"),
     "commit_footer": Spec("fact"),
     "protected_path": Spec("fact"),
     "require_approval_from": Spec("fact"),
@@ -150,12 +162,15 @@ PRIMITIVE_SPECS: dict[str, "Spec"] = {
     "approval_policy": Spec("fact"),
     "require_checks_green": Spec("fact"),
     "run": Spec("fact"),
-    "attest": Spec("advisory"),
-    "judge": Spec("advisory"),
+    "attest": Spec("advisory", provenance="agent"),
+    "judge": Spec("advisory", provenance="agent"),
 }
 PRIMITIVES = frozenset(PRIMITIVE_SPECS)
 # advisory-by-nature primitives (decide over no fact → can never block, whatever the `kind` label).
 _ADVISORY_ONLY = frozenset(n for n, s in PRIMITIVE_SPECS.items() if s.kind == "advisory")
+# agent-provenance primitives: their PASS is a self-authored claim token, not an environment
+# fact → they may only warn/attest, never block (the second clause of the tightened moat).
+_AGENT_PROVENANCE = frozenset(n for n, s in PRIMITIVE_SPECS.items() if s.provenance != "environment")
 
 
 class ConfigError(Exception):
@@ -387,12 +402,24 @@ class Config:
                 raise ConfigError(f"check `{c.id}`: unknown layer `{c.layer}`")
             if c.primitive not in PRIMITIVES:
                 raise ConfigError(f"check `{c.id}`: unknown primitive `{c.primitive}`")
-            # THE moat: only ungameable facts may hard-block.
+            # THE moat (two clauses): only an ungameable, ENVIRONMENT-provenance fact may
+            # hard-block. (1) kind=fact — an advisory judgment is gameable by the gated agent.
             if c.severity == "block" and c.kind != "fact":
                 raise ConfigError(
                     f"check `{c.id}`: severity=block requires kind=fact (only "
                     f"diff/command/PR-metadata facts may block; advisory checks are "
                     f"gameable by the gated agent)"
+                )
+            # (2) provenance=environment — a fact whose PASS is a self-authored token (a typed
+            # marker, a ticked box) merely CLAIMS an out-of-band event; the agent can satisfy it
+            # without the requirement holding, so it may only warn/attest. Closes the principal-
+            # agent hole inside the fact set (e.g. a self-typed two-lens marker hard-blocking).
+            if c.severity == "block" and c.primitive in _AGENT_PROVENANCE:
+                raise ConfigError(
+                    f"check `{c.id}`: severity=block requires an environment-provenance fact, but "
+                    f"`{c.primitive}` reads an agent-authored token that only CLAIMS an out-of-band "
+                    f"event — use severity=warn (a forcing-function nag), or back the requirement "
+                    f"with a real environment fact (e.g. a non-author approval)"
                 )
             # The moat trusts the `kind` LABEL, but attest/judge decide over no fact — a
             # `kind="fact"` on them is a lie that ships a `block` which silently never fires
@@ -916,14 +943,21 @@ def cooccur(check: Check, facts: DiffFacts) -> str | None:
     trig, req = _rx(check.trigger), _rx(check.require)
     if not trig or not req:
         return None
-    body = facts.pr_body or ""
+    # A `block` cooccur must rest ONLY on environment evidence (the diff): pr_body and
+    # commit_msgs are agent-authored, so allowing them to satisfy a block would let the
+    # gated agent type the require token to clear the gate without the requirement holding
+    # (the marker_present hole). They stay available to a `warn` (a forcing-function nag),
+    # keeping cooccur block-capable for its constitutive diff-only use (migration→rollback).
+    env_only = check.severity == "block"
+    body = "" if env_only else (facts.pr_body or "")
+    msgs: list[str] = [] if env_only else facts.commit_msgs
     present = trig.search(body) or any(trig.search(l) for _, l in facts.added)
     if not present:
         return None
     satisfied = (
         req.search(body)
         or any(req.search(l) for _, l in facts.added)
-        or any(req.search(m) for m in facts.commit_msgs)
+        or any(req.search(m) for m in msgs)
     )
     if satisfied:
         return None

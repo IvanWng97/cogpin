@@ -26,6 +26,11 @@ hard-block. Anything that needs *judgment* (an LLM-judge, a self-attestation) is
 whole guarantee — ratchet's "moat": a forgetful or over-confident agent can't pass a block it didn't
 actually satisfy, because **it never authored the evidence the block reads.**
 
+Precisely: `block` requires `kind="fact"` **and** `provenance="environment"` — the fact must
+come from git / the harness / the PR API, not a token the agent *types* that merely claims an
+out-of-band event. So a self-typed `marker_present` (a "two-lens-review:" line) can only **warn**;
+to actually gate a review, block on a real non-author approval. See [docs/composition.md](docs/composition.md).
+
 One language-agnostic engine, one per-repo `ratchet.toml`. The engine reads git
 facts + your config; it never imports your project code. Anything
 language-specific goes through the one `run` escape hatch. The engine itself is a
@@ -308,7 +313,7 @@ Every check reads only facts — never your code.
 | `max_added_file_bytes{maxkb,allow_binary,scope}` | fact | per-file byte ceiling on added/modified files (vendored bundles, stray binaries) |
 | `path_requires{when,need}` | fact | name-status: if `when` changed, `need` must too |
 | `cooccur{trigger,require}` | fact | if `trigger` appears (diff/PR), `require` must too |
-| `marker_present{marker,when}` | fact | a marker block exists in the PR body |
+| `marker_present{marker,when}` | fact · agent | a self-typed marker in the PR body — **`warn` only** (agent-provenance: the gated agent can type the marker without the event it claims; to *gate* review, require a real non-author approval) |
 | `forbid_in_message{tokens,msg_scope}` | fact | forbidden tokens in a commit/PR message (e.g. `[skip ci]`) |
 | `require_message_pattern{pattern,msg_scope}` | fact | every commit/PR message must match a shape (e.g. Conventional Commits) |
 | `commit_footer{}` | fact | every commit ends with `[meta].commit_footer` |
