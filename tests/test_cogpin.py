@@ -353,13 +353,17 @@ class TestPrimitives(unittest.TestCase):
         # built-in regex turns this red. Mutation-proven gap: only AKIA was asserted, leaving
         # the other five shapes (ghp_ / github_pat_ / sk- / xox- / PRIVATE KEY) uncovered.
         c = one_check('[[check]]\nid="s"\nkind="fact"\nseverity="block"\nprimitive="secret_scan"')
+        # NB: assemble each realistic token by concatenation so THIS source line holds no
+        # contiguous secret — otherwise cogpin's own change-layer secret_scan (which scans the
+        # diff's added lines) self-blocks this very file. The runtime value fed to the engine is
+        # the full contiguous token; only the literal split changes.
         cases = [
-            ("ghp",        'tok = "ghp_' + "a" * 36 + '"',          'tok = "ghp_' + "a" * 35 + '"'),   # 35 < 36
-            ("github_pat", 'tok = "github_pat_' + "a" * 50 + '"',   'tok = "github_pat_' + "a" * 40 + '"'),  # < 50
-            ("sk",         'key = "sk-' + "a" * 24 + '"',           'key = "sk-short"'),                # < 20
-            ("aws",        'aws = "AKIAIOSFODNN7EXAMPLE"',          'aws = "AKIA_not_a_real_key"'),     # _ breaks [0-9A-Z]
-            ("xox",        'slack = "xoxb-' + "0" * 12 + '"',       'slack = "xoxz-' + "0" * 12 + '"'),  # z not in [baprs]
-            ("pem",        "-----BEGIN OPENSSH PRIVATE KEY-----",   "-----BEGIN CERTIFICATE-----"),
+            ("ghp",        'tok = "ghp_' + "a" * 36 + '"',              'tok = "ghp_' + "a" * 35 + '"'),   # 35 < 36
+            ("github_pat", 'tok = "github_pat_' + "a" * 50 + '"',       'tok = "github_pat_' + "a" * 40 + '"'),  # < 50
+            ("sk",         'key = "sk-' + "a" * 24 + '"',               'key = "sk-short"'),                # < 20
+            ("aws",        'aws = "AKIA' + "IOSFODNN7EXAMPLE" + '"',    'aws = "AKIA_not_a_real_key"'),     # _ breaks [0-9A-Z]
+            ("xox",        'slack = "xoxb-' + "0" * 12 + '"',           'slack = "xoxz-' + "0" * 12 + '"'),  # z not in [baprs]
+            ("pem",        "-----BEGIN OPENSSH PRIVATE " + "KEY-----",  "-----BEGIN CERTIFICATE-----"),
         ]
         for name, hit, miss in cases:
             self.assertIsNotNone(secret_scan(c, DiffFacts(added=[("f", hit)])), f"{name}: real token not caught")
