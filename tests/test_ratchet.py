@@ -2595,3 +2595,52 @@ class TestCapability(unittest.TestCase):
         deny = self._settings()["permissions"]["deny"]
         self.assertEqual(deny, ["Bash(curl:*)"])         # clean managed list, no char-shatter
         self.assertNotIn("B", deny)
+
+    def test_emit_user_managed_collision_preserved_and_idempotent(self):
+        # a user-authored entry that renders identically to a managed one must (a) be idempotent
+        # across repeated emits and (b) survive a later retract — ratchet must never claim it as
+        # managed (sidecar records owned-only, not the full render)
+        os.makedirs(os.path.join(self.d, ".claude"))
+        with open(os.path.join(self.d, ".claude", "settings.json"), "w") as fh:
+            json.dump({"permissions": {"deny": ["Bash(curl:*)"]}, "model": "opus"}, fh)
+        self._cfg('[capability]\nno_network=true\n')   # managed deny ALSO contains Bash(curl:*)
+        spath = os.path.join(self.d, ".claude", "settings.json")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            R.cmd_capability_emit(self.d)
+        self.assertIn("Bash(curl:*)", self._settings()["permissions"]["deny"])
+        first = open(spath).read()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            R.cmd_capability_emit(self.d)
+        self.assertEqual(open(spath).read(), first)   # idempotent DESPITE the collision
+        self._cfg('')   # retract the whole stanza
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            R.cmd_capability_emit(self.d)
+        s = self._settings()
+        self.assertEqual(s["model"], "opus")
+        self.assertEqual(s["permissions"]["deny"], ["Bash(curl:*)"])   # user entry survives retract
+        for managed in ("WebFetch", "Bash(wget:*)", "Bash(nc:*)"):
+            self.assertNotIn(managed, s["permissions"]["deny"])         # managed-only entries gone
+
+    def test_emit_non_utf8_settings_fails_closed(self):
+        # invalid-UTF-8 settings.json must fail closed (refuse, exit 1), not crash with UnicodeDecodeError
+        os.makedirs(os.path.join(self.d, ".claude"))
+        path = os.path.join(self.d, ".claude", "settings.json")
+        with open(path, "wb") as fh:
+            fh.write(b'{"\xe9": 1}')   # lone 0xE9 → invalid UTF-8
+        self._cfg('[capability]\ndeny_commands=["curl"]\n')
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(R.cmd_capability_emit(self.d), 1)
+        with open(path, "rb") as fh:
+            self.assertEqual(fh.read(), b'{"\xe9": 1}')   # left untouched
+
+    def test_emit_fs_confine_only_warns_not_silent(self):
+        # a declared-but-non-enforceable floor (fs_confine only) must surface its warning and not
+        # claim that nothing was declared
+        self._cfg('[capability]\nfs_confine=["."]\n')
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.assertEqual(R.cmd_capability_emit(self.d), 0)
+        msg = err.getvalue()
+        self.assertIn("fs_confine", msg)               # the warning is surfaced, not swallowed
+        self.assertIn("nothing is enforceable", msg)   # not "no [capability] floor declared"
+        self.assertFalse(self._settings_exists())      # nothing written

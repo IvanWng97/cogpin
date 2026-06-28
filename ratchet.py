@@ -1558,7 +1558,9 @@ def _read_json(path: str):
     try:
         with open(path, encoding="utf-8") as fh:
             return json.load(fh)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        # absent / unreadable / not-JSON / not-UTF-8 all collapse to "no usable doc" → None, so
+        # every caller degrades safe (a fail-closed gate or a default) instead of crashing.
         return None
 
 
@@ -2968,9 +2970,19 @@ def cmd_capability_emit(cwd: str = ".", backend: str | None = None, dry_run: boo
     prior = _read_json(sidecar_path)
     prior = prior if isinstance(prior, dict) else {}
     prior_deny, prior_allow = _str_list(prior.get("deny")), _str_list(prior.get("allow"))
-    # nothing declared now AND nothing emitted before → genuinely nothing to reconcile
+    # Warnings describe the DECLARED floor (postures settings.json can't truly guarantee — e.g.
+    # fs_confine, no_network egress). Surface them on every path that got this far, INCLUDING the
+    # declared-but-nothing-to-render case below, so a non-enforceable declaration is never silently
+    # swallowed (fs_confine renders no deny/allow entries, only a warning).
+    for w in warns:
+        print(f"ratchet: warning — {w}", file=sys.stderr)
     if not deny and not allow and not prior_deny and not prior_allow:
-        print("ratchet: no [capability] floor declared — nothing to emit", file=sys.stderr)
+        # nothing emitted before AND nothing to render now. Distinguish a truly empty stanza from
+        # one that IS declared but renders no settings.json entries (e.g. fs_confine only), so the
+        # user isn't told their floor doesn't exist.
+        msg = ("no [capability] floor declared" if cap.is_empty()
+               else "[capability] declared but nothing is enforceable via settings.json (see warnings)")
+        print(f"ratchet: {msg} — nothing to emit", file=sys.stderr)
         return 0
     perms = settings.get("permissions")
     perms = perms if isinstance(perms, dict) else {}
@@ -2982,10 +2994,14 @@ def cmd_capability_emit(cwd: str = ".", backend: str | None = None, dry_run: boo
     # the rendered output never carries a vestigial `"allow": []` / `"deny": []` / `permissions`.
     user_deny = [e for e in cur_deny if e not in prior_deny]
     user_allow = [e for e in cur_allow if e not in prior_allow]
-    final = {
-        "deny": user_deny + [e for e in deny if e not in user_deny],
-        "allow": user_allow + [e for e in allow if e not in user_allow],
-    }
+    # The sidecar is ratchet's OWNERSHIP ledger — record only entries ratchet actually added
+    # (managed MINUS any that already existed as user-authored), NOT the full render. Otherwise a
+    # user-authored entry that string-collides with a managed one (e.g. a hand-written
+    # `Bash(curl:*)` deny alongside `no_network`) gets claimed as managed → silently deleted on a
+    # later retract, and the array reorders between identical emits (non-idempotent).
+    owned_deny = [e for e in deny if e not in user_deny]
+    owned_allow = [e for e in allow if e not in user_allow]
+    final = {"deny": user_deny + owned_deny, "allow": user_allow + owned_allow}
     for k, v in final.items():
         if v:
             perms[k] = v
@@ -2996,13 +3012,11 @@ def cmd_capability_emit(cwd: str = ".", backend: str | None = None, dry_run: boo
     elif "permissions" in settings:
         del settings["permissions"]
     rendered = json.dumps(settings, indent=2) + "\n"
-    for w in warns:
-        print(f"ratchet: warning — {w}", file=sys.stderr)
     if dry_run:
         print(rendered, end="")
         return 0
     _atomic_write(settings_path, rendered, confine=root)
-    _atomic_write(sidecar_path, json.dumps({"deny": deny, "allow": allow}, indent=2) + "\n", confine=root)
+    _atomic_write(sidecar_path, json.dumps({"deny": owned_deny, "allow": owned_allow}, indent=2) + "\n", confine=root)
     if deny or allow:
         print(f"ratchet: emitted {len(deny)} deny + {len(allow)} allow entries to "
               f".claude/settings.json (backend: claude-code) — the harness enforces, not ratchet")
