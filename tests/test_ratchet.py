@@ -2192,3 +2192,165 @@ class TestPrimitiveSpecs(unittest.TestCase):
         ok = ('schema=1\n[repo]\ndefault_branch="main"\n[[check]]\nid="ok"\nkind="fact"\n'
               'severity="warn"\nlayer="change"\nprimitive="forbid_pattern"\npattern="x"\n')
         self.assertEqual(len(Config.parse(ok).checks), 1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Review 5 — degrade-safe + encoding/path robustness on the git-acquisition layer.
+# Each exercises bytes/paths/clones that previously made an AUTHORITATIVE gate
+# silently PASS (E1/E3/E4, checks-file) or crashed an introspection CLI (C1/C2).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestReview5Robustness(unittest.TestCase):
+    def _git(self, *a):
+        subprocess.run(["git", "-C", self.d, *a], check=True, capture_output=True, text=True)
+
+    def _head(self):
+        return subprocess.run(["git", "-C", self.d, "rev-parse", "HEAD"],
+                              capture_output=True, text=True).stdout.strip()
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = self.tmp.name
+        self._git("init", "-q", "-b", "main")
+        self._git("config", "user.email", "t@t")
+        self._git("config", "user.name", "t")
+        self._git("config", "commit.gpgsign", "false")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write(self, rel, text):
+        with open(os.path.join(self.d, rel), "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def _commit(self, msg):
+        self._git("add", "-A")
+        self._git("commit", "-qm", msg)
+
+    _RCG = ('schema=1\n[repo]\ndefault_branch="main"\n[meta]\nbase_pinned=true\n'
+            '[[check]]\nid="green"\nkind="fact"\nseverity="block"\n'
+            'primitive="require_checks_green"\nneed=["ci"]\n')
+
+    # E1 — one non-UTF-8 byte anywhere in the diff must NOT empty the content scan
+    def test_non_utf8_byte_does_not_null_content_diff(self):
+        self._write("clean.py", "x = 1\n")
+        self._commit("base")
+        base = self._head()
+        self._write("clean.py", 'x = 1\ntoken = "ghp_' + "A" * 36 + '"\n')
+        with open(os.path.join(self.d, "blob.dat"), "wb") as fh:
+            fh.write(b"latin1 \xff comment, no NUL so git treats it as text\n")
+        self._commit("a secret + a non-utf8 sibling in the same diff")
+        facts = DiffFacts.from_range(self.d, base, "HEAD")
+        added = [line for _, line in facts.added]
+        self.assertTrue(any("ghp_" in ln for ln in added),
+                        "a stray non-UTF-8 byte must not null the whole content diff")
+
+    # E3 — a unicode line separator inside a content line must not sever it (drop the tail)
+    def test_unicode_line_separator_keeps_added_line_whole(self):
+        self._write("a.py", "x = 1\n")
+        self._commit("base")
+        base = self._head()
+        self._write("a.py", 'x = 1\ny = " ghp_' + "B" * 36 + '"\n')
+        self._commit("U+2028 inside an added line")
+        facts = DiffFacts.from_range(self.d, base, "HEAD")
+        added = [line for _, line in facts.added]
+        self.assertTrue(any("ghp_" in ln for ln in added),
+                        "splitlines() drops the token after U+2028; split('\\n') keeps it")
+
+    # E4 — a non-ASCII filename's blob size must be captured (quotepath round-trip), so the cap fires
+    def test_non_ascii_filename_size_is_captured(self):
+        self._write("seed.txt", "s\n")
+        self._commit("base")
+        base = self._head()
+        name = "café.txt"  # quotepath=true would escape this to "caf\303\251.txt"
+        with open(os.path.join(self.d, name), "w", encoding="utf-8") as fh:
+            fh.write("X" * 5000)
+        self._commit("add a big unicode-named file")
+        facts = DiffFacts.from_range(self.d, base, "HEAD")
+        self.assertIn(name, list(facts.changed_paths()))
+        R._populate_file_sizes(self.d, base, "HEAD", facts)
+        self.assertEqual(facts.file_sizes.get(name), 5000,
+                         "a unicode-named blob must resolve under cat-file, not be dropped")
+        c = one_check('[[check]]\nid="big"\nkind="fact"\nseverity="block"\n'
+                      'primitive="max_added_file_bytes"\nmaxkb=1')
+        self.assertIsNotNone(R.max_added_file_bytes(c, facts, repo()),
+                             "the byte cap must fire on the unicode-named over-cap file")
+
+    # E2 — a SHALLOW clone with an unreachable base must FAIL CLOSED in authoritative mode
+    def test_shallow_clone_authoritative_fails_closed(self):
+        self._write("f.txt", "1\n")
+        self._commit("c1")
+        self._write("f.txt", "2\n")
+        self._commit("c2")
+        dst = tempfile.TemporaryDirectory()
+        self.addCleanup(dst.cleanup)
+        # file:// (not a bare path) so --depth actually produces a shallow clone
+        subprocess.run(["git", "clone", "--depth", "1", "file://" + self.d, dst.name],
+                       check=True, capture_output=True, text=True)
+        self.assertEqual(
+            (R._git(dst.name, ["rev-parse", "--is-shallow-repository"]) or "").strip(), "true")
+        with self.assertRaises(R.BaseUnreachable):
+            R._resolve_base(dst.name, "no-such-branch", authoritative=True)
+
+    # E2 contrast — a TRUE root commit (not shallow) degrades to None, never raises
+    def test_true_root_commit_degrades_not_shallow(self):
+        self._write("only.txt", "1\n")
+        self._commit("root")
+        self.assertEqual(
+            (R._git(self.d, ["rev-parse", "--is-shallow-repository"]) or "").strip(), "false")
+        self.assertIsNone(R._resolve_base(self.d, "no-such-branch", authoritative=True))
+
+    # checks-file — a present-but-GARBLED checks file fails CLOSED for a need-scoped check
+    def test_garbled_checks_file_fails_closed(self):
+        self._write("ratchet.toml", self._RCG)
+        self._commit("base")
+        self._git("update-ref", "refs/remotes/origin/main", self._head())
+        self._write("clean.txt", "ok")
+        self._commit("head")
+        garbled = os.path.join(self.d, "checks.json")
+        with open(garbled, "w", encoding="utf-8") as fh:
+            fh.write("not json at all")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = R.cmd_check(self.d, allow_run=False, default_branch_arg="main", checks_file=garbled)
+        self.assertEqual(rc, 1, "a garbled checks file must fail closed, not silently skip the check")
+
+    # checks-file — a genuinely ABSENT checks file still SKIPS (no false-block)
+    def test_absent_checks_file_skips(self):
+        self._write("ratchet.toml", self._RCG)
+        self._commit("base")
+        self._git("update-ref", "refs/remotes/origin/main", self._head())
+        self._write("clean.txt", "ok")
+        self._commit("head")
+        missing = os.path.join(self.d, "does-not-exist.json")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = R.cmd_check(self.d, allow_run=False, default_branch_arg="main", checks_file=missing)
+        self.assertEqual(rc, 0, "an absent checks file → skip (no PR context), never a false-block")
+
+    # C2 — a non-UTF-8 CLAUDE.md must not crash the introspection sweep
+    def test_scan_repo_tolerates_non_utf8_claude_md(self):
+        with open(os.path.join(self.d, "CLAUDE.md"), "wb") as fh:
+            fh.write(b"# house rules\n\xff always branch first\n")
+        self._commit("add a latin-1 CLAUDE.md")
+        self.assertIsInstance(R.scan_repo(self.d), R.RepoScan)  # must not raise
+
+
+class TestReview5Introspection(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    # C1 — a valid pyproject whose `tool` is a scalar must not crash detect_test_command
+    def test_detect_test_command_non_dict_tool(self):
+        with open(os.path.join(self.d, "pyproject.toml"), "w", encoding="utf-8") as fh:
+            fh.write("tool = 5\n")
+        self.assertEqual(R.detect_test_command(self.d), (None, None))  # must not raise TypeError
+
+    # C2 — a non-UTF-8 manifest must degrade to the next source, never raise
+    def test_detect_test_command_non_utf8_manifest(self):
+        with open(os.path.join(self.d, "justfile"), "wb") as fh:
+            fh.write(b"# \xff a latin-1 comment\nbuild:\n\techo hi\n")  # no `test:` target
+        self.assertEqual(R.detect_test_command(self.d), (None, None))  # must not raise UnicodeDecodeError

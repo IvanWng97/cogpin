@@ -88,3 +88,11 @@ assert"); `secret_scan` is best-effort; and a determined human with repo-admin r
 can always change the base policy *through review*. The line ratchet draws: anything an
 agent can do **mid-task** to cut a corner, it stops; anything that needs **human
 judgment** stays advisory and visible — a boundary the schema itself enforces.
+
+**Fail-closed acquisition.** A fact gate only holds if it sees the *whole* change. So the
+change layer refuses rather than passes when it can't: an unresolvable `base..HEAD` range
+(a shallow clone — `actions/checkout`'s depth-1 default — or an unfetched base ref) exits
+non-zero instead of gating a narrowed diff (use `fetch-depth: 0`); diff bytes are decoded
+losslessly, so one non-UTF-8 byte can't empty a content scan; and non-ASCII paths
+round-trip to the size/scope checks rather than silently dropping out. An unverifiable
+gate fails **closed**, never open.

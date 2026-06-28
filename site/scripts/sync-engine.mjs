@@ -1,7 +1,8 @@
 // Vendor the REAL engine + glue + diagrams into public/ so the Pyodide playground
 // loads the exact ratchet.py that ships (never a stale fork) and the README SVGs
-// render on the site. Run automatically by predev/prebuild. A CI `engine-sync`
-// check asserts public/ratchet.py byte-matches the repo-root ratchet.py.
+// render on the site. The vendored copies are gitignored (site/.gitignore) and
+// regenerated here on every predev/prebuild, so there is no committed copy that can
+// drift from the repo-root sources — the deployed page always loads the shipped engine.
 import { copyFileSync, mkdirSync, readdirSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
