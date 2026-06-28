@@ -348,6 +348,27 @@ class TestPrimitives(unittest.TestCase):
         f = DiffFacts(added=[("cfg.py", 'AWS = "AKIAIOSFODNN7EXAMPLE"')])
         self.assertIsNotNone(secret_scan(c, f))
 
+    def test_secret_scan_each_builtin_shape(self):
+        # one realistic hit + one near-miss per DEFAULT_SECRETS shape, so deleting ANY single
+        # built-in regex turns this red. Mutation-proven gap: only AKIA was asserted, leaving
+        # the other five shapes (ghp_ / github_pat_ / sk- / xox- / PRIVATE KEY) uncovered.
+        c = one_check('[[check]]\nid="s"\nkind="fact"\nseverity="block"\nprimitive="secret_scan"')
+        # NB: assemble each realistic token by concatenation so THIS source line holds no
+        # contiguous secret — otherwise cogpin's own change-layer secret_scan (which scans the
+        # diff's added lines) self-blocks this very file. The runtime value fed to the engine is
+        # the full contiguous token; only the literal split changes.
+        cases = [
+            ("ghp",        'tok = "ghp_' + "a" * 36 + '"',              'tok = "ghp_' + "a" * 35 + '"'),   # 35 < 36
+            ("github_pat", 'tok = "github_pat_' + "a" * 50 + '"',       'tok = "github_pat_' + "a" * 40 + '"'),  # < 50
+            ("sk",         'key = "sk-' + "a" * 24 + '"',               'key = "sk-short"'),                # < 20
+            ("aws",        'aws = "AKIA' + "IOSFODNN7EXAMPLE" + '"',    'aws = "AKIA_not_a_real_key"'),     # _ breaks [0-9A-Z]
+            ("xox",        'slack = "xoxb-' + "0" * 12 + '"',           'slack = "xoxz-' + "0" * 12 + '"'),  # z not in [baprs]
+            ("pem",        "-----BEGIN OPENSSH PRIVATE " + "KEY-----",  "-----BEGIN CERTIFICATE-----"),
+        ]
+        for name, hit, miss in cases:
+            self.assertIsNotNone(secret_scan(c, DiffFacts(added=[("f", hit)])), f"{name}: real token not caught")
+            self.assertIsNone(secret_scan(c, DiffFacts(added=[("f", miss)])), f"{name}: near-miss false-fired")
+
     def test_forbid_pattern_scopes_and_exempts(self):
         c = one_check(
             '[[check]]\nid="p"\nkind="fact"\nseverity="block"\nprimitive="forbid_pattern"\n'
@@ -542,6 +563,17 @@ class TestPrimitives(unittest.TestCase):
             forbid_delete(c, DiffFacts(changed=[("D", "tests/a.py"), ("A", "tests/b.py")]), r)
         )
 
+    def test_forbid_delete_exempt_allowlists_path(self):
+        # the `exempt` regex carves an allowlist out of the scope (cogpin.py:932/939) — a
+        # deletion whose path matches it is permitted, while a non-exempt in-scope delete blocks.
+        c = one_check(
+            '[[check]]\nid="nd"\nkind="fact"\nseverity="block"\nprimitive="forbid_delete"\n'
+            'scope="tests"\nexempt="fixtures/"'
+        )
+        r = repo()
+        self.assertIsNone(forbid_delete(c, DiffFacts(changed=[("D", "tests/fixtures/old.py")]), r))
+        self.assertIsNotNone(forbid_delete(c, DiffFacts(changed=[("D", "tests/test_a.py")]), r))
+
 
 class TestEngine(unittest.TestCase):
     def cfg(self):
@@ -693,6 +725,10 @@ class TestAgentLayer(unittest.TestCase):
         # docs-only → nothing triggers
         c5 = change_classes(cfg, DiffFacts(changed=[("M", "README.md")]))
         self.assertFalse(any(c5.values()))
+        # CLAUDE.md alone → claude_md fires WITHOUT any code change (the one class that is
+        # code-INDEPENDENT, cogpin.py:1542); always/feature/public_surface stay False.
+        c6 = change_classes(cfg, DiffFacts(changed=[("M", "CLAUDE.md")]))
+        self.assertEqual(c6, {"always": False, "feature": False, "public_surface": False, "claude_md": True})
 
     def test_attestation_gaps_are_class_gated(self):
         cfg = Config.parse(self.ATTEST_CFG)
@@ -713,6 +749,18 @@ class TestAgentLayer(unittest.TestCase):
         self.assertEqual(ids4, {"attest-docs"})
         # docs-only → no required boxes at all
         self.assertEqual(attestation_gaps(cfg, DiffFacts(changed=[("M", "README.md")]), md=""), [])
+
+    def test_claude_md_class_gates_attestation(self):
+        # L19: a class="claude_md" attest box must be required on a CLAUDE.md-only change with
+        # ZERO code touched — the code-independence of the claude_md class, end-to-end.
+        cfg = Config.parse(self.ATTEST_CFG +
+            '[[check]]\nid = "attest-claudemd"\nkind = "advisory"\nseverity = "attest"\n'
+            'layer = "agent"\nprimitive = "attest"\nclass = "claude_md"\nbox = "Agent-rules"\n')
+        facts = DiffFacts(changed=[("M", "CLAUDE.md")])
+        # only the claude_md box is required (attest-tdd is class="always" → needs a code change)
+        self.assertEqual({g.id for g in attestation_gaps(cfg, facts, md="")}, {"attest-claudemd"})
+        # ticking it clears the gap
+        self.assertEqual(attestation_gaps(cfg, facts, md="- [x] Agent-rules"), [])
 
     def test_attest_does_not_violate_block_requires_fact(self):
         # an attest check is advisory severity → the schema invariant doesn't reject it,
@@ -950,6 +998,19 @@ class TestMinedPrimitives(unittest.TestCase):
         self.assertIsNotNone(numeric_floor(c, DiffFacts(added=[("a.cfg", "cov = 70")]), r))  # new value below floor
         self.assertIsNone(numeric_floor(c, DiffFacts(added=[("a.cfg", "cov = 85")]), r))     # at/above floor
 
+    def test_numeric_floor_ceiling(self):
+        # `floor` doubles as a CEILING under direction="no_increase" (cogpin.py:1060) — the arm
+        # an absent old value still hits. Untested before: an added value above the ceiling must
+        # block; at-or-below must pass (no remove/add pairing involved).
+        c = one_check(
+            "[[check]]\nid=\"to\"\nkind=\"fact\"\nseverity=\"block\"\nprimitive=\"numeric_floor\"\n"
+            "scope=[\"*.cfg\"]\nkey='timeout\\s*=\\s*([0-9]+)'\ndirection=\"no_increase\"\nfloor=30"
+        )
+        r = repo()
+        self.assertIsNotNone(numeric_floor(c, DiffFacts(added=[("a.cfg", "timeout = 45")]), r))  # above ceiling
+        self.assertIsNone(numeric_floor(c, DiffFacts(added=[("a.cfg", "timeout = 30")]), r))     # at ceiling
+        self.assertIsNone(numeric_floor(c, DiffFacts(added=[("a.cfg", "timeout = 10")]), r))     # below ceiling
+
 
 class TestFullCoverage(unittest.TestCase):
     """The remaining ranked + mined gaps that complete the coverage map. Primitives:
@@ -1004,6 +1065,18 @@ class TestFullCoverage(unittest.TestCase):
         self.assertIsNone(max_added_file_bytes(c, DiffFacts(file_sizes={"a.txt": 1000}), r))
         self.assertIsNotNone(max_added_file_bytes(c, DiffFacts(file_sizes={"big.bin": 600 * 1024}), r))  # > 500kb
         self.assertIsNotNone(max_added_file_bytes(c, DiffFacts(file_sizes={"img.png": -1}), r))  # binary, disallowed
+
+    def test_max_added_file_bytes_allow_binary(self):
+        # allow_binary=true skips the binary block (the `if not check.allow_binary` guard,
+        # cogpin.py:1134) — a binary blob (size -1) is permitted, yet the size cap still
+        # applies to a non-binary oversized file.
+        c = one_check(
+            '[[check]]\nid="big"\nkind="fact"\nseverity="block"\nprimitive="max_added_file_bytes"\n'
+            'maxkb=500\nallow_binary=true'
+        )
+        r = repo()
+        self.assertIsNone(max_added_file_bytes(c, DiffFacts(file_sizes={"img.png": -1}), r))  # binary allowed
+        self.assertIsNotNone(max_added_file_bytes(c, DiffFacts(file_sizes={"big.bin": 600 * 1024}), r))  # cap still bites
 
     def test_self_protect(self):
         c = one_check(
@@ -2813,7 +2886,8 @@ class TestCapability(unittest.TestCase):
             fh.write('schema=1\n[repo]\ndefault_branch="main"\n' + cap_toml)
 
     def _settings(self):
-        return json.load(open(os.path.join(self.d, ".claude", "settings.json")))
+        with open(os.path.join(self.d, ".claude", "settings.json")) as fh:
+            return json.load(fh)
 
     def _settings_exists(self):
         return os.path.exists(os.path.join(self.d, ".claude", "settings.json"))
@@ -2854,10 +2928,13 @@ class TestCapability(unittest.TestCase):
         self.assertIn("Bash(sudo:*)", s["permissions"]["deny"])   # user entry preserved
         self.assertIn("Bash(curl:*)", s["permissions"]["deny"])   # managed entry added
         self.assertEqual(s["model"], "opus")                      # unrelated key preserved
-        first = open(os.path.join(self.d, ".claude", "settings.json")).read()
+        spath = os.path.join(self.d, ".claude", "settings.json")
+        with open(spath) as fh:
+            first = fh.read()
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             R.cmd_capability_emit(self.d)
-        self.assertEqual(open(os.path.join(self.d, ".claude", "settings.json")).read(), first)  # idempotent
+        with open(spath) as fh:
+            self.assertEqual(fh.read(), first)  # idempotent
 
     def test_emit_drops_stale_managed_entry(self):
         self._cfg('[capability]\ndeny_commands=["curl","wget"]\n')
@@ -2947,7 +3024,8 @@ class TestCapability(unittest.TestCase):
         self._cfg('[capability]\ndeny_commands=["curl"]\n')
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(R.cmd_capability_emit(self.d), 1)
-        self.assertEqual(open(path).read(), "{ not valid json")   # left untouched
+        with open(path) as fh:
+            self.assertEqual(fh.read(), "{ not valid json")   # left untouched
 
     def test_emit_refuses_non_object_settings(self):
         # valid JSON but a non-object (array) is also unusable → refuse, don't overwrite
@@ -2958,7 +3036,8 @@ class TestCapability(unittest.TestCase):
         self._cfg('[capability]\ndeny_commands=["curl"]\n')
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(R.cmd_capability_emit(self.d), 1)
-        self.assertEqual(open(path).read(), '["a list, not an object"]')
+        with open(path) as fh:
+            self.assertEqual(fh.read(), '["a list, not an object"]')
 
     def test_emit_guards_non_list_permission_values(self):
         # a deny that's a bare string must not be shattered into characters when reconciling
@@ -2984,10 +3063,12 @@ class TestCapability(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             R.cmd_capability_emit(self.d)
         self.assertIn("Bash(curl:*)", self._settings()["permissions"]["deny"])
-        first = open(spath).read()
+        with open(spath) as fh:
+            first = fh.read()
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             R.cmd_capability_emit(self.d)
-        self.assertEqual(open(spath).read(), first)   # idempotent DESPITE the collision
+        with open(spath) as fh:
+            self.assertEqual(fh.read(), first)   # idempotent DESPITE the collision
         self._cfg('')   # retract the whole stanza
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             R.cmd_capability_emit(self.d)
