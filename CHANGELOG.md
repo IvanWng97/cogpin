@@ -20,6 +20,11 @@ breaking config change.
   husky → …` when husky is detected, else `directly → .git/hooks/pre-push (no hook manager detected)`).
 
 ### Fixed
+- **`gaps` no longer reports an attestation house rule as UNBOUND while `suggest` emits it** — the
+  two CLIs contradicted each other. `is_bound`'s match-token haystack was built from
+  `pattern/marker/key/deny/allow/tokens/need` only, so an `attest` check whose sole discriminator
+  is `box` / `class` (e.g. the `attest-tdd` rule, match-token `TDD`) found an empty haystack and
+  fell through to `(False, None)`. The haystack now includes `box` and `class`.
 - **`validate` now rejects a check that is missing a load-bearing param** ([#45](https://github.com/IvanWng97/cogpin/issues/45))
   — the third-party adopter audit's silent-no-op class. A `forbid_pattern` with no `pattern`, a
   `numeric_floor` with no `key`, a `require_approval_from` with no approver list, etc. used to load

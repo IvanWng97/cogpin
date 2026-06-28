@@ -1538,6 +1538,18 @@ class TestGapsBinding(unittest.TestCase):
         c2 = self._check('[[check]]\nid = "f2"\nkind = "fact"\nseverity = "block"\nlayer = "agent"\nprimitive = "forbid_command"\npattern = "--no-verify"\n')
         self.assertTrue(is_bound(self._hit("forbid_command", "--no-verify"), [c2])[0])
 
+    def test_is_bound_attest_matches_on_box(self):
+        # the attest-tdd house rule discriminates only on box/class — its match_token ("TDD")
+        # must bind against c.box/c.cls, else `gaps` falsely reports the rule UNBOUND while
+        # `suggest` emits the very same check (the two CLIs contradict). Regression pin for M5.
+        tdd = self._check('[[check]]\nid = "a"\nkind = "advisory"\nseverity = "attest"\nlayer = "agent"\nprimitive = "attest"\nclass = "always"\nbox = "TDD"\n')
+        self.assertTrue(is_bound(self._hit("attest", "TDD"), [tdd])[0])
+        # but box/cls must still DISCRIMINATE — folding them in mustn't over-match: a TDD box
+        # does not bind a "Design" token, and a "Design" box does not bind the TDD token.
+        self.assertFalse(is_bound(self._hit("attest", "Design"), [tdd])[0])
+        design = self._check('[[check]]\nid = "d"\nkind = "advisory"\nseverity = "attest"\nlayer = "agent"\nprimitive = "attest"\nclass = "feature"\nbox = "Design"\n')
+        self.assertFalse(is_bound(self._hit("attest", "TDD"), [design])[0])
+
 
 class TestMoatPreservation(unittest.TestCase):
     """Pin the moat against future HOUSE_RULE_MAP edits."""
