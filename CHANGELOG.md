@@ -8,6 +8,17 @@ breaking config change.
 
 ## [Unreleased]
 
+### Changed
+- **CLI / error-message UX polish** ([#47](https://github.com/IvanWng97/cogpin/issues/47), adopter audit):
+  the `marker_present` block-rejection now names the real-fact alternatives
+  (`require_approval_from` / `approval_policy` / `require_checks_green`); an *unknown-primitive*
+  config typo no longer misfires the "engine looks stale → `cogpin update`" hint (it points at
+  `SCHEMA.md`; only a real schema skew suggests `update`); `doctor` prints a glyph legend
+  (`✓ ~ ✗ ·`); `cogpin check --help` and the README state the exit codes (`0`/`1`/`2`); a bad
+  `--config` path gives a human message ("config file not found" / "expected a file, not a
+  directory") instead of a raw `OSError`; and `install` names *how* it wired the pre-push (`via
+  husky → …` when husky is detected, else `directly → .git/hooks/pre-push (no hook manager detected)`).
+
 ### Fixed
 - **`validate` now rejects a check that is missing a load-bearing param** ([#45](https://github.com/IvanWng97/cogpin/issues/45))
   — the third-party adopter audit's silent-no-op class. A `forbid_pattern` with no `pattern`, a

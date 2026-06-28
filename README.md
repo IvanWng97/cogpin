@@ -384,6 +384,10 @@ python3 cogpin.py check --diff-file fix.diff --expect-block secret-scan  # confi
 python3 cogpin.py capability emit  # compile [capability] → the harness (declare → emit; the OS enforces)
 ```
 
+`cogpin check` **exit codes**: `0` = ok (or `--report-only`) · `1` = a blocking finding or a
+config/infra error · `2` = could not evaluate (an unreadable `--*-file` input). (`cogpin check
+--help` repeats this.)
+
 Safe rollout: ride the **authoritative** policy non-failing first — `cogpin check
 --report-only` (or `report-only: true` on the action) prints findings + a summary but
 always exits 0 (infra/config errors still fail); calibrate with `backtest` over real

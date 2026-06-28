@@ -498,7 +498,8 @@ class Config:
                     f"check `{c.id}`: severity=block requires an environment-provenance fact, but "
                     f"`{c.primitive}` reads an agent-authored token that only CLAIMS an out-of-band "
                     f"event — use severity=warn (a forcing-function nag), or back the requirement "
-                    f"with a real environment fact (e.g. a non-author approval)"
+                    f"with a real environment fact: require_approval_from / approval_policy (a "
+                    f"non-author approval) or require_checks_green (a CI conclusion)"
                 )
             # The moat trusts the `kind` LABEL, but attest/judge decide over no fact — a
             # `kind="fact"` on them is a lie that ships a `block` which silently never fires
@@ -2761,8 +2762,14 @@ def cmd_check(
         # stay fail-CLOSED (return 1). When the cause is an unknown-primitive / unsupported-schema
         # ConfigError, the vendored engine running this check is stale relative to the config it
         # gates (#16) — name that, instead of the opaque "cannot load config".
-        hint = (" — the vendored engine looks stale for this config; run `cogpin update`"
-                if any(s in str(e) for s in ("unknown primitive", "unsupported schema")) else "")
+        _es = str(e)
+        if "unsupported schema" in _es:
+            hint = " — the vendored engine is behind this config's schema; run `cogpin update`"
+        elif "unknown primitive" in _es:
+            hint = (" — check SCHEMA.md for the valid primitive names (or run `cogpin update` "
+                    "only if your engine is genuinely behind the docs)")
+        else:
+            hint = ""
         print(f"cogpin: cannot load base-pinned config: {e}{hint}", file=sys.stderr)
         return 1
     head = "HEAD"
@@ -3129,9 +3136,18 @@ def _config_advisories(cfg: Config) -> list[str]:
 
 
 def cmd_validate(path: str) -> int:
+    # `os.path.isdir` (not an `except IsADirectoryError`): Windows raises PermissionError, not
+    # IsADirectoryError, on `open(<dir>)` — the explicit check is the portable path.
+    if os.path.isdir(path):
+        print(f"cogpin: expected a file, not a directory: {path} (pass the path to a cogpin.toml)",
+              file=sys.stderr)
+        return 1
     try:
         with open(path, encoding="utf-8") as fh:
             cfg = Config.parse(fh.read())
+    except FileNotFoundError:
+        print(f"cogpin: config file not found: {path} (expected a .toml file)", file=sys.stderr)
+        return 1
     except (OSError, ConfigError) as e:
         print(f"cogpin: invalid config: {e}", file=sys.stderr)
         return 1
@@ -3774,7 +3790,10 @@ def cmd_install(cwd: str = ".", vendor: bool = True, config: bool = True,
         action, payload = _effective_hook_target(cwd, root)
         if action == "write":
             _install_prepush(payload)
-            did.append(f"wired pre-push managed block ({os.path.realpath(payload)})")
+            _mgr = _detect_hook_manager(root)  # in the write branch this is "husky" or None
+            _how = (f"via {_mgr} → {os.path.realpath(payload)}" if _mgr
+                    else f"directly → {os.path.realpath(payload)} (no hook manager detected)")
+            did.append(f"wired pre-push managed block {_how}")
         elif action.startswith("snippet:"):
             did.append(f"{action.split(':', 1)[1]} detected — wrote nothing; add this snippet:\n\n{payload}")
         else:
@@ -3940,6 +3959,7 @@ def cmd_doctor(cwd: str = ".", as_json: bool = False) -> int:
         print(json.dumps([{"status": s, "label": lbl, "fix": fx} for s, lbl, fx in rows], indent=2))
     else:
         glyph = {"ok": "✓", "warn": "~", "fail": "✗", "skip": "·"}
+        print("  legend: ✓ ok   ~ advisory (non-blocking)   ✗ must fix   · skipped")
         for s, lbl, fx in rows:
             print(f"  {glyph[s]} {lbl}")
             if fx and s in ("warn", "fail"):
@@ -3969,7 +3989,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("gate", help="agent layer: PreToolUse hook (deny forbidden / un-DoD'd git ops)")
     st = sub.add_parser("stop", help="agent layer: Stop hook (block turn-end on unmet DoD)")
     st.add_argument("--cwd", default=".")
-    c = sub.add_parser("check", help="change layer: gate the committed range (authoritative)")
+    c = sub.add_parser("check", help="change layer: gate the committed range (authoritative)",
+                        epilog="exit codes: 0 = ok (or --report-only) · 1 = a blocking finding or a config/infra error · 2 = could not evaluate (an unreadable --*-file input)")
     c.add_argument("--cwd", default=".")
     c.add_argument(
         "--no-run",
