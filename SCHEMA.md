@@ -243,9 +243,17 @@ module) · `public_surface` · `claude_md`. `box` defaults to the check `id`.
 ratchet gate                    # agent layer: PreToolUse hook (reads the tool envelope on stdin)
 ratchet stop --cwd .            # agent layer: Stop hook (blocks turn-end on unmet DoD)
 ratchet check --cwd .           # change layer: gate the committed range (authoritative)
-    [--no-run] [--allow-bypass]
+    [--no-run] [--allow-bypass] [--report-only]
     [--pr-body-file F] [--approvals a,b] [--reviews-file F]
     [--head-sha S] [--pr-author L] [--checks-file F]
+    # --report-only: print findings + a summary but exit 0 (global, temporary rollout switch;
+    #   distinct from per-check severity="warn"). Infra/config errors (unreachable base,
+    #   unloadable config) STILL fail closed. The action exposes it as `report-only:`.
+ratchet backtest --cwd . --range main~50..main  # replay the policy over merged history (calibration)
+    [--config F] [--fail-on-block]
+    # which past commits WOULD this policy block? Pure report (exit 0) unless --fail-on-block;
+    # exit 2 = couldn't run (bad range / shallow clone / unloadable config). Uses the WORKING
+    # config; covers diff-fact checks only (`run` + PR-context checks are skipped + named).
 ratchet judge --cwd .           # emit advisory judge prompts (CI pipes to a model)
 
 # author

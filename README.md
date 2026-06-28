@@ -363,8 +363,15 @@ python3 ratchet.py draft-lint # gate ratchet.toml.draft (the moat + outstanding 
 python3 ratchet.py gaps       # which CLAUDE.md rules are still prose with no mechanism
 python3 ratchet.py doctor     # diagnose both layers (or /ratchet-doctor)
 python3 ratchet.py validate   # checks the block-requires-fact invariant + structural sanity
+python3 ratchet.py backtest --range main~50..main  # replay the policy over history: which past commits would block?
 python3 ratchet.py capability emit  # compile [capability] → the harness (declare → emit; the OS enforces)
 ```
+
+Safe rollout: ride the **authoritative** policy non-failing first — `ratchet check
+--report-only` (or `report-only: true` on the action) prints findings + a summary but
+always exits 0 (infra/config errors still fail); calibrate with `backtest` over real
+merged history, then flip the switch to enforce. `--report-only` is a *global, temporary*
+rollout switch — distinct from a per-check `severity = "warn"` (permanent, per-check).
 
 The AI drafts to `ratchet.toml.draft`, never the live config; only the five
 safe-core blocks may be born enforcing, and `draft-lint` blocks the rename until

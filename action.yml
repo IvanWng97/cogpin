@@ -26,6 +26,15 @@ inputs:
   python-version:
     description: Python for the engine (needs >= 3.11 for tomllib).
     default: "3.13"
+  report-only:
+    description: >-
+      Rollout switch: 'true' runs the AUTHORITATIVE policy but always exits 0 (findings are
+      reported + a ::warning:: annotation is emitted, the job never fails) — ride it over real
+      PRs, then flip to 'false' to enforce. NOTE: on the pull_request trigger the workflow YAML
+      is read from the PR head, so a PR could flip this on for itself — pair with branch
+      protection / CODEOWNERS on .github/workflows/** (or pull_request_target). Distinct from a
+      per-check severity="warn" (that's permanent + per-check; this is global + temporary).
+    default: "false"
 
 runs:
   using: composite
@@ -76,8 +85,14 @@ runs:
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         DEFAULT_BRANCH: ${{ inputs.default-branch }}
+        REPORT_ONLY: ${{ inputs.report-only }}
       run: |
         set -euo pipefail
+        report=""
+        if [ "$REPORT_ONLY" = "true" ]; then
+          echo "::warning title=ratchet report-only::ratchet is in REPORT-ONLY mode — findings are reported but the gate will NOT fail. Set report-only:false to enforce."
+          report="--report-only"
+        fi
         body="$CONFIG_DIR/.ratchet-pr-body.txt"
         reviews="$CONFIG_DIR/.ratchet-reviews.json"
         checks="$CONFIG_DIR/.ratchet-checks.json"
@@ -112,7 +127,8 @@ runs:
           --approvals "$approvals" \
           --head-sha "$HEAD_SHA" \
           --pr-author "$PR_AUTHOR" \
-          --default-branch "$DEFAULT_BRANCH"
+          --default-branch "$DEFAULT_BRANCH" \
+          $report
 
     - name: ratchet check (push)
       if: github.event_name != 'pull_request'
@@ -121,4 +137,12 @@ runs:
         ENGINE: ${{ steps.prep.outputs.engine }}
         CONFIG_DIR: ${{ inputs.config-dir }}
         DEFAULT_BRANCH: ${{ inputs.default-branch }}
-      run: python3 "$ENGINE" check --cwd "$CONFIG_DIR" --default-branch "$DEFAULT_BRANCH"
+        REPORT_ONLY: ${{ inputs.report-only }}
+      run: |
+        set -euo pipefail
+        report=""
+        if [ "$REPORT_ONLY" = "true" ]; then
+          echo "::warning title=ratchet report-only::ratchet is in REPORT-ONLY mode — findings are reported but the gate will NOT fail. Set report-only:false to enforce."
+          report="--report-only"
+        fi
+        python3 "$ENGINE" check --cwd "$CONFIG_DIR" --default-branch "$DEFAULT_BRANCH" $report
