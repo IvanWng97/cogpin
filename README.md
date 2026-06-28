@@ -364,6 +364,7 @@ python3 ratchet.py gaps       # which CLAUDE.md rules are still prose with no me
 python3 ratchet.py doctor     # diagnose both layers (or /ratchet-doctor)
 python3 ratchet.py validate   # checks the block-requires-fact invariant + structural sanity
 python3 ratchet.py backtest --range main~50..main  # replay the policy over history: which past commits would block?
+python3 ratchet.py check --diff-file fix.diff --expect-block secret-scan  # config-as-code: assert a crafted diff fires a check
 python3 ratchet.py capability emit  # compile [capability] → the harness (declare → emit; the OS enforces)
 ```
 
@@ -372,6 +373,13 @@ Safe rollout: ride the **authoritative** policy non-failing first — `ratchet c
 always exits 0 (infra/config errors still fail); calibrate with `backtest` over real
 merged history, then flip the switch to enforce. `--report-only` is a *global, temporary*
 rollout switch — distinct from a per-check `severity = "warn"` (permanent, per-check).
+
+Test `ratchet.toml` as code: `ratchet check --diff-file fixtures/leak.diff
+--expect-block secret-scan --expect-clean two-lens` evaluates your **working** policy
+against a crafted unified diff and asserts which checks fire — exit 0 = met, 1 = a
+violated expectation (the regression net), 2 = couldn't run (typo'd / un-evaluable
+`--expect` id). Generate a fixture with `git diff > fixtures/leak.diff`; supply
+`--pr-body-file`/`--reviews-file`/`--checks-file` to exercise PR-context checks too.
 
 The AI drafts to `ratchet.toml.draft`, never the live config; only the five
 safe-core blocks may be born enforcing, and `draft-lint` blocks the rename until

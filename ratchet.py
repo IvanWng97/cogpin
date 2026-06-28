@@ -512,6 +512,92 @@ class Config:
 ADDED, MODIFIED, DELETED = "A", "M", "D"
 
 
+def _parse_unified_added_removed(diff: str) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """The shared body parse — walk a unified diff, attributing +/- CONTENT lines to the
+    +++ b/ / --- a/ path of the hunk they sit in. Both acquisition paths (git `from_range`
+    and the fixture `from_unified_diff`) run this ONE battle-tested loop so they can't drift.
+
+    +++ b/<path> / --- a/<path> are FILE HEADERS, but a removed/added CONTENT line can itself
+    start with `--- `/`+++ ` (an SQL/Lua `-- ` comment renders as `--- …` under a single `-`
+    marker). Disambiguate by hunk state: headers sit in the per-file preamble (before the first
+    `@@`); attribute +/- to a path only inside a hunk body. Else one such line poisons path
+    attribution for the whole file — a scoped forbid_removal/secret_scan false-negative."""
+    added: list[tuple[str, str]] = []
+    removed: list[tuple[str, str]] = []
+    new_path = old_path = ""
+    in_hunk = False
+    # split("\n") + rstrip("\r"): preserve CRLF normalization (git terminates lines with \n; a
+    # CRLF file's content keeps its trailing \r) WITHOUT splitlines()'s over-eager break on
+    # \v \f \x85 U+2028/9 inside a content line, which would sever an added line and drop the
+    # post-separator token (a false-negative).
+    for raw in diff.split("\n"):
+        line = raw.rstrip("\r")
+        if line.startswith("diff --git "):
+            in_hunk = False  # next file's preamble begins
+        elif line.startswith("@@"):
+            in_hunk = True
+        elif not in_hunk and line.startswith("--- "):
+            old_path = line[6:] if line.startswith("--- a/") else ""
+        elif not in_hunk and line.startswith("+++ "):
+            new_path = line[6:] if line.startswith("+++ b/") else ""
+        elif in_hunk and line.startswith("+") and new_path:
+            added.append((new_path, line[1:]))
+        elif in_hunk and line.startswith("-") and old_path:
+            removed.append((old_path, line[1:]))
+    return added, removed
+
+
+def _changed_from_headers(diff: str) -> list[tuple[str, str]]:
+    """Derive (status, path) per file from a unified diff's HEADERS — the `--name-status`
+    equivalent for a fixture with no git to query. Handles adds (`new file mode`), deletes
+    (`deleted file mode`), renames (`rename to` → MODIFIED on the new path, matching
+    name-status's R→M coalesce) and binary blobs (`Binary files a/X and b/Y differ`, which
+    carry no +++/--- header). Header lines are read only in the per-file preamble (before the
+    first `@@`) so a content line starting with `--- `/`+++ ` can't be mistaken for a header."""
+    changed: list[tuple[str, str]] = []
+    status = MODIFIED
+    new_path = old_path = rename_to = ""
+    in_body = seen = False
+
+    def flush() -> None:
+        if seen and (path := rename_to or new_path or old_path):
+            changed.append((status, path))
+
+    for raw in diff.split("\n"):
+        line = raw.rstrip("\r")
+        if line.startswith("diff --git "):
+            flush()
+            status, new_path, old_path, rename_to = MODIFIED, "", "", ""
+            in_body, seen = False, True
+        elif in_body:
+            continue  # past the first @@: only content, never a header
+        elif line.startswith("@@"):
+            in_body = True
+        elif line.startswith("new file mode"):
+            status = ADDED
+        elif line.startswith("deleted file mode"):
+            status = DELETED
+        elif line.startswith("rename to "):
+            rename_to = line[len("rename to "):]
+        elif line.startswith("--- "):
+            old_path = line[6:] if line.startswith("--- a/") else ""
+        elif line.startswith("+++ "):
+            new_path = line[6:] if line.startswith("+++ b/") else ""
+        elif line.startswith("Binary files "):
+            # a binary blob has no +++/--- header — the only path source is this line:
+            # `Binary files a/X and b/Y differ` (a/X or b/Y is /dev/null for a delete/add).
+            body = line[len("Binary files "):]
+            if body.endswith(" differ"):
+                body = body[: -len(" differ")]
+            a, _, b = body.partition(" and ")
+            if b.startswith("b/"):
+                new_path = b[2:]
+            if a.startswith("a/"):
+                old_path = a[2:]
+    flush()
+    return changed
+
+
 @dataclass
 class DiffFacts:
     added: list[tuple[str, str]] = field(default_factory=list)  # (new path, added line)
@@ -556,35 +642,28 @@ class DiffFacts:
                 f.changed.append((status, parts[-1]))
         diff = _git(cwd, ["-c", "core.quotepath=false", "diff", "--unified=0", rng])
         if diff:
-            # +++ b/<path> / --- a/<path> are FILE HEADERS, but a removed/added CONTENT line
-            # can itself start with `--- `/`+++ ` (an SQL/Lua `-- ` comment renders as
-            # `--- …` under a single `-` marker). Disambiguate by hunk state: headers sit in
-            # the per-file preamble (before the first `@@`); attribute +/- to a path only
-            # inside a hunk body. Else one such line poisons path attribution for the whole
-            # file — a scoped forbid_removal/secret_scan false-negative.
-            new_path = old_path = ""
-            in_hunk = False
-            for raw in diff.split("\n"):
-                # split("\n") + rstrip("\r"): preserve CRLF normalization (git terminates
-                # lines with \n; a CRLF file's content keeps its trailing \r) WITHOUT
-                # splitlines()'s over-eager break on \v \f \x85 U+2028/9 inside a content
-                # line, which would sever an added line and drop the post-separator token.
-                line = raw.rstrip("\r")
-                if line.startswith("diff --git "):
-                    in_hunk = False  # next file's preamble begins
-                elif line.startswith("@@"):
-                    in_hunk = True
-                elif not in_hunk and line.startswith("--- "):
-                    old_path = line[6:] if line.startswith("--- a/") else ""
-                elif not in_hunk and line.startswith("+++ "):
-                    new_path = line[6:] if line.startswith("+++ b/") else ""
-                elif in_hunk and line.startswith("+") and new_path:
-                    f.added.append((new_path, line[1:]))
-                elif in_hunk and line.startswith("-") and old_path:
-                    f.removed.append((old_path, line[1:]))
+            f.added, f.removed = _parse_unified_added_removed(diff)
         log = _git(cwd, ["log", "--format=%B%x1e", rng])
         if log:
             f.commit_msgs = [m.strip() for m in log.split("\x1e") if m.strip()]
+        return f
+
+    @staticmethod
+    def from_unified_diff(text: str) -> "DiffFacts":
+        """Acquisition source #3 (#18): build DiffFacts from a raw git-format unified diff (a
+        fixture file) so a consumer can regression-test ratchet.toml against crafted diffs.
+        Reuses the SAME added/removed body parse as from_range; derives `changed` from the file
+        headers (a fixture has no git to query for `--name-status`). REQUIRES git format (the
+        `diff --git` header) — a plain `diff -u` carries no rename/delete/binary status, so
+        accepting it would silently under-populate `changed` and read as a false-clean."""
+        if "diff --git " not in text:
+            raise ValueError(
+                "not a git-format unified diff (no `diff --git` header) — generate the fixture "
+                "with `git diff` / `git format-patch`, not plain `diff -u`"
+            )
+        f = DiffFacts()
+        f.added, f.removed = _parse_unified_added_removed(text)
+        f.changed = _changed_from_headers(text)
         return f
 
 
@@ -2612,6 +2691,153 @@ def cmd_backtest(cwd: str = ".", rng: str = "", config: str | None = None,
     return 1 if (fail_on_block and would_block) else 0
 
 
+# Primitives a DIFF fixture can never decide, regardless of supplied context: `run` shells out
+# to the live tree (fixture runs it OFF), and max_added_file_bytes needs real blob bytes a
+# unified diff doesn't carry. The PR-context primitives are conditionally blind — evaluable
+# only if the matching fixture file is supplied — so they're computed against the facts below.
+_FIXTURE_BLIND_ALWAYS = frozenset({"run", "max_added_file_bytes"})
+_FIXTURE_APPROVAL = frozenset({
+    "protected_path", "require_approval_from", "pattern_requires_approval", "approval_policy",
+})
+
+
+def _fixture_blind(cfg: Config, facts: DiffFacts) -> set[str]:
+    """Check ids a fixture eval CANNOT decide given the SUPPLIED context — so an `--expect`
+    naming one would silently mis-pass/-fail. Unlike backtest's static set this is conditional:
+    a fixture CAN carry PR context (--reviews-file/--checks-file/--pr-body-file), so an approval/
+    checks/pr_body check is blind only when its input is absent (the check would skip → no
+    finding → a bogus 'clean')."""
+    has_reviews = facts.reviews is not None or facts.approvals is not None
+    has_checks = facts.checks is not None
+    has_body = facts.pr_body is not None
+    out: set[str] = set()
+    for c in cfg.checks:
+        p = c.primitive
+        if p in _FIXTURE_BLIND_ALWAYS:
+            out.add(c.id)
+        elif p in _FIXTURE_APPROVAL and not has_reviews:
+            out.add(c.id)
+        elif p == "require_checks_green" and not has_checks:
+            out.add(c.id)
+        elif p == "path_requires" and c.when_marker and not has_body:
+            out.add(c.id)
+        elif (p in ("require_message_pattern", "forbid_in_message")
+              and c.msg_scope and all(s == "pr_body" for s in c.msg_scope) and not has_body):
+            out.add(c.id)
+    return out
+
+
+def cmd_fixture(
+    cwd: str,
+    diff_file: str | None,
+    expect_block: str | None = None,
+    expect_clean: str | None = None,
+    pr_body_file: str | None = None,
+    approvals: str | None = None,
+    reviews_file: str | None = None,
+    head_sha: str | None = None,
+    pr_author: str | None = None,
+    checks_file: str | None = None,
+) -> int:
+    """Config-as-code fixture testing (#18): evaluate the WORKING-tree policy against a crafted
+    unified-diff fixture and assert per-check expectations — turning ratchet.toml into tested
+    code. Uses the working config (you test the policy you're EDITING, not a base pin), and
+    never runs `run` blocks (allow_run=False). Exit 0 = expectations met (or, with no
+    expectations, a finding preview); 1 = an expectation was VIOLATED (the test failed);
+    2 = couldn't run the test (no/bad diff or config, unknown or un-evaluable --expect id)."""
+    if not diff_file:
+        print("ratchet: --expect-block/--expect-clean require --diff-file (a fixture to assert "
+              "against)", file=sys.stderr)
+        return 2
+    try:
+        cfg = _read_working_config(cwd)
+    except (OSError, ConfigError) as e:
+        print(f"ratchet: cannot load ratchet.toml: {e}", file=sys.stderr)
+        return 2
+    if not os.path.exists(diff_file):
+        print(f"ratchet: no such diff file: {diff_file}", file=sys.stderr)
+        return 2
+    try:
+        with open(diff_file, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError as e:
+        print(f"ratchet: cannot read diff file: {e}", file=sys.stderr)
+        return 2
+    try:
+        facts = DiffFacts.from_unified_diff(text)
+    except ValueError as e:
+        print(f"ratchet: {diff_file}: {e}", file=sys.stderr)
+        return 2
+    # Layer in any supplied PR context — a fixture CAN carry it (a body file, a reviews/checks
+    # JSON), which is what makes the approval/checks/pr_body checks testable here.
+    if pr_body_file:
+        try:
+            with open(pr_body_file, encoding="utf-8") as fh:
+                facts.pr_body = fh.read()
+        except OSError:
+            pass
+    if approvals is not None:
+        facts.approvals = [a.strip() for a in approvals.split(",") if a.strip()]
+    if reviews_file:
+        facts.reviews = _load_reviews(reviews_file) or []
+    if head_sha:
+        facts.head_sha = head_sha
+    facts.pr_author = pr_author
+    if checks_file and os.path.exists(checks_file):
+        facts.checks = _load_checks(checks_file) or []
+
+    want_block = [s.strip() for s in (expect_block or "").split(",") if s.strip()]
+    want_clean = [s.strip() for s in (expect_clean or "").split(",") if s.strip()]
+    findings = run_change(cfg, facts, allow_run=False)
+    for f in findings:
+        tag = "BLOCK" if f.severity == "block" else "warn "
+        print(f"  [{tag}] {f.id}: {f.reason}")
+    if not want_block and not want_clean:
+        # a fixture with no expectations is a preview ("what would fire?") — exit 0, nothing
+        # to assert. The --expect flags are what turn it into a pass/fail regression test.
+        print(f"ratchet: {len(findings)} finding(s) over {diff_file} (no --expect assertions)")
+        return 0
+    # Validate the expectation ids BEFORE asserting — a typo or an un-evaluable check would
+    # otherwise read as a silent pass/fail, the exact false-confidence fixtures exist to kill.
+    ids = {c.id for c in cfg.checks}
+    unknown = sorted({i for i in want_block + want_clean if i not in ids})
+    if unknown:
+        print(f"ratchet: --expect names check id(s) not in ratchet.toml: {', '.join(unknown)}",
+              file=sys.stderr)
+        return 2
+    overlap = sorted(set(want_block) & set(want_clean))
+    if overlap:
+        print(f"ratchet: check id(s) in BOTH --expect-block and --expect-clean: "
+              f"{', '.join(overlap)}", file=sys.stderr)
+        return 2
+    blind = sorted((set(want_block) | set(want_clean)) & _fixture_blind(cfg, facts))
+    if blind:
+        print(f"ratchet: --expect names check(s) a diff fixture can't evaluate — a `run` needs "
+              f"a checkout, max_added_file_bytes needs blob sizes, and approval/checks/pr_body "
+              f"checks need their --reviews-file/--checks-file/--pr-body-file: "
+              f"{', '.join(blind)}", file=sys.stderr)
+        return 2
+    blocked = {f.id for f in findings if f.severity == "block"}
+    fired = {f.id for f in findings}
+    failures = []
+    for i in want_block:
+        if i not in blocked:
+            failures.append(f"expected BLOCK from `{i}` — "
+                            + ("it fired as warn, not block" if i in fired else "it did not fire"))
+    for i in want_clean:
+        if i in fired:
+            failures.append(f"expected `{i}` CLEAN — it fired ({'block' if i in blocked else 'warn'})")
+    if failures:
+        for msg in failures:
+            print(f"  ✗ {msg}", file=sys.stderr)
+        print(f"ratchet: fixture {diff_file}: {len(failures)} expectation(s) FAILED",
+              file=sys.stderr)
+        return 1
+    print(f"ratchet: fixture {diff_file}: all {len(want_block) + len(want_clean)} "
+          "expectation(s) met")
+    return 0
+
+
 def _config_advisories(cfg: Config) -> list[str]:
     """Non-fatal config-shape foot-guns: a valid config can still be a trap. Surfaced by
     `validate` (and never fail it) so the racy shape is caught at author time, not in a
@@ -3484,6 +3710,9 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--default-branch", help="trusted base branch name (CI passes the repo's real default; overrides ratchet.toml so the base can't be redirected from the PR head)")
     c.add_argument("--allow-bypass", action="store_true", help="honour the agent-layer bypass (pre-push only)")
     c.add_argument("--report-only", action="store_true", help="print findings + a summary but always exit 0 (global rollout switch; infra/config errors still fail)")
+    c.add_argument("--diff-file", help="evaluate a crafted unified-diff FIXTURE instead of the git range (config-as-code testing; uses the working ratchet.toml, never `run`)")
+    c.add_argument("--expect-block", help="comma-separated check ids that MUST block on the fixture — exit 1 if any doesn't (requires --diff-file)")
+    c.add_argument("--expect-clean", help="comma-separated check ids that MUST NOT fire on the fixture — exit 1 if any does (requires --diff-file)")
     bt = sub.add_parser("backtest", help="replay the policy over merged history: which past commits would block? (calibration)")
     bt.add_argument("--cwd", default=".")
     bt.add_argument("--range", required=True, dest="rng", metavar="REV-RANGE", help="git rev-range, e.g. main~50..main")
@@ -3533,6 +3762,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "stop":
         return cmd_stop(args.cwd)
     if args.cmd == "check":
+        if args.diff_file or args.expect_block or args.expect_clean:
+            # fixture mode (#18): a crafted diff + per-check expectations, NOT the git range.
+            return cmd_fixture(
+                args.cwd,
+                args.diff_file,
+                expect_block=args.expect_block,
+                expect_clean=args.expect_clean,
+                pr_body_file=args.pr_body_file,
+                approvals=args.approvals,
+                reviews_file=args.reviews_file,
+                head_sha=args.head_sha,
+                pr_author=args.pr_author,
+                checks_file=args.checks_file,
+            )
         return cmd_check(
             args.cwd,
             allow_run=not args.no_run,
