@@ -26,6 +26,7 @@ plugin IS the repo, auditable in plain text.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -2362,6 +2363,16 @@ def cmd_stop(cwd: str = ".") -> int:
     try:
         cfg = _read_working_config(cwd)
     except (OSError, ConfigError):
+        # The gate fail-OPENS on an unloadable config — but it must NOT do so SILENTLY (#16).
+        # A PRESENT-but-unloadable ratchet.toml (bad TOML, a primitive a stale engine doesn't
+        # know, or an unreadable file) means the real-time gate is OFF; say so on stderr, once
+        # per turn-end. Keyed on EXISTENCE, not the exception type — a present-but-unreadable
+        # file raises OSError too, so branching on ConfigError-vs-OSError would miss it. An
+        # absent config is genuinely nothing to gate → stay silent. The decision still rides
+        # stdout as "{}" (stderr-only notice keeps the Stop-hook JSON contract intact).
+        if os.path.exists(os.path.join(cwd, "ratchet.toml")):
+            print("ratchet: ratchet.toml present but the agent-layer engine can't load it — "
+                  "real-time gate OFF this turn; run `ratchet doctor`", file=sys.stderr)
         print("{}")
         return 0
     facts = _local_facts(cwd, cfg.repo.default_branch)
@@ -2457,7 +2468,12 @@ def cmd_check(
     try:
         cfg = load_config(cwd, base)
     except (OSError, ConfigError) as e:
-        print(f"ratchet: cannot load base-pinned config: {e}", file=sys.stderr)
+        # stay fail-CLOSED (return 1). When the cause is an unknown-primitive / unsupported-schema
+        # ConfigError, the vendored engine running this check is stale relative to the config it
+        # gates (#16) — name that, instead of the opaque "cannot load config".
+        hint = (" — the vendored engine looks stale for this config; run `ratchet update`"
+                if any(s in str(e) for s in ("unknown primitive", "unsupported schema")) else "")
+        print(f"ratchet: cannot load base-pinned config: {e}{hint}", file=sys.stderr)
         return 1
     head = "HEAD"
     facts = DiffFacts.from_range(cwd, base or "HEAD~1", head)
@@ -2837,6 +2853,105 @@ def _vendor_engine(root: str) -> str | None:
     return dst
 
 
+def _extract_engine_meta(src: str) -> tuple[set[str], int | None]:
+    """STATICALLY read an engine source's known-primitive set + SCHEMA_VERSION, WITHOUT
+    executing it (it may be a stale or foreign vendored copy — never import/exec untrusted
+    or version-skewed code). AST only; degrades safe — a syntax error returns (set(), None)
+    so callers flag "can't determine" rather than crash. Handles PRIMITIVE_SPECS written as
+    an ANNOTATED dict (`PRIMITIVE_SPECS: dict[...] = {...}` → an ast.AnnAssign, NOT ast.Assign)
+    and falls back to an old `PRIMITIVES = frozenset({...})` / bare-set literal."""
+    try:
+        tree = ast.parse(src)
+    except (SyntaxError, ValueError):
+        return set(), None
+
+    def _targets(node: ast.AST) -> list[str]:
+        if isinstance(node, ast.Assign):
+            return [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            return [node.target.id]
+        return []
+
+    def _str_consts(elts: list[ast.expr]) -> set[str]:
+        return {e.value for e in elts if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+
+    prims: set[str] = set()
+    schema: int | None = None
+    for node in tree.body:
+        names = _targets(node)
+        val = getattr(node, "value", None)
+        if "PRIMITIVE_SPECS" in names and isinstance(val, ast.Dict):
+            prims |= {k.value for k in val.keys
+                      if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+        elif "PRIMITIVES" in names and not prims:
+            # very old engines: a `frozenset({...})` call or a bare set/list literal
+            if isinstance(val, ast.Call) and val.args and isinstance(val.args[0], (ast.Set, ast.List, ast.Tuple)):
+                prims |= _str_consts(val.args[0].elts)
+            elif isinstance(val, (ast.Set, ast.List, ast.Tuple)):
+                prims |= _str_consts(val.elts)
+        if "SCHEMA_VERSION" in names and isinstance(val, ast.Constant) and isinstance(val.value, int):
+            schema = val.value
+    return prims, schema
+
+
+def _engine_skew(vendored_src: str, cfg_primitives: set[str], cfg_schema: int,
+                 running_schema: int) -> list[tuple[str, str, str]]:
+    """Compare a VENDORED engine source against the config it must serve + the running engine.
+    PURE (cmd_doctor does the I/O and passes RAW config values, so detection works even when
+    the running engine can't validate the config — the exact skew case). Returns (status,
+    label, fix) rows. A stale vendored engine silently fail-opens the agent layer (#16); these
+    rows make the skew visible and point at `ratchet update`."""
+    rows: list[tuple[str, str, str]] = []
+    vend_prims, vend_schema = _extract_engine_meta(vendored_src)
+    if not vend_prims:
+        rows.append(("warn", "vendored engine: can't determine its primitive set (very old or unparseable copy)",
+                     "run `ratchet update` to re-vendor the active engine"))
+    else:
+        unknown = sorted(p for p in cfg_primitives if p and p not in vend_prims)
+        if unknown:
+            rows.append(("fail", f"vendored engine is STALE — config uses {', '.join(unknown)} that "
+                                 ".ratchet/ratchet.py doesn't know (agent layer fail-opens on this)",
+                         "run `ratchet update` to re-vendor the active engine"))
+    if vend_schema is not None and cfg_schema and vend_schema != cfg_schema:
+        rows.append(("fail", f"vendored engine schema v{vend_schema} ≠ config schema v{cfg_schema} "
+                             "(the change layer will reject the config)", "run `ratchet update`"))
+    elif vend_schema is not None and running_schema and vend_schema != running_schema:
+        rows.append(("warn", f"vendored engine schema v{vend_schema} differs from the active engine "
+                             f"v{running_schema}", "run `ratchet update` to align"))
+    return rows
+
+
+def cmd_update(cwd: str = ".") -> int:
+    """Re-vendor the RUNNING engine → `.ratchet/ratchet.py` — the first-class update path for
+    #16's stale-engine skew (no more "remember to re-run install"). Copies the running engine
+    verbatim (no content injection), exactly like install; a vendored-engine diff is still
+    gated by the change layer (protected_path + base-pin) on the PR, so this is not a
+    self_protect bypass. Idempotent: a no-op + report when already current."""
+    root = _repo_root(cwd)
+    if root is None:
+        print("ratchet: not a git repository — run `git init` first", file=sys.stderr)
+        return 1
+    dst = os.path.join(root, ".ratchet", "ratchet.py")
+    running = os.path.realpath(__file__)
+    if os.path.realpath(dst) == running:
+        print("ratchet: cannot update from the vendored copy itself — run via the plugin engine "
+              "(inside Claude Code, or `python3 <plugin>/ratchet.py update`)", file=sys.stderr)
+        return 1
+    new_src = _slurp(running)
+    old_src = _slurp(dst) if os.path.exists(dst) else ""
+    if old_src == new_src:
+        print(f"ratchet: .ratchet/ratchet.py already current (schema v{SCHEMA_VERSION})")
+        return 0
+    _, old_schema = _extract_engine_meta(old_src) if old_src else (set(), None)
+    if _vendor_engine(root) is None:   # self-reference already excluded above; defensive
+        print("ratchet: could not re-vendor the engine", file=sys.stderr)
+        return 1
+    old_desc = (f"schema v{old_schema}" if old_schema is not None
+                else ("absent" if not old_src else "unknown schema"))
+    print(f"ratchet: re-vendored .ratchet/ratchet.py ({old_desc} → schema v{SCHEMA_VERSION})")
+    return 0
+
+
 def _exec_mode(real: str) -> int:
     """The mode for an (atomic re-)write of a hook file: PRESERVE an existing file's perms
     and only ensure +x — appending the managed block must not widen a husky / `.githooks`
@@ -3116,11 +3231,13 @@ def cmd_doctor(cwd: str = ".", as_json: bool = False) -> int:
         add("warn", f"python {sys.version_info.major}.{sys.version_info.minor} < 3.11", "tomllib needs 3.11+")
 
     hard_fail = False
+    engine_compiles = False
     eng = os.path.join(base_dir, ".ratchet", "ratchet.py")
     if os.path.exists(eng):
         try:
             compile(_slurp(eng), eng, "exec")  # syntax-check; writes no __pycache__
             add("ok", ".ratchet/ratchet.py present and compiles")
+            engine_compiles = True
         except SyntaxError as e:
             add("fail", ".ratchet/ratchet.py does not compile", str(e).splitlines()[0])
             hard_fail = True
@@ -3136,10 +3253,34 @@ def cmd_doctor(cwd: str = ".", as_json: bool = False) -> int:
             add("ok", f"ratchet.toml valid — {len(cfg.checks)} checks, base_pinned={cfg.meta.base_pinned}")
         except (OSError, ConfigError) as e:
             add("fail", "ratchet.toml invalid", str(e))
+            # an unknown-primitive / unsupported-schema ConfigError from the RUNNING engine is
+            # the stale-engine signature, not a bad config — name the real cause + remedy (#16).
+            if any(s in str(e) for s in ("unknown primitive", "unsupported schema")):
+                add("warn", "↳ the running engine may be stale relative to this config",
+                    "reinstall the plugin, or run `ratchet update` to re-vendor the engine")
             hard_fail = True
     else:
         add("fail", "ratchet.toml missing", "run `ratchet install` / `/ratchet-init`")
         hard_fail = True
+
+    # engine/config SKEW (#16): the agent layer fail-OPENS when the vendored engine is too old
+    # for the config (unknown primitive) or its schema differs. Derive the config's primitives +
+    # schema from a RAW parse — independent of the running engine's validate(), which is exactly
+    # what breaks in the skew case — then compare against the VENDORED engine's static metadata.
+    if engine_compiles and os.path.exists(cfg_path):
+        try:
+            raw = tomllib.loads(_slurp(cfg_path))
+        except (OSError, ValueError):
+            raw = {}
+        raw_checks = raw.get("check", [])
+        cfg_prims: set[str] = {p for c in raw_checks if isinstance(c, dict)
+                               if isinstance(p := c.get("primitive"), str)}
+        raw_schema = raw.get("schema", 0)
+        cfg_schema = raw_schema if isinstance(raw_schema, int) else 0
+        for s, lbl, fx in _engine_skew(_slurp(eng), cfg_prims, cfg_schema, SCHEMA_VERSION):
+            add(s, lbl, fx)
+            if s == "fail":
+                hard_fail = True
 
     if root:
         action, payload = _effective_hook_target(cwd, root)
@@ -3260,6 +3401,8 @@ def main(argv: list[str] | None = None) -> int:
     ins.add_argument("--no-gitignore", action="store_true", help="skip the .gitignore entry")
     un = sub.add_parser("uninstall", help="strip the local pre-push managed block (never removes committed source)")
     un.add_argument("--cwd", default=".")
+    up = sub.add_parser("update", help="re-vendor the active engine → .ratchet/ratchet.py (fix a stale-engine skew)")
+    up.add_argument("--cwd", default=".")
     dr = sub.add_parser("doctor", help="diagnose both layers (read-only; exit 1 only on a hard change-layer failure)")
     dr.add_argument("--cwd", default=".")
     dr.add_argument("--json", action="store_true", help="emit the per-check status array")
@@ -3312,6 +3455,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.cmd == "uninstall":
         return cmd_uninstall(args.cwd)
+    if args.cmd == "update":
+        return cmd_update(args.cwd)
     if args.cmd == "doctor":
         return cmd_doctor(args.cwd, as_json=args.json)
     if args.cmd == "capability":
