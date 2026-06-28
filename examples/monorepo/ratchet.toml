@@ -1,0 +1,113 @@
+# ratchet recipe — a POLYGLOT MONOREPO (Rust workspace + Astro/TS site + a TS extension
+# + a Python scripts/ dir). The engine is language-agnostic: per-subtree policy is just
+# literal globs on each check's `scope`. The point of this recipe is a rule that is correct
+# on ONE subtree and wrong on another — `println!` is a debug leak in Rust, meaningless in
+# TS; `console.log` the reverse. `suggest --format json` emits a `languages` breakdown so the
+# host agent can author these per-subtree checks (#19).
+#
+# Lift it, adjust the subtree globs, and PROVE each scope with a fixture (see fixtures/ +
+# `ratchet check --diff-file`), because `validate` can't catch a glob TYPO — only a fixture can:
+#   python3 .ratchet/ratchet.py validate --config ratchet.toml
+#   python3 .ratchet/ratchet.py check --diff-file fixtures/rust-dbg.diff --expect-block no-rust-dbg
+#
+# If you find yourself repeating the same subtree glob across many checks, named sub-scopes
+# (`[scope.site]` referenced by `@site`) are tracked in #19 — until then, literal globs.
+# The one rule: severity="block" REQUIRES kind="fact".
+schema = 1
+
+[repo]
+default_branch = "main"
+# the flat union across subtrees — the [repo] defaults. Per-subtree rules below scope tighter.
+code = ["crates/**/*.rs", "site/**/*.ts", "site/**/*.tsx", "extension/**/*.ts", "scripts/**/*.py"]
+tests = ["crates/**/tests/**/*.rs", "site/**/*.test.ts", "**/test_*.py"]
+docs = ["**/*.md", "docs/**"]
+
+[meta]
+base_pinned = true
+bypass_env = "RATCHET_BYPASS"          # agent-layer escape hatch (always logged)
+
+# ── safe core: always armed, all kind=fact ───────────────────────────────────
+[[check]]
+id = "no-verify"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "forbid_command"
+pattern = "--no-verify|--no-gpg-sign"
+
+[[check]]
+id = "branch-first"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "forbid_commit_on_branch"
+branch = ["main", "master"]
+ops = ["commit", "push"]
+
+[[check]]
+id = "self-protect"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "self_protect"
+paths = ["ratchet.toml", ".ratchet/**", ".github/workflows/**"]
+
+[[check]]
+id = "secret-scan"
+kind = "fact"
+severity = "block"
+primitive = "secret_scan"
+forbid_paths = [".env", ".env.*", "*.env", "*.pem", "*.key", "id_rsa", "*.p12"]
+
+# ── per-subtree denylists: the SAME concept ("no debug prints"), a DIFFERENT pattern + scope
+#    per language. Each is wrong if applied to the others' tree — that's why they're scoped. ──
+
+# Rust subtree only: a committed `println!`/`dbg!`/`eprintln!` is a debug leak.
+[[check]]
+id = "no-rust-dbg"
+kind = "fact"
+severity = "block"
+primitive = "forbid_pattern"
+pattern = '\bdbg!\s*\(|\beprintln!\s*\(|\bprintln!\s*\('
+scope = ["crates/**/*.rs"]
+strip_comments = true
+
+# TS subtrees only: a stray `console.log`. `scope` COMPOSES literal globs across TWO subtrees
+# (the Astro site AND the extension) — one check, multiple areas, no per-area copy.
+[[check]]
+id = "no-js-console"
+kind = "fact"
+severity = "block"
+primitive = "forbid_pattern"
+pattern = 'console\.(?:log|debug|warn)\s*\('
+scope = ["site/**/*.ts", "site/**/*.tsx", "extension/**/*.ts", "extension/**/*.tsx"]
+strip_comments = true
+
+# Python scripts/ subtree only: a left-in debugger.
+[[check]]
+id = "no-py-debugger"
+kind = "fact"
+severity = "block"
+primitive = "forbid_pattern"
+pattern = '\bbreakpoint\s*\(|\bpdb\.set_trace\b|\bimport\s+pdb\b'
+scope = ["scripts/**/*.py"]
+strip_comments = true
+
+# Touch any code subtree → touch docs (existence floor; spans every subtree via "code").
+[[check]]
+id = "docs-currency"
+kind = "fact"
+severity = "warn"
+primitive = "path_requires"
+when = "code"
+need = "docs"
+
+# THE teeth: a monorepo test aggregator from the base-pinned policy (adjust to your runner —
+# `just test-all`, `make test`, a turbo/nx task). Change layer only.
+[[check]]
+id = "tests-pass"
+kind = "fact"
+severity = "block"
+layer = "change"
+primitive = "run"
+cmd = "make test"

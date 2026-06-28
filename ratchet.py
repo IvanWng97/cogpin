@@ -1759,32 +1759,77 @@ _LANG_PROFILES: tuple[Lang, ...] = (
 )
 
 
-def guess_globs(paths: list[str]) -> tuple[list[str], list[str], list[str]]:
-    """(code, tests, docs) globs for a tracked-path list. Picks the dominant language by
-    code-extension file count (ties by `_LANG_PROFILES` order), then keeps ONLY the globs
-    that actually match ≥1 path via the engine's own `_glob_to_re` (so a flat repo emits
-    `*.py`, not `src/**/*.py`). docs default `["**/*.md"]`, plus `docs/**` iff a docs/ path
-    exists. Empty/garbled tree → ([], [], ["**/*.md"]) — never raises."""
-    docs = ["**/*.md"]
-    if any(p.startswith("docs/") for p in paths):
-        docs.append("docs/**")
+@dataclass(frozen=True)
+class LangScope:
+    name: str
+    file_count: int
+    code: list[str]
+    tests: list[str]
+
+
+# A secondary language needs a REAL area, not a stray file or two. An ABSOLUTE floor, never a
+# fraction: a 200-file TS site in a 5000-file Rust repo is ~3.8%, so any fraction gate high
+# enough to drop 3 stray files also drops the real site (under-coverage = the cardinal sin).
+_SECONDARY_MIN_FILES = 10
+_MAX_LANGS = 4  # cap the per-language breakdown (6 profiles; rarely bites)
+
+
+def guess_scopes(paths: list[str]) -> list[LangScope]:
+    """Per-language (code, tests) scopes for the languages PRESENT in a tracked-path list,
+    dominant-first — the polyglot generalization of the old single-dominant pick (#19). The
+    dominant language (most code files) is always included; a SECONDARY enters only at
+    `>= min(_SECONDARY_MIN_FILES, dominant_count)` files (the clamp lets a near-parity
+    secondary in on a tiny repo while 3-in-5000 stays out). Globs are kept only if they match
+    ≥1 path, with the per-lang code fallback applied PER LANG (so a flat-layout secondary still
+    contributes `**/*{ext}`, never silently empty). Empty/garbled tree → []. Never raises."""
     if not paths:
-        return ([], [], docs)
-    best: Lang | None = None
-    best_n = 0
-    for lang in _LANG_PROFILES:
-        n = sum(1 for p in paths if p.endswith(lang.exts))
-        if n > best_n:
-            best_n, best = n, lang
-    if not best:
-        return ([], [], docs)
+        return []
+    present = sorted(
+        ((n, i, lang) for i, lang in enumerate(_LANG_PROFILES)
+         if (n := sum(1 for p in paths if p.endswith(lang.exts))) > 0),  # n>0: a zero-match lang is never selected
+        key=lambda t: (-t[0], t[1]),  # count desc, then _LANG_PROFILES order (the old tie-break)
+    )
+    if not present:
+        return []
+    floor = min(_SECONDARY_MIN_FILES, present[0][0])
 
     def keep(globs: tuple[str, ...]) -> list[str]:
         return [g for g in globs if any(_glob_to_re(g).match(p) for p in paths)]
 
-    code = keep(best.code_globs) or [f"**/*{best.exts[0]}"]
-    tests = keep(best.test_globs)
-    return (code, tests, docs)
+    out: list[LangScope] = []
+    for rank, (n, _i, lang) in enumerate(present):
+        if rank >= 1 and n < floor:
+            break  # sorted desc → every later lang is also below the floor
+        out.append(LangScope(lang.name, n, keep(lang.code_globs) or [f"**/*{lang.exts[0]}"],
+                             keep(lang.test_globs)))
+        if len(out) >= _MAX_LANGS:
+            break
+    return out
+
+
+def guess_globs(paths: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """(code, tests, docs) globs for a tracked-path list — the FLAT union over `guess_scopes`
+    (every detected language, dominant-first), kept for the `[repo]` defaults + the single-
+    language contract (a one-lang repo's output is byte-identical to the old dominant pick).
+    `code`/`tests` dedup first-wins, preserving each lang's most-specific-first order. docs
+    default `["**/*.md"]`, plus `docs/**` iff a docs/ path exists. Empty/garbled tree →
+    ([], [], ["**/*.md"]) — never raises."""
+    docs = ["**/*.md"]
+    if any(p.startswith("docs/") for p in paths):
+        docs.append("docs/**")
+
+    def _union(lists: list[list[str]]) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for lst in lists:
+            for g in lst:
+                if g not in seen:
+                    seen.add(g)
+                    out.append(g)
+        return out
+
+    scopes = guess_scopes(paths)
+    return (_union([s.code for s in scopes]), _union([s.tests for s in scopes]), docs)
 
 
 def detect_test_command(cwd: str) -> tuple[str | None, str | None]:
@@ -1884,6 +1929,9 @@ class RepoScan:
     test_cmd_source: str | None
     claude_md_paths: list[str]
     house_rules: list[HouseRuleHit]
+    # Per-language breakdown (dominant-first) so the host agent can author PER-SUBTREE checks —
+    # the merged code/tests above is a blob that can't express a JS-only or Rust-only rule (#19).
+    languages: list[LangScope] = field(default_factory=list)
 
 
 @dataclass
@@ -2005,6 +2053,7 @@ def scan_repo(cwd: str) -> RepoScan:
     command; each CLAUDE.md/AGENTS.md → scan_house_rules → dedup → rank."""
     paths = _tracked_paths(cwd)
     code, tests, docs = guess_globs(paths)
+    languages = guess_scopes(paths)  # per-language breakdown for per-subtree authoring (#19)
     branch = _detect_default_branch(cwd)
     cmd, src = detect_test_command(cwd)
     cm_paths = [p for p in paths if _path_matches(p, ["**/CLAUDE.md", "**/AGENTS.md"])]
@@ -2026,7 +2075,7 @@ def scan_repo(cwd: str) -> RepoScan:
             hits.append(h)
     return RepoScan(default_branch=branch, code=code, tests=tests, docs=docs,
                     test_cmd=cmd, test_cmd_source=src, claude_md_paths=cm_paths,
-                    house_rules=rank_house_rules(hits))
+                    house_rules=rank_house_rules(hits), languages=languages)
 
 
 _REVIEW_MARKER = "# TODO(ratchet:review)"
@@ -2117,6 +2166,10 @@ def render_suggest_toml(scan: RepoScan) -> str:
     (or commented). The host agent models its hand-authored draft on this."""
     out = [_DRAFT_BANNER, "", "schema = 1", "", "[repo]",
            f"default_branch = {_toml_str(scan.default_branch)}"]
+    if len(scan.languages) > 1:
+        # name the folded-in languages so a human sees the [repo] globs span >1 language and can
+        # split them into per-subtree checks from the `languages` breakdown (suggest --format json).
+        out.append("# detected: " + ", ".join(f"{ls.name}({ls.file_count})" for ls in scan.languages))
     if scan.code:
         out.append(f"code = {_toml_val(scan.code)}")
     if scan.tests:
@@ -2137,6 +2190,11 @@ def _scan_to_dict(scan: RepoScan) -> dict:
         "default_branch": scan.default_branch, "code": scan.code, "tests": scan.tests,
         "docs": scan.docs, "test_cmd": scan.test_cmd, "test_cmd_source": scan.test_cmd_source,
         "claude_md_paths": scan.claude_md_paths,
+        # per-language breakdown (dominant-first) — the host agent's contract for authoring
+        # per-subtree checks (a `console.log` forbid on JS-only, `println!` on Rust-only). The
+        # flat code/tests above stay the [repo] defaults; this decomposes them by language (#19).
+        "languages": [{"name": ls.name, "file_count": ls.file_count, "code": ls.code,
+                       "tests": ls.tests} for ls in scan.languages],
         "house_rules": [{
             "suggested_id": h.suggested_id, "primitive": h.primitive, "confidence": h.confidence,
             "render": h.render, "layer": h.layer, "params": h.params, "rule_text": h.rule_text,
