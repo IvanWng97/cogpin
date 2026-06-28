@@ -160,10 +160,10 @@ The agent's command string.
 | primitive | params | blocks when |
 |---|---|---|
 | `protected_path` | `paths`, `require_approval` | a gate-defining file changed without a **fresh, human, non-author** approval — when the `reviews` fact is present (CI), the approval must be on the current `head_sha`, not a bot, and not the author, so an approval of an earlier benign commit can't cover a later one (a flat `--approvals` list with no review metadata is only a degraded fallback). Born `warn` in the scaffold for solo repos (no independent approver); promote to `block` with a reviewer |
-| `require_approval_from` | `paths`, `require_approval_from` (logins), `exclude_author` | a change under `paths` has no APPROVED review from a listed owner |
-| `pattern_requires_approval` | `pattern`, `scope`, `exclude_author` | an added line in scope matches `pattern` but has no independent approval |
-| `approval_policy` | `require_fresh`, `no_changes_requested`, `disallow_author`, `disallow_bot`, `min_approvals` | the qualifying-approval count is below `min_approvals`, or an outstanding `CHANGES_REQUESTED` remains |
-| `require_checks_green` | `need` (allowlist of check names; empty = all), `ignore` (denylist) | a required status check did not conclude `success` |
+| `require_approval_from` | `paths`, `require_approval_from` (logins), `exclude_author`, `exclude_bot` | a change under `paths` has no APPROVED review from a listed owner |
+| `pattern_requires_approval` | `pattern`, `scope`, `exclude_author`, `exclude_bot` | an added line in scope matches `pattern` but has no independent approval |
+| `approval_policy` | `require_fresh`, `no_changes_requested`, `exclude_author`, `exclude_bot`, `min_approvals` | the count of **distinct** qualifying approvers is below `min_approvals`, or an outstanding `CHANGES_REQUESTED` remains |
+| `require_checks_green` | `need` (allowlist of check names; empty = all), `ignore` (denylist) | a required status check did not conclude `success` — a `need`-listed check that never reported counts as **missing** and blocks (no vacuous pass) |
 
 > **Same-workflow race:** when ratchet runs as a job in the *same* workflow it gates, its
 > own check is still pending at query time and a bare `require_checks_green` (no `need`/`ignore`)

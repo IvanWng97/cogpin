@@ -286,11 +286,11 @@ reds a gate it can't edit.
 
 Every check reads only facts — never your code.
 
-23 primitives — full reference in [`SCHEMA.md`](SCHEMA.md); the provenance of each
+26 primitives — full reference in [`SCHEMA.md`](SCHEMA.md); the provenance of each
 (first-principles vs mined from real AI-authored failures) is in
 [`docs/coverage-map.md`](docs/coverage-map.md).
 
-<details><summary><b>All 23 primitives</b> — full field reference in <a href="SCHEMA.md"><code>SCHEMA.md</code></a></summary>
+<details><summary><b>All 26 primitives</b> — full field reference in <a href="SCHEMA.md"><code>SCHEMA.md</code></a></summary>
 
 | primitive | kind | decides over |
 |---|---|---|
@@ -313,9 +313,9 @@ Every check reads only facts — never your code.
 | `require_message_pattern{pattern,msg_scope}` | fact | every commit/PR message must match a shape (e.g. Conventional Commits) |
 | `commit_footer{}` | fact | every commit ends with `[meta].commit_footer` |
 | `protected_path{paths,require_approval}` | fact | gate-defining files changed → need a **fresh, human, non-author** approval (CI; `warn` by default on solo repos, promote to `block` with a reviewer) |
-| `require_approval_from{paths,require_approval_from,exclude_author}` | fact | a change under `paths` needs an APPROVED review from a named owner (CODEOWNERS-lite; CI) |
-| `pattern_requires_approval{pattern,scope,exclude_author}` | fact | an added line matching `pattern` (a new dep, an `unsafe`) needs an independent approval (CI) |
-| `approval_policy{require_fresh,no_changes_requested,disallow_author,disallow_bot,min_approvals}` | fact | the approval is fresh (on head), human, non-author, with no outstanding changes-requested (CI) |
+| `require_approval_from{paths,require_approval_from,exclude_author,exclude_bot}` | fact | a change under `paths` needs an APPROVED review from a named owner (CODEOWNERS-lite; CI) |
+| `pattern_requires_approval{pattern,scope,exclude_author,exclude_bot}` | fact | an added line matching `pattern` (a new dep, an `unsafe`) needs an independent approval (CI) |
+| `approval_policy{require_fresh,no_changes_requested,exclude_author,exclude_bot,min_approvals}` | fact | the approval is fresh (on head), human, non-author, with no outstanding changes-requested; `min_approvals` counts **distinct** reviewers (CI) |
 | `require_checks_green{need,ignore}` | fact | every (required) status check concluded `success` (CI); `ignore` excludes ratchet's own same-run job |
 | `run{cmd}` | fact\* | shell-out; the exit code is the fact (**`block` only at the change layer**) |
 | `attest{box,class}` | advisory | a class-gated `Stop`-hook checklist box — blocks turn-end until ticked (forcing function; the change layer is the ungameable gate) |
@@ -383,8 +383,8 @@ guard this very repo with the primitives it ships.
 
 ## Status
 
-**v0.2.0 — early stage (0.x; the primitive / CLI surface may still change between
-minors).** Engine (23 primitives) + Claude Code plugin (agent layer) + one-command
+**v0.3.0 — early stage (0.x; the primitive / CLI surface may still change between
+minors).** Engine (26 primitives) + Claude Code plugin (agent layer) + one-command
 `/ratchet-init` wiring (`install` / `uninstall` / `doctor`) + AI-assisted config
 draft (`suggest` / `draft-lint` / `gaps`) + a rev-pinned composite GitHub Action
 (`@v0`, change layer) + tutorial site. Stdlib Python (3.11+), no third-party deps,

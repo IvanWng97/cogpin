@@ -862,7 +862,7 @@ class TestFullCoverage(unittest.TestCase):
     def test_approval_state_depth(self):
         c = one_check(
             '[[check]]\nid="asd"\nkind="fact"\nseverity="block"\nprimitive="approval_policy"\n'
-            'require_fresh=true\nno_changes_requested=true\ndisallow_author=true\ndisallow_bot=true\nmin_approvals=1'
+            'require_fresh=true\nno_changes_requested=true\nexclude_author=true\nexclude_bot=true\nmin_approvals=1'
         )
         self.assertIsNone(approval_policy(c, DiffFacts()))  # no PR ctx → skip
         ok = DiffFacts(head_sha="abc", pr_author="alice", reviews=[{"login": "bob", "state": "APPROVED", "commit_id": "abc", "is_bot": False}])
@@ -1694,3 +1694,373 @@ class TestProtectsGateFiles(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 0.2.1 hardening — tests pinning the whole-codebase-review fixes (block + pass)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestDiffParserHunkTracking(unittest.TestCase):
+    """A removed/added CONTENT line beginning `-- `/`++ ` (an SQL/Lua comment) must NOT be
+    misparsed as a `--- a/`/`+++ b/` file header — else it is dropped and poisons path
+    attribution for the rest of the file (a scoped forbid_removal/secret_scan false-negative)."""
+
+    def _git(self, *a):
+        subprocess.run(["git", "-C", self.d, *a], check=True, capture_output=True, text=True)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = self.tmp.name
+        self._git("init", "-q")
+        self._git("config", "user.email", "t@t")
+        self._git("config", "user.name", "t")
+        self._git("config", "commit.gpgsign", "false")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _w(self, rel, text):
+        with open(os.path.join(self.d, rel), "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def test_dashdash_content_line_not_treated_as_header(self):
+        self._w("q.sql", "-- header note\nDROP TABLE secret;\nkept = 1\n")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "base")
+        base = subprocess.run(["git", "-C", self.d, "rev-parse", "HEAD"],
+                              capture_output=True, text=True).stdout.strip()
+        self._w("q.sql", "kept = 1\n")  # remove the `-- ` comment line + the DROP line
+        self._git("add", "-A")
+        self._git("commit", "-qm", "change")
+        facts = DiffFacts.from_range(self.d, base, "HEAD")
+        removed = list(facts.removed)
+        # the `-- header note` line is recorded (not silently dropped as a bogus header)…
+        self.assertIn(("q.sql", "-- header note"), removed)
+        # …and the genuinely-removed line keeps its REAL path (not a poisoned one)
+        self.assertIn(("q.sql", "DROP TABLE secret;"), removed)
+        self.assertTrue(all(p == "q.sql" for p, _ in facts.removed))
+
+
+class TestSelfProtectAbsolutePaths(unittest.TestCase):
+    """The live Write/Edit tool passes ABSOLUTE paths; self_protect must still fire for
+    multi-segment protected globs (.github/workflows/**, .claude-plugin/**, hooks/hooks.json)."""
+
+    def _check(self):
+        return one_check(
+            '[[check]]\nid="sp"\nkind="fact"\nseverity="block"\nlayer="agent"\nprimitive="self_protect"\n'
+            'paths=["ratchet.toml", "ratchet.py", ".github/workflows/**", ".claude-plugin/**", "hooks/hooks.json"]'
+        )
+
+    def test_absolute_multisegment_paths_blocked(self):
+        c = self._check()
+        for abspath in (
+            "/abs/repo/.github/workflows/self-gate.yml",
+            "/abs/repo/.claude-plugin/marketplace.json",
+            "/abs/repo/hooks/hooks.json",
+            "/abs/repo/ratchet.toml",
+        ):
+            self.assertIsNotNone(self_protect(c, "Write", abspath), abspath)
+        # a non-gate absolute path still passes, and backslash (Windows) paths are covered
+        self.assertIsNone(self_protect(c, "Write", "/abs/repo/src/app.py"))
+        self.assertIsNotNone(self_protect(c, "Edit", "C:\\repo\\.github\\workflows\\ci.yml"))
+
+
+class TestSubshellEvasion(unittest.TestCase):
+    """A glued subshell verb (`(git push)`, `$(git commit)`) must not hide the gated git
+    verb from the tokenized op scan (forbid_commit_on_branch / push deny)."""
+
+    BRANCH = ('schema=1\n[repo]\ndefault_branch="main"\n[[check]]\nid="bf"\nkind="fact"\n'
+              'severity="block"\nlayer="agent"\nprimitive="forbid_commit_on_branch"\n'
+              'branch=["main"]\nops=["commit","push"]\n')
+
+    def test_glued_subshell_git_verb_is_seen(self):
+        self.assertEqual(_git_ops("(git push)"), {"push"})
+        self.assertEqual(_git_ops("(git commit -m x)"), {"commit"})
+        self.assertIn("commit", _git_ops("$(git commit -m x)"))
+        self.assertIn("push", _git_ops("{ git push; }"))
+        self.assertEqual(push_or_merge("(git push origin main)"), "push")
+
+    def test_glued_subshell_commit_denied_on_protected_branch(self):
+        cfg = Config.parse(self.BRANCH)
+        self.assertTrue(has_block(run_branch_gate(cfg, CommandFacts("(git commit -m x)"), "main")))
+        self.assertTrue(has_block(run_branch_gate(cfg, CommandFacts("(git push)"), "main")))
+        self.assertEqual(run_branch_gate(cfg, CommandFacts("(git status)"), "main"), [])
+
+
+class TestApprovalHardening(unittest.TestCase):
+    """Distinct-login counting, empty-login rejection, freshness edges, exclude_bot."""
+
+    def test_min_approvals_counts_distinct_logins(self):
+        c = one_check('[[check]]\nid="ap"\nkind="fact"\nseverity="block"\nprimitive="approval_policy"\n'
+                      'min_approvals=2')
+        one_person_twice = DiffFacts(reviews=[
+            {"login": "bob", "state": "APPROVED"}, {"login": "bob", "state": "APPROVED"}])
+        self.assertIsNotNone(approval_policy(c, one_person_twice))  # 1 distinct < 2 → block
+        two_people = DiffFacts(reviews=[
+            {"login": "bob", "state": "APPROVED"}, {"login": "amy", "state": "APPROVED"}])
+        self.assertIsNone(approval_policy(c, two_people))  # 2 distinct → pass
+
+    def test_empty_login_never_qualifies_protected_path(self):
+        c = one_check('[[check]]\nid="pp"\nkind="fact"\nseverity="block"\nprimitive="protected_path"\n'
+                      'paths=["ratchet.toml"]')
+        ghost = DiffFacts(changed=[("M", "ratchet.toml")], head_sha="H", pr_author="alice",
+                          reviews=[{"login": "", "state": "APPROVED", "commit_id": "H"}])
+        self.assertIsNotNone(protected_path(c, ghost))  # deleted/ghost account (login "") → block
+
+    def test_empty_login_never_qualifies_require_approval_from(self):
+        c = one_check('[[check]]\nid="raf"\nkind="fact"\nseverity="block"\nprimitive="require_approval_from"\n'
+                      'paths=["core/**"]\nrequire_approval_from=[""]')  # even if "" were configured
+        f = DiffFacts(changed=[("M", "core/x.py")], pr_author="zoe",
+                      reviews=[{"login": "", "state": "APPROVED"}])
+        self.assertIsNotNone(require_approval_from(c, f))
+
+    def test_freshness_is_noop_when_head_sha_unknown(self):
+        # Documented degrade: freshness can't be checked without a head SHA, so a stale
+        # approval qualifies. Pinned so a regression in head_sha acquisition is a visible change.
+        c = one_check('[[check]]\nid="ap"\nkind="fact"\nseverity="block"\nprimitive="approval_policy"\n'
+                      'require_fresh=true\nmin_approvals=1')
+        no_head = DiffFacts(head_sha=None, pr_author="alice",
+                            reviews=[{"login": "bob", "state": "APPROVED", "commit_id": "OLD"}])
+        self.assertIsNone(approval_policy(c, no_head))  # head unknown → freshness disabled
+
+    def test_protected_path_blocks_missing_or_empty_commit_id(self):
+        c = one_check('[[check]]\nid="pp"\nkind="fact"\nseverity="block"\nprimitive="protected_path"\n'
+                      'paths=["ratchet.toml"]')
+        touched = [("M", "ratchet.toml")]
+        absent = DiffFacts(changed=touched, head_sha="H2", pr_author="alice",
+                           reviews=[{"login": "bob", "state": "APPROVED"}])  # no commit_id key
+        self.assertIsNotNone(protected_path(c, absent))
+        empty = DiffFacts(changed=touched, head_sha="H2", pr_author="alice",
+                          reviews=[{"login": "bob", "state": "APPROVED", "commit_id": ""}])
+        self.assertIsNotNone(protected_path(c, empty))  # loader's real output shape → block
+
+    def test_exclude_bot_on_identity_gate(self):
+        c = one_check('[[check]]\nid="raf"\nkind="fact"\nseverity="block"\nprimitive="require_approval_from"\n'
+                      'paths=["core/**"]\nrequire_approval_from=["ci-bot"]\nexclude_bot=true')
+        botonly = DiffFacts(changed=[("M", "core/x.py")], pr_author="zoe",
+                            reviews=[{"login": "ci-bot", "state": "APPROVED", "is_bot": True}])
+        self.assertIsNotNone(require_approval_from(c, botonly))  # exclude_bot drops the bot → block
+        human = DiffFacts(changed=[("M", "core/x.py")], pr_author="zoe",
+                          reviews=[{"login": "ci-bot", "state": "APPROVED", "is_bot": False}])
+        self.assertIsNone(require_approval_from(c, human))
+
+
+class TestNumericFloorDirectionValidate(unittest.TestCase):
+    def test_bad_direction_rejected(self):
+        bad = ('schema=1\n[repo]\ndefault_branch="main"\n[[check]]\nid="nf"\nkind="fact"\n'
+               'severity="block"\nprimitive="numeric_floor"\nkey="cov=(\\\\d+)"\ndirection="decrease"\n')
+        with self.assertRaises(ConfigError) as e:
+            Config.parse(bad)
+        self.assertIn("no_decrease", str(e.exception))
+
+    def test_valid_directions_accepted(self):
+        for d in ("no_decrease", "no_increase"):
+            cfg = ('schema=1\n[repo]\ndefault_branch="main"\n[[check]]\nid="nf"\nkind="fact"\n'
+                   f'severity="block"\nprimitive="numeric_floor"\nkey="cov=(\\\\d+)"\ndirection="{d}"\n')
+            self.assertEqual(len(Config.parse(cfg).checks), 1)
+
+
+class TestRequireChecksGreenNeed(unittest.TestCase):
+    def test_need_allowlist_narrows_and_requires_presence(self):
+        c = one_check('[[check]]\nid="rcg"\nkind="fact"\nseverity="block"\n'
+                      'primitive="require_checks_green"\nneed=["ci"]')
+        # a failing OTHER check NOT in `need` is ignored (narrowing works)
+        self.assertIsNone(require_checks_green(c, DiffFacts(checks=[
+            {"name": "ci", "conclusion": "success"}, {"name": "lint", "conclusion": "failure"}])))
+        # the named-required check failing → block
+        self.assertIsNotNone(require_checks_green(c, DiffFacts(checks=[
+            {"name": "ci", "conclusion": "failure"}])))
+        # the named-required check ABSENT (never reported) must NOT pass vacuously
+        self.assertIsNotNone(require_checks_green(c, DiffFacts(checks=[
+            {"name": "lint", "conclusion": "success"}])))
+
+
+class TestReviewLoaders(unittest.TestCase):
+    """The moat's fact-acquisition normalizers: nested GraphQL ↔ flat shape + degrade-safe."""
+
+    def _tmp(self, name, text):
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        p = os.path.join(d, name)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return p
+
+    def test_load_reviews_nested_graphql_shape(self):
+        from ratchet import _load_reviews
+        p = self._tmp("r.json",
+                      '[{"author":{"login":"bob","is_bot":false},"state":"APPROVED",'
+                      '"commit":{"oid":"abc"},"authorAssociation":"MEMBER"}]')
+        out = _load_reviews(p)
+        self.assertEqual(out, [{"login": "bob", "state": "APPROVED", "commit_id": "abc",
+                                "is_bot": False, "author_association": "MEMBER"}])
+
+    def test_load_reviews_flat_shape(self):
+        from ratchet import _load_reviews
+        p = self._tmp("r.json", '[{"login":"amy","state":"APPROVED","commit_id":"def","is_bot":false}]')
+        out = _load_reviews(p)
+        self.assertEqual(out[0]["login"], "amy")
+        self.assertEqual(out[0]["commit_id"], "def")
+
+    def test_load_reviews_degrades_safe(self):
+        from ratchet import _load_reviews
+        self.assertIsNone(_load_reviews(self._tmp("r.json", "not json")))  # garbled → None (skip)
+        self.assertIsNone(_load_reviews(self._tmp("r.json", '{"not":"a list"}')))
+        self.assertIsNone(_load_reviews("/nonexistent/path.json"))
+
+    def test_load_checks_conclusion_fallback_and_degrade(self):
+        from ratchet import _load_checks
+        p = self._tmp("c.json", '[{"name":"ci","state":"SUCCESS"},{"context":"build","status":"FAILURE"}]')
+        out = _load_checks(p)
+        self.assertEqual(out[0], {"name": "ci", "conclusion": "SUCCESS"})
+        self.assertEqual(out[1], {"name": "build", "conclusion": "FAILURE"})  # context/status fallbacks
+        self.assertIsNone(_load_checks(self._tmp("c.json", "garbled")))
+
+
+class TestHookEntrypoints(unittest.TestCase):
+    """The PreToolUse/Stop hook wrappers: the load-bearing 'never block on a malformed
+    payload' contract + a real deny, exercised end-to-end via the CLI."""
+
+    def _git(self, *a):
+        subprocess.run(["git", "-C", self.d, *a], check=True, capture_output=True, text=True)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = self.tmp.name
+        with open(os.path.join(self.d, "ratchet.toml"), "w", encoding="utf-8") as fh:
+            fh.write('schema=1\n[repo]\ndefault_branch="main"\n[[check]]\nid="nv"\nkind="fact"\n'
+                     'severity="block"\nlayer="agent"\nprimitive="forbid_command"\npattern="--no-verify"\n')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _gate(self, stdin):
+        return subprocess.run([sys.executable, _RATCHET, "gate"], input=stdin,
+                              capture_output=True, text=True, cwd=self.d)
+
+    def test_cmd_gate_malformed_payload_never_blocks(self):
+        for payload in ("not json", "{}", '{"tool_input": "oops"}', ""):
+            r = self._gate(payload)
+            self.assertEqual(r.returncode, 0, f"malformed {payload!r} must not block (got {r.returncode})")
+
+    def test_cmd_gate_denies_forbidden_command(self):
+        r = self._gate('{"tool_name":"Bash","tool_input":{"command":"git push --no-verify"}}')
+        self.assertEqual(r.returncode, 2)  # deny (exit 2, reason on stderr)
+        self.assertIn("nv", r.stderr)
+
+
+class TestBasePinning(unittest.TestCase):
+    """Invariant #5: the base ref is read from the PINNED base, its NAME from a trusted flag
+    (never the PR-head config), and an authoritative-but-unreachable base fails closed."""
+
+    def _git(self, *a):
+        subprocess.run(["git", "-C", self.d, *a], check=True, capture_output=True, text=True)
+
+    def _sha(self, ref="HEAD"):
+        return subprocess.run(["git", "-C", self.d, "rev-parse", ref],
+                              capture_output=True, text=True).stdout.strip()
+
+    def _w(self, rel, text):
+        p = os.path.join(self.d, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True) if os.path.dirname(rel) else None
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = self.tmp.name
+        self._git("init", "-q")
+        self._git("config", "user.email", "t@t")
+        self._git("config", "user.name", "t")
+        self._git("config", "commit.gpgsign", "false")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    STRICT = ('schema=1\n[repo]\ndefault_branch="main"\n[meta]\nbase_pinned=true\n[[check]]\nid="sek"\n'
+              'kind="fact"\nseverity="block"\nprimitive="secret_scan"\nforbid_paths=[".env","**/.env"]\n')
+    LOOSE = 'schema=1\n[repo]\ndefault_branch="main"\n[meta]\nbase_pinned=true\n'
+
+    def test_load_config_reads_base_not_working_tree(self):
+        from ratchet import load_config
+        self._w("ratchet.toml", self.STRICT)
+        self._git("add", "-A")
+        self._git("commit", "-qm", "base")
+        base = self._sha()
+        self._w("ratchet.toml", self.LOOSE)  # dirty working tree loosens the policy
+        self.assertEqual(len(load_config(self.d, base).checks), 1, "must read the STRICT base config")
+
+    def test_load_config_base_pinned_false_defers_to_working_tree(self):
+        from ratchet import load_config
+        off = self.STRICT.replace("base_pinned=true", "base_pinned=false")
+        self._w("ratchet.toml", off)
+        self._git("add", "-A")
+        self._git("commit", "-qm", "base")
+        base = self._sha()
+        self._w("ratchet.toml", self.LOOSE)  # working tree: 0 checks
+        self.assertEqual(len(load_config(self.d, base).checks), 0, "base_pinned=false → working-tree policy")
+
+    def test_load_config_missing_base_toml_falls_back(self):
+        from ratchet import load_config
+        self._w("README.md", "x")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "no toml yet")
+        base = self._sha()
+        self._w("ratchet.toml", self.STRICT)  # only in the working tree
+        self.assertEqual(len(load_config(self.d, base).checks), 1, "base lacks ratchet.toml → fallback")
+
+    def test_resolve_base_authoritative_fails_closed(self):
+        from ratchet import BaseUnreachable, _resolve_base
+        self._w("a.txt", "1")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "c1")
+        self._w("a.txt", "2")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "c2")
+        with self.assertRaises(BaseUnreachable):
+            _resolve_base(self.d, "ghost", authoritative=True)  # unfetched base + HEAD has history
+        self.assertEqual(_resolve_base(self.d, "ghost", authoritative=False), self._sha("HEAD~1"))
+
+    def test_resolve_base_uses_remote_tracking_ref(self):
+        from ratchet import _resolve_base
+        self._w("a.txt", "1")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "c1")
+        c1 = self._sha()
+        self._git("update-ref", "refs/remotes/origin/main", c1)  # simulate the fetched base
+        self._w("a.txt", "2")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "c2")
+        self.assertEqual(_resolve_base(self.d, "main", authoritative=True), c1)  # merge-base, not HEAD~1
+
+    def test_trusted_default_branch_pins_full_pr_range(self):
+        # The fix: with the trusted --default-branch, the base is the merge-base over origin/main,
+        # so a forbidden file added in an EARLIER PR commit is still in range (can't be hidden
+        # behind a later clean commit by redirecting the base).
+        from ratchet import cmd_check
+        self._w("ratchet.toml", self.STRICT)
+        self._git("add", "-A")
+        self._git("commit", "-qm", "base")
+        self._git("update-ref", "refs/remotes/origin/main", self._sha())
+        self._w(".env", "SECRET=1")  # forbidden file, added in an earlier PR commit
+        self._git("add", "-A")
+        self._git("commit", "-qm", "add secret")
+        self._w("clean.txt", "ok")   # a later, clean commit (HEAD)
+        self._git("add", "-A")
+        self._git("commit", "-qm", "clean")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = cmd_check(self.d, allow_run=False, default_branch_arg="main")
+        self.assertEqual(rc, 1, "the .env added across the full base..HEAD range must be caught")
+
+    def test_authoritative_unreachable_base_fails_closed_e2e(self):
+        from ratchet import cmd_check
+        self._w("ratchet.toml", self.STRICT)
+        self._git("add", "-A")
+        self._git("commit", "-qm", "base")
+        self._w("clean.txt", "ok")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "head")
+        with contextlib.redirect_stdout(io.StringIO()):
+            # clean diff would be rc 0, but the trusted base is unfetched → refuse (rc 1)
+            self.assertEqual(cmd_check(self.d, allow_run=False, default_branch_arg="ghost"), 1)

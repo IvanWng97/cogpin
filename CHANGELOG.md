@@ -5,6 +5,48 @@ All notable changes to ratchet. Format: [Keep a Changelog](https://keepachangelo
 primitive / CLI surface may still change between minors — pin the action to a SHA for full
 reproducibility. The config `schema` version is separate and bumps only on a breaking config change.
 
+## [0.3.0] — 2026-06-27
+
+A whole-codebase security & correctness pass (an adversarial review with every finding
+independently verified). Two real bypasses of the advertised guarantees are closed, plus a
+batch of fail-open hardening, and the approval-config vocabulary is unified.
+
+### Security (fixed)
+- **Base-pinning could be redirected from the PR head (invariant #5).** `check` now reads the
+  base-branch NAME from a trusted `--default-branch` flag (the action passes the repo's real
+  default), not the PR-head `ratchet.toml` — renaming `default_branch` to an unfetched ref can
+  no longer force a silent `HEAD~1` fallback onto an attacker-controlled commit. In the
+  authoritative (CI) path an unreachable base now FAILS CLOSED instead of narrowing the diff.
+- **`self_protect` missed absolute multi-segment paths.** The live Write/Edit gate now matches
+  any trailing path segment-run, so `.github/workflows/**`, `.claude-plugin/**` and
+  `hooks/hooks.json` are protected against the absolute paths the tools actually pass.
+
+### Fixed (fail-opens / evasions)
+- Diff parser: a removed/added line beginning `-- `/`++ ` (an SQL/Lua comment) is no longer
+  misparsed as a file header — which dropped it and poisoned path attribution for the rest of
+  the file (a scoped `forbid_removal`/`secret_scan` false-negative). Now hunk-state aware.
+- Command normalizer: a glued subshell verb `(git push)` / `$(git commit)` is no longer
+  invisible to `forbid_commit_on_branch` / the push deny.
+- `approval_policy` `min_approvals` counts **distinct** reviewers, not raw submissions (one
+  reviewer re-approving can't satisfy a floor of 2). An empty/`null` login (a deleted/ghost
+  account) never satisfies any identity gate.
+- `numeric_floor` `direction` is validated (a typo'd value used to silently disable the floor).
+- `require_checks_green` blocks when a `need`-listed check never reported (no vacuous pass).
+- A requested-but-garbled `--reviews-file` fails closed instead of trusting `--approvals`.
+
+### Changed (breaking)
+- **Approval vocabulary unified: `disallow_author` / `disallow_bot` → `exclude_author` /
+  `exclude_bot`** across all three approval primitives (and `exclude_bot` now also works on
+  `require_approval_from` / `pattern_requires_approval`). Rename them in your `ratchet.toml`.
+- The composite action passes `--default-branch` and queries reviews with raw-string
+  `owner`/`repo` (`-f`) so an all-digit repo name can't break the GraphQL `String!` binding.
+
+### Internal & docs
+- Findings render the check id exactly once (the renderer owns it; primitives emit id-free
+  reasons). Removed the dead `Check.where` field. README primitive count corrected (23 → 26).
+  New tests pin every fix plus the previously-untested review loaders, base-pin read, and the
+  `gate` hook entrypoint.
+
 ## [0.2.0] — 2026-06-27
 
 Version reset. The `1.0.0` tag was premature for a no-customers, still-stabilizing project,
