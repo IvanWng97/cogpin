@@ -251,13 +251,18 @@ ratchet check --cwd .           # change layer: gate the committed range (author
     #   unloadable config) STILL fail closed. The action exposes it as `report-only:`.
 ratchet check --cwd . --diff-file F  # config-as-code: evaluate a crafted unified-diff FIXTURE
     [--expect-block a,b] [--expect-clean c,d]    # instead of the git range (tests ratchet.toml)
-    [--pr-body-file F] [--reviews-file F] [--checks-file F] [--approvals a,b] [--head-sha S] [--pr-author L]
+    [--commit-msg M] [--pr-body-file F] [--reviews-file F] [--checks-file F] [--approvals a,b] [--head-sha S] [--pr-author L]
     # Uses the WORKING config (you test the policy you're editing, not a base pin) and never runs
     #   `run` blocks. --expect-block/--expect-clean assert which checks fire: exit 0 = all met,
-    #   1 = a violated expectation (the regression net), 2 = couldn't run (no/bad diff or config,
-    #   an --expect id not in the config, or one a diff fixture can't evaluate — `run`,
-    #   max_added_file_bytes, or a PR-context check whose --*-file wasn't supplied). With no
-    #   --expect flags it's a preview: print what would fire, exit 0.
+    #   1 = a violated expectation (the regression net), 2 = couldn't run. A unified diff carries
+    #   no commit messages / blob sizes / PR context, so a check needing them is "blind" and an
+    #   --expect over it errors (exit 2) rather than passing vacuously: supply --commit-msg
+    #   (commit_footer / message checks), --reviews-file (approval primitives — flat --approvals
+    #   un-blinds only protected_path), --checks-file (require_checks_green), --pr-body-file
+    #   (marker_present / pr_body-scoped checks). `run`, max_added_file_bytes, and agent-layer /
+    #   attest|judge checks are blind always (no diff can decide them). A supplied-but-unreadable
+    #   context file is exit 2 (a test-authoring error), never coerced to empty. With no --expect
+    #   flags it's a preview: print what would fire, exit 0.
 ratchet backtest --cwd . --range main~50..main  # replay the policy over merged history (calibration)
     [--config F] [--fail-on-block]
     # which past commits WOULD this policy block? Pure report (exit 0) unless --fail-on-block;

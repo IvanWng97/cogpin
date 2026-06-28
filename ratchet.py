@@ -556,11 +556,15 @@ def _changed_from_headers(diff: str) -> list[tuple[str, str]]:
     first `@@`) so a content line starting with `--- `/`+++ ` can't be mistaken for a header."""
     changed: list[tuple[str, str]] = []
     status = MODIFIED
-    new_path = old_path = rename_to = ""
+    new_path = old_path = rename_to = dg_path = ""
     in_body = seen = False
 
     def flush() -> None:
-        if seen and (path := rename_to or new_path or old_path):
+        # dg_path (parsed from the `diff --git a/X b/Y` line) is the LAST resort — it catches a
+        # pure mode-only (chmod) file, which emits no +++/---/rename/binary line (from_range
+        # reports it via --name-status, so match that). Ambiguous if a path contains " b/"; the
+        # +++ b/ path is always preferred when present.
+        if seen and (path := rename_to or new_path or old_path or dg_path):
             changed.append((status, path))
 
     for raw in diff.split("\n"):
@@ -568,6 +572,9 @@ def _changed_from_headers(diff: str) -> list[tuple[str, str]]:
         if line.startswith("diff --git "):
             flush()
             status, new_path, old_path, rename_to = MODIFIED, "", "", ""
+            body = line[len("diff --git "):]
+            i = body.rfind(" b/")
+            dg_path = body[i + 3:] if i != -1 and body.startswith("a/") else ""
             in_body, seen = False, True
         elif in_body:
             continue  # past the first @@: only content, never a header
@@ -2691,38 +2698,59 @@ def cmd_backtest(cwd: str = ".", rng: str = "", config: str | None = None,
     return 1 if (fail_on_block and would_block) else 0
 
 
-# Primitives a DIFF fixture can never decide, regardless of supplied context: `run` shells out
-# to the live tree (fixture runs it OFF), and max_added_file_bytes needs real blob bytes a
-# unified diff doesn't carry. The PR-context primitives are conditionally blind — evaluable
-# only if the matching fixture file is supplied — so they're computed against the facts below.
-_FIXTURE_BLIND_ALWAYS = frozenset({"run", "max_added_file_bytes"})
-_FIXTURE_APPROVAL = frozenset({
-    "protected_path", "require_approval_from", "pattern_requires_approval", "approval_policy",
+# Primitives a DIFF fixture decides from the diff ALONE (added/removed/changed) — always
+# evaluable. Everything NOT classified as evaluable below is blind by DEFAULT, so a `run`,
+# an agent-layer/advisory check, OR a future un-classified primitive errors on --expect (exit 2)
+# rather than ever passing vacuously. Fixture mode fails toward "can't evaluate", never a
+# false-clean (invariant #5). Mirror this when adding a diff-evaluated primitive.
+_FIXTURE_DIFF_ONLY = frozenset({
+    "secret_scan", "forbid_pattern", "forbid_removal", "forbid_delete", "scope_lock",
+    "numeric_floor", "change_budget", "file_must_contain", "cooccur",
 })
 
 
+def _fixture_evaluable(c: Check, facts: DiffFacts) -> bool:
+    """Can a diff fixture (+ the supplied PR context) actually DECIDE this check — i.e. would
+    _eval_diff reach a real verdict rather than skip on an absent fact? Mirrors each primitive's
+    own fact reads. Default (an un-listed primitive — `run`, max_added_file_bytes, the agent-only
+    forbid_command/forbid_commit_on_branch/self_protect, attest/judge) is FALSE: blind."""
+    p = c.primitive
+    if p in _FIXTURE_DIFF_ONLY:
+        return True
+    if p == "path_requires":            # diff-only UNLESS gated on a pr_body marker
+        return facts.pr_body is not None if c.when_marker else True
+    if p == "marker_present":           # reads pr_body only
+        return facts.pr_body is not None
+    if p == "commit_footer":            # reads commit_msgs (no diff carries them)
+        return bool(facts.commit_msgs)
+    if p in ("require_message_pattern", "forbid_in_message"):
+        scopes = set(c.msg_scope) or (
+            {"commit_subject"} if p == "require_message_pattern" else set(_MSG_SCOPES))
+        if (scopes & {"commit_subject", "commit_body"}) and not facts.commit_msgs:
+            return False
+        if "pr_body" in scopes and facts.pr_body is None:
+            return False
+        return True
+    if p == "protected_path":           # reads approvals OR reviews
+        return facts.approvals is not None or facts.reviews is not None
+    if p in ("require_approval_from", "pattern_requires_approval", "approval_policy"):
+        return facts.reviews is not None  # read reviews ONLY — flat --approvals is insufficient
+    if p == "require_checks_green":
+        return facts.checks is not None
+    return False
+
+
 def _fixture_blind(cfg: Config, facts: DiffFacts) -> set[str]:
-    """Check ids a fixture eval CANNOT decide given the SUPPLIED context — so an `--expect`
-    naming one would silently mis-pass/-fail. Unlike backtest's static set this is conditional:
-    a fixture CAN carry PR context (--reviews-file/--checks-file/--pr-body-file), so an approval/
-    checks/pr_body check is blind only when its input is absent (the check would skip → no
-    finding → a bogus 'clean')."""
-    has_reviews = facts.reviews is not None or facts.approvals is not None
-    has_checks = facts.checks is not None
-    has_body = facts.pr_body is not None
+    """Check ids a fixture eval CANNOT decide given the SUPPLIED context — named so an `--expect`
+    over one errors (exit 2) instead of silently mis-passing (the false-clean this feature exists
+    to prevent). A check is blind if run_change would SKIP it in fixture mode (agent layer, or an
+    attest/judge severity that never yields a block/warn finding) or if _eval_diff would return a
+    vacuous None for want of a fact the diff doesn't carry (see _fixture_evaluable)."""
     out: set[str] = set()
     for c in cfg.checks:
-        p = c.primitive
-        if p in _FIXTURE_BLIND_ALWAYS:
-            out.add(c.id)
-        elif p in _FIXTURE_APPROVAL and not has_reviews:
-            out.add(c.id)
-        elif p == "require_checks_green" and not has_checks:
-            out.add(c.id)
-        elif p == "path_requires" and c.when_marker and not has_body:
-            out.add(c.id)
-        elif (p in ("require_message_pattern", "forbid_in_message")
-              and c.msg_scope and all(s == "pr_body" for s in c.msg_scope) and not has_body):
+        if c.layer == "agent" or c.severity not in ("block", "warn"):
+            out.add(c.id)              # run_change never produces a finding for these
+        elif not _fixture_evaluable(c, facts):
             out.add(c.id)
     return out
 
@@ -2738,13 +2766,17 @@ def cmd_fixture(
     head_sha: str | None = None,
     pr_author: str | None = None,
     checks_file: str | None = None,
+    commit_msg: str | None = None,
 ) -> int:
     """Config-as-code fixture testing (#18): evaluate the WORKING-tree policy against a crafted
     unified-diff fixture and assert per-check expectations — turning ratchet.toml into tested
     code. Uses the working config (you test the policy you're EDITING, not a base pin), and
-    never runs `run` blocks (allow_run=False). Exit 0 = expectations met (or, with no
+    never runs `run` blocks (allow_run=False). A unified diff carries no commit messages, so
+    commit-message checks (commit_footer, commit-scoped require_message_pattern/forbid_in_message)
+    are blind unless --commit-msg supplies one. Exit 0 = expectations met (or, with no
     expectations, a finding preview); 1 = an expectation was VIOLATED (the test failed);
-    2 = couldn't run the test (no/bad diff or config, unknown or un-evaluable --expect id)."""
+    2 = couldn't run the test (no/bad diff, config, or context file; unknown or un-evaluable
+    --expect id)."""
     if not diff_file:
         print("ratchet: --expect-block/--expect-clean require --diff-file (a fixture to assert "
               "against)", file=sys.stderr)
@@ -2768,23 +2800,42 @@ def cmd_fixture(
     except ValueError as e:
         print(f"ratchet: {diff_file}: {e}", file=sys.stderr)
         return 2
-    # Layer in any supplied PR context — a fixture CAN carry it (a body file, a reviews/checks
-    # JSON), which is what makes the approval/checks/pr_body checks testable here.
-    if pr_body_file:
-        try:
-            with open(pr_body_file, encoding="utf-8") as fh:
-                facts.pr_body = fh.read()
-        except OSError:
-            pass
+    # Layer in any supplied context — a fixture CAN carry it (a body/commit message, a reviews/
+    # checks JSON), which is what makes the message/approval/checks/pr_body checks testable here.
+    # A flag that's SUPPLIED-but-unreadable is a test-authoring error → exit 2 (vs not supplied →
+    # the fact stays None → the check is blinded). Coercing a garbled file to [] would defeat
+    # blind detection and yield a false-clean — the bug this whole feature exists to prevent.
+    if pr_body_file is not None:
+        if not os.path.exists(pr_body_file):
+            print(f"ratchet: no such --pr-body-file: {pr_body_file}", file=sys.stderr)
+            return 2
+        with open(pr_body_file, encoding="utf-8", errors="replace") as fh:
+            facts.pr_body = fh.read()
+    if commit_msg is not None:
+        facts.commit_msgs = [commit_msg]
     if approvals is not None:
         facts.approvals = [a.strip() for a in approvals.split(",") if a.strip()]
-    if reviews_file:
-        facts.reviews = _load_reviews(reviews_file) or []
+    if reviews_file is not None:
+        if not os.path.exists(reviews_file):
+            print(f"ratchet: no such --reviews-file: {reviews_file}", file=sys.stderr)
+            return 2
+        facts.reviews = _load_reviews(reviews_file)
+        if facts.reviews is None:
+            print(f"ratchet: cannot parse --reviews-file (expected a JSON array): {reviews_file}",
+                  file=sys.stderr)
+            return 2
     if head_sha:
         facts.head_sha = head_sha
     facts.pr_author = pr_author
-    if checks_file and os.path.exists(checks_file):
-        facts.checks = _load_checks(checks_file) or []
+    if checks_file is not None:
+        if not os.path.exists(checks_file):
+            print(f"ratchet: no such --checks-file: {checks_file}", file=sys.stderr)
+            return 2
+        facts.checks = _load_checks(checks_file)
+        if facts.checks is None:
+            print(f"ratchet: cannot parse --checks-file (expected a JSON array): {checks_file}",
+                  file=sys.stderr)
+            return 2
 
     want_block = [s.strip() for s in (expect_block or "").split(",") if s.strip()]
     want_clean = [s.strip() for s in (expect_clean or "").split(",") if s.strip()]
@@ -2812,10 +2863,11 @@ def cmd_fixture(
         return 2
     blind = sorted((set(want_block) | set(want_clean)) & _fixture_blind(cfg, facts))
     if blind:
-        print(f"ratchet: --expect names check(s) a diff fixture can't evaluate — a `run` needs "
-              f"a checkout, max_added_file_bytes needs blob sizes, and approval/checks/pr_body "
-              f"checks need their --reviews-file/--checks-file/--pr-body-file: "
-              f"{', '.join(blind)}", file=sys.stderr)
+        print(f"ratchet: --expect names check(s) this fixture can't evaluate (a diff alone can't "
+              f"decide them): a `run` needs a checkout; max_added_file_bytes needs blob sizes; "
+              f"an agent-layer or attest/judge check yields no change-layer finding; and message/"
+              f"approval/checks/pr_body checks need --commit-msg / --reviews-file / --checks-file / "
+              f"--pr-body-file: {', '.join(blind)}", file=sys.stderr)
         return 2
     blocked = {f.id for f in findings if f.severity == "block"}
     fired = {f.id for f in findings}
@@ -3713,6 +3765,7 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--diff-file", help="evaluate a crafted unified-diff FIXTURE instead of the git range (config-as-code testing; uses the working ratchet.toml, never `run`)")
     c.add_argument("--expect-block", help="comma-separated check ids that MUST block on the fixture — exit 1 if any doesn't (requires --diff-file)")
     c.add_argument("--expect-clean", help="comma-separated check ids that MUST NOT fire on the fixture — exit 1 if any does (requires --diff-file)")
+    c.add_argument("--commit-msg", help="synthetic commit message for the fixture (makes commit_footer / commit-scoped message checks evaluable; a diff carries none)")
     bt = sub.add_parser("backtest", help="replay the policy over merged history: which past commits would block? (calibration)")
     bt.add_argument("--cwd", default=".")
     bt.add_argument("--range", required=True, dest="rng", metavar="REV-RANGE", help="git rev-range, e.g. main~50..main")
@@ -3775,6 +3828,7 @@ def main(argv: list[str] | None = None) -> int:
                 head_sha=args.head_sha,
                 pr_author=args.pr_author,
                 checks_file=args.checks_file,
+                commit_msg=args.commit_msg,
             )
         return cmd_check(
             args.cwd,

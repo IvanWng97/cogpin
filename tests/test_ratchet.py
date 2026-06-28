@@ -3283,3 +3283,188 @@ class TestFixtureCmd(_GitRepo):
                              "--diff-file", os.path.join(self.d, "leak.diff"),
                              "--expect-clean", "no-secret"], capture_output=True, text=True)
         self.assertEqual(r2.returncode, 1)
+
+
+# ── PR6 code-review fixes: _fixture_blind must catch EVERY un-evaluable check (no false-clean) ──
+# config with one check of every blind class + the diff-only baseline.
+_FXB_CFG = (
+    'schema = 1\n[repo]\ndefault_branch = "main"\ncode = ["*.py"]\ndocs = ["docs/**"]\n[meta]\n'
+    'commit_footer = "Co-Authored-By"\n'
+    '[[check]]\nid = "no-secret"\nkind = "fact"\nseverity = "block"\nlayer = "change"\n'
+    'primitive = "forbid_pattern"\npattern = "SECRET"\nscope = "code"\n'          # diff-only
+    '[[check]]\nid = "footer"\nkind = "fact"\nseverity = "block"\nlayer = "change"\n'
+    'primitive = "commit_footer"\n'                                              # commit_msgs
+    '[[check]]\nid = "conv"\nkind = "fact"\nseverity = "warn"\nlayer = "change"\n'
+    'primitive = "require_message_pattern"\npattern = "^(feat|fix)"\n'           # commit_subject default
+    '[[check]]\nid = "noverify"\nkind = "fact"\nseverity = "warn"\nlayer = "agent"\n'
+    'primitive = "forbid_command"\npattern = "no-verify"\n'                      # agent layer
+    '[[check]]\nid = "selfprot"\nkind = "fact"\nseverity = "warn"\nlayer = "both"\n'
+    'primitive = "self_protect"\npaths = ["*.py"]\n'                             # both layer, not diff-eval
+    '[[check]]\nid = "approve"\nkind = "fact"\nseverity = "warn"\n'
+    'primitive = "approval_policy"\nscope = "code"\n'                            # reviews only
+    '[[check]]\nid = "prot"\nkind = "fact"\nseverity = "warn"\n'
+    'primitive = "protected_path"\nscope = "code"\n'                            # reviews OR approvals
+)
+
+
+class TestFixtureBlindReview(unittest.TestCase):
+    """The review found _fixture_blind (copied from _backtest_blind) under-enumerated
+    un-evaluable checks → silent false-clean. These pin every class it must now catch."""
+
+    def _cfg(self):
+        return R.Config.parse(_FXB_CFG)
+
+    def test_commit_message_checks_blind_without_commit_msg(self):
+        blind = R._fixture_blind(self._cfg(), DiffFacts())
+        self.assertIn("footer", blind)    # commit_footer reads commit_msgs a diff lacks
+        self.assertIn("conv", blind)      # require_message_pattern defaults to commit_subject
+
+    def test_commit_message_checks_evaluable_with_commit_msg(self):
+        blind = R._fixture_blind(self._cfg(), DiffFacts(commit_msgs=["feat: x\n\nCo-Authored-By: y"]))
+        self.assertNotIn("footer", blind)
+        self.assertNotIn("conv", blind)
+
+    def test_agent_layer_check_always_blind(self):
+        # forbid_command (agent layer) is never evaluated by run_change → blind even fully fed
+        full = DiffFacts(commit_msgs=["x"], pr_body="b", reviews=[], checks=[], approvals=["a"])
+        self.assertIn("noverify", R._fixture_blind(self._cfg(), full))
+
+    def test_both_layer_non_diff_primitive_blind(self):
+        # self_protect at layer="both" passes the agent-layer guard but _eval_diff returns None
+        self.assertIn("selfprot", R._fixture_blind(self._cfg(), DiffFacts(reviews=[])))
+
+    def test_flat_approvals_does_not_unblind_reviews_only_primitives(self):
+        # approval_policy reads ONLY facts.reviews; --approvals alone must NOT un-blind it
+        blind = R._fixture_blind(self._cfg(), DiffFacts(approvals=["alice"]))
+        self.assertIn("approve", blind)            # still blind (no reviews)
+        self.assertNotIn("prot", blind)            # protected_path DOES read approvals → evaluable
+
+    def test_approval_policy_evaluable_with_reviews(self):
+        self.assertNotIn("approve", R._fixture_blind(self._cfg(), DiffFacts(reviews=[])))
+
+    def test_diff_only_check_never_blind(self):
+        self.assertNotIn("no-secret", R._fixture_blind(self._cfg(), DiffFacts()))
+
+    def test_unclassified_primitive_blind_by_default(self):
+        # the default-blind property: a future/unlisted primitive must error on --expect, not
+        # silently pass. _fixture_evaluable returns False for anything not explicitly evaluable.
+        c = Check(id="x", primitive="judge", kind="advisory", severity="judge", layer="change")
+        self.assertFalse(R._fixture_evaluable(c, DiffFacts()))
+
+
+class TestFixtureReviewFixes(_GitRepo):
+    """End-to-end cmd_fixture coverage for the review fixes."""
+
+    def _w_cfg(self, extra=""):
+        self._w("ratchet.toml", _FXB_CFG + extra)
+
+    def test_expect_commit_footer_blind_without_msg(self):
+        self._w_cfg()
+        self._w("leak.diff", _FX_ADD)
+        rc, _, err = _cap3(R.cmd_fixture, self.d, os.path.join(self.d, "leak.diff"),
+                           expect_block="footer")
+        self.assertEqual(rc, 2)
+        self.assertIn("can't evaluate", err)
+
+    def test_commit_msg_unblinds_footer_and_asserts(self):
+        self._w_cfg()
+        self._w("leak.diff", _FX_ADD)
+        # a message with NO footer → commit_footer fires (block) → expect-block met
+        rc, out = _quiet(R.cmd_fixture, self.d, os.path.join(self.d, "leak.diff"),
+                         expect_block="footer", commit_msg="just a subject, no footer")
+        self.assertEqual(rc, 0)
+        # a message WITH the footer → commit_footer clean → expect-clean met
+        rc2, _ = _quiet(R.cmd_fixture, self.d, os.path.join(self.d, "leak.diff"),
+                        expect_clean="footer", commit_msg="subject\n\nCo-Authored-By: y")
+        self.assertEqual(rc2, 0)
+
+    def test_expect_agent_layer_check_errors(self):
+        self._w_cfg()
+        self._w("leak.diff", _FX_ADD)
+        rc, _, err = _cap3(R.cmd_fixture, self.d, os.path.join(self.d, "leak.diff"),
+                           expect_clean="noverify")
+        self.assertEqual(rc, 2)
+        self.assertIn("can't evaluate", err)
+
+    def test_flat_approvals_does_not_falsely_clean_approval_policy(self):
+        # the headline false-clean: --approvals x must NOT make approval_policy "clean"
+        self._w_cfg()
+        self._w("leak.diff", _FX_ADD)   # touches code → approval_policy would want approval
+        rc, _, err = _cap3(R.cmd_fixture, self.d, os.path.join(self.d, "leak.diff"),
+                           expect_clean="approve", approvals="alice")
+        self.assertEqual(rc, 2)         # blind, not a bogus exit 0
+        self.assertIn("can't evaluate", err)
+
+    def test_reviews_file_unblinds_approval_policy(self):
+        self._w_cfg()
+        self._w("leak.diff", _FX_ADD)
+        # an empty reviews array = a PR with zero approvals → approval_policy FIRES on a code change
+        self._w("reviews.json", "[]")
+        rc, _, err = _cap3(R.cmd_fixture, self.d, os.path.join(self.d, "leak.diff"),
+                           expect_clean="approve", reviews_file=os.path.join(self.d, "reviews.json"))
+        self.assertEqual(rc, 1)         # evaluated AND fired → expect-clean violated (not blind)
+
+    def test_checks_file_unblinds_require_checks_green(self):
+        self._w_cfg('[[check]]\nid = "ci"\nkind = "fact"\nseverity = "block"\nlayer = "change"\n'
+                    'primitive = "require_checks_green"\nneed = ["build"]\n')
+        self._w("leak.diff", _FX_ADD)
+        self._w("checks.json", '[{"name": "build", "conclusion": "failure"}]')
+        rc, _ = _quiet(R.cmd_fixture, self.d, os.path.join(self.d, "leak.diff"),
+                       expect_block="ci", checks_file=os.path.join(self.d, "checks.json"))
+        self.assertEqual(rc, 0)         # build failed → require_checks_green blocks → expect met
+
+    def test_garbled_reviews_file_errors_not_coerced(self):
+        self._w_cfg()
+        self._w("leak.diff", _FX_ADD)
+        self._w("bad.json", "{not json")
+        rc, _, err = _cap3(R.cmd_fixture, self.d, os.path.join(self.d, "leak.diff"),
+                           expect_clean="no-secret", reviews_file=os.path.join(self.d, "bad.json"))
+        self.assertEqual(rc, 2)
+        self.assertIn("cannot parse --reviews-file", err)
+
+    def test_missing_reviews_file_errors(self):
+        self._w_cfg()
+        self._w("leak.diff", _FX_ADD)
+        rc, _, err = _cap3(R.cmd_fixture, self.d, os.path.join(self.d, "leak.diff"),
+                           expect_clean="no-secret", reviews_file=os.path.join(self.d, "nope.json"))
+        self.assertEqual(rc, 2)
+        self.assertIn("no such --reviews-file", err)
+
+    def test_missing_pr_body_file_errors(self):
+        self._w_cfg()
+        self._w("leak.diff", _FX_ADD)
+        rc, _, err = _cap3(R.cmd_fixture, self.d, os.path.join(self.d, "leak.diff"),
+                           expect_clean="no-secret", pr_body_file=os.path.join(self.d, "nope.md"))
+        self.assertEqual(rc, 2)
+        self.assertIn("no such --pr-body-file", err)
+
+    def test_expect_block_against_warn_check_fails_with_reason(self):
+        # a block→warn demotion is a real regression a fixture should catch (exit 1, not 2)
+        self._w("ratchet.toml", _FX_CFG)   # no-todo is severity=warn
+        self._w("todo.diff", "diff --git a/x.py b/x.py\nnew file mode 100644\n--- /dev/null\n"
+                "+++ b/x.py\n@@ -0,0 +1 @@\n+x = 1  # TODO fix\n")
+        rc, _, err = _cap3(R.cmd_fixture, self.d, os.path.join(self.d, "todo.diff"),
+                           expect_block="no-todo")
+        self.assertEqual(rc, 1)
+        self.assertIn("fired as warn, not block", err)
+
+
+class TestFromUnifiedDiffEdge(unittest.TestCase):
+    """Parser edges the first pass under-covered (per review): CRLF, exact multi-file, chmod."""
+
+    def test_crlf_fixture_parses(self):
+        crlf = (_FX_ADD + _FX_MODIFY).replace("\n", "\r\n")
+        f = DiffFacts.from_unified_diff(crlf)
+        self.assertIn(("new.py", "API_SECRET = 1"), f.added)   # \r stripped, content intact
+        self.assertIn(("keep.py", "old_line = 2"), f.removed)
+        self.assertIn(("A", "new.py"), f.changed)
+
+    def test_multifile_changed_exact(self):
+        f = DiffFacts.from_unified_diff(_FX_ADD + _FX_MODIFY + _FX_DELETE)
+        self.assertEqual(sorted(f.changed),
+                         sorted([("A", "new.py"), ("M", "keep.py"), ("D", "gone.py")]))
+
+    def test_mode_only_chmod_reported(self):
+        # a pure chmod emits no +++/---/@@/Binary — path falls back to the `diff --git` line
+        chmod = "diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n"
+        self.assertEqual(DiffFacts.from_unified_diff(chmod).changed, [("M", "run.sh")])
