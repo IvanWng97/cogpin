@@ -2979,3 +2979,27 @@ class TestBacktest(_GitRepo):
                               "backtest", "--cwd", self.d, "--range", "bogus..HEAD"],
                              capture_output=True, text=True)
         self.assertEqual(out.returncode, 2)
+
+    def test_blind_names_pr_body_and_run_block_checks(self):
+        # a clean backtest must NOT overstate coverage: a `run` block and a pr_body-triggered
+        # path_requires(when_marker) are both un-evaluable → named; a plain diff-fact check isn't
+        toml = ('schema=1\n[repo]\ndefault_branch="main"\ncode=["*.py"]\ndocs=["docs/**"]\n[meta]\n'
+                'base_pinned=true\n'
+                '[[check]]\nid="secret"\nkind="fact"\nseverity="block"\nlayer="change"\n'
+                'primitive="forbid_pattern"\npattern="X"\nscope="code"\n'
+                '[[check]]\nid="suite"\nkind="fact"\nseverity="block"\nlayer="change"\n'
+                'primitive="run"\ncmd="true"\n'
+                '[[check]]\nid="migrate-docs"\nkind="fact"\nseverity="block"\n'
+                'primitive="path_requires"\nwhen_marker="MIGRATION"\nneed=["docs"]\n')
+        blind = R._backtest_blind(R.Config.parse(toml))
+        self.assertIn("suite", blind)            # run — needs a checkout
+        self.assertIn("migrate-docs", blind)     # pr_body trigger backtest can't supply
+        self.assertNotIn("secret", blind)        # plain diff-fact check IS evaluated
+
+    def test_missing_config_file_names_it(self):
+        # a typo'd --config must say "no such file", not the misleading "schema version 0"
+        self._commit("c0", **{"ratchet.toml": _BLOCK_CFG})
+        rc, _, err = _cap3(R.cmd_backtest, self.d, "HEAD", config=os.path.join(self.d, "nope.toml"))
+        self.assertEqual(rc, 2)
+        self.assertIn("no such config file", err)
+        self.assertNotIn("schema version", err)

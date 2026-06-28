@@ -2530,6 +2530,24 @@ _BACKTEST_BLIND = frozenset({
 })
 
 
+def _backtest_blind(cfg: Config) -> list[str]:
+    """Check ids backtest CANNOT evaluate (no checkout → no `run`; no PR context → no
+    approvals/reviews/checks). Beyond the run/approval primitives this also names the
+    pr_body-TRIGGERED block variants — a path_requires gated on a `when_marker`, and a message
+    check scoped ONLY to `pr_body` — because both read facts.pr_body, which backtest leaves
+    empty, so they'd silently never fire and a clean report would overstate coverage."""
+    out = []
+    for c in cfg.checks:
+        if c.primitive in _BACKTEST_BLIND:
+            out.append(c.id)
+        elif c.primitive == "path_requires" and c.when_marker:
+            out.append(c.id)
+        elif (c.primitive in ("require_message_pattern", "forbid_in_message")
+              and c.msg_scope and all(s == "pr_body" for s in c.msg_scope)):
+            out.append(c.id)
+    return sorted(out)
+
+
 def cmd_backtest(cwd: str = ".", rng: str = "", config: str | None = None,
                  fail_on_block: bool = False) -> int:
     """Replay the CURRENT change-layer policy over a range of merged history — the
@@ -2538,6 +2556,11 @@ def cmd_backtest(cwd: str = ".", rng: str = "", config: str | None = None,
     clone / unloadable config). Uses the WORKING-tree config (you're testing your CANDIDATE
     policy against history, not auditing what the old gate did) and covers only DIFF-FACT
     checks — `run` and PR-context checks are skipped (and named in the summary)."""
+    if config and not os.path.exists(config):
+        # _slurp swallows OSError → "" → a typo'd path would misreport as "schema version 0";
+        # name the real cause instead. Still fail-CLOSED (exit 2), never a false-clean.
+        print(f"ratchet: no such config file: {config}", file=sys.stderr)
+        return 2
     try:
         cfg = Config.parse(_slurp(config)) if config else _read_working_config(cwd)
     except (OSError, ConfigError) as e:
@@ -2560,7 +2583,7 @@ def cmd_backtest(cwd: str = ".", rng: str = "", config: str | None = None,
         print(f"ratchet: no commits in range `{rng}`")
         return 0
     sizes_needed = any(c.primitive == "max_added_file_bytes" for c in cfg.checks)
-    blind = sorted(c.id for c in cfg.checks if c.primitive in _BACKTEST_BLIND)
+    blind = _backtest_blind(cfg)
     would_block = evaluated = 0
     for rec in rows:
         parts = rec.split("\x1e")
