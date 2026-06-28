@@ -55,6 +55,31 @@ CI runs the same recipes (`ci.yml` / `lint.yml` / `plugin-validate.yml` /
 including `self-protect` (no in-session edit to the gate files) and the `protected_path`
 approval on `cogpin.py` / `cogpin.toml` / the workflows.
 
+## Code review (the two-lens cadence)
+
+Every substantive PR gets reviewed through **two lenses**, in order — the same pattern the
+`claude review` workflow ([`.github/prompts/pr_review_rules.md`](.github/prompts/pr_review_rules.md))
+encodes:
+
+1. **Design lens (before you implement).** Does the change belong, and does it keep the
+   invariants? The decisive one: **does it preserve the moat** (`block` ⇒ `kind="fact"` ∧
+   `provenance="environment"`)? Is a new primitive justified, or does delegation
+   (`run` / `require_checks_green` / `approval_policy` + a `cogpin.toml` line) already answer
+   it? See the add-a-primitive checklist in [`CLAUDE.md`](CLAUDE.md).
+2. **Adversarial lens (on the diff, before merge).** Hunt for real bugs, fail-open/-closed
+   inversions, a removed test/assert, and **cross-tree duplication** (the one check a
+   diff-scoped read can't do — `grep` the tree for a pre-existing copy that should be the
+   canonical one). Verify each finding against the actual code; default to refuting.
+
+**How it's enforced (honestly).** The teeth are the *mechanical* gates — `definition-of-done`,
+`ci`, `lint`, `plugin-validate` — plus a human approver. The `claude review` workflow is
+**advisory**: it posts inline findings to inform that approver but never blocks (an AI verdict
+is judgment, which the moat says may only advise — the same rule cogpin enforces on everyone
+else). The `two-lens-review` check is a `warn`-only nag for the same reason: it just reminds
+you to put a `two-lens-review:` line in the PR body once both lenses have run. **Adjudicate
+every `claude[bot]` finding before merge** — fix it, or reply on the thread why it's a
+non-issue. Don't merge past a HIGH finding silently.
+
 ## Style
 
 - Match the surrounding code: dense, sectioned, comments only for a non-obvious WHY.

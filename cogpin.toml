@@ -129,3 +129,16 @@ severity = "block"
 layer = "change"
 primitive = "run"
 cmd = "python3 -m unittest discover -s tests -p 'test_*.py'"
+
+# Advisory two-lens-review nag (#14): a code-touching PR should carry a `two-lens-review:`
+# line in its body (design-vet + adversarial-diff). `marker_present` is provenance=agent —
+# a self-typed marker the gated agent writes — so by the moat it can only WARN; the real
+# teeth are the `claude review` workflow + a human approver, never this token. Local pre-push
+# has no PR body, so it SKIPS there (no false-fire); CI passes the body and the nag fires.
+[[check]]
+id = "two-lens-review"
+kind = "fact"
+severity = "warn"
+primitive = "marker_present"
+marker = '(?i)two-lens-review\s*:'
+when = "code"
