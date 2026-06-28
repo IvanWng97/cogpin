@@ -3251,6 +3251,29 @@ class TestReportOnly(_GitRepo):
         self.assertEqual(rc, 1)
         self.assertIn("cannot load", err)
 
+    def test_stale_engine_hint_points_at_schema_for_unknown_primitive(self):
+        # #47: an UNKNOWN-PRIMITIVE base config is a config typo, not a stale engine — the hint
+        # points at SCHEMA.md, NOT the "engine is behind this config's schema" message.
+        typo = ('schema = 1\n[repo]\ndefault_branch = "main"\ncode=["*.py"]\n[meta]\nbase_pinned=true\n'
+                '[[check]]\nid="x"\nkind="fact"\nseverity="warn"\nprimitive="forbid_patternnn"\n')
+        self._commit("c0", **{"cogpin.toml": typo, "a.txt": "1"})
+        self._commit("c1", **{"b.txt": "2"})
+        rc, _, err = _cap3(R.cmd_check, self.d, report_only=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("SCHEMA.md", err)
+        self.assertNotIn("engine is behind", err)
+
+    def test_stale_engine_hint_suggests_update_on_schema_skew(self):
+        # #47: an UNSUPPORTED-SCHEMA base config IS a real engine skew → suggest `cogpin update`.
+        skew = ('schema = 999\n[repo]\ndefault_branch = "main"\ncode=["*.py"]\n[meta]\nbase_pinned=true\n'
+                '[[check]]\nid="x"\nkind="fact"\nseverity="warn"\nprimitive="forbid_pattern"\npattern="X"\n')
+        self._commit("c0", **{"cogpin.toml": skew, "a.txt": "1"})
+        self._commit("c1", **{"b.txt": "2"})
+        rc, _, err = _cap3(R.cmd_check, self.d, report_only=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("cogpin update", err)
+        self.assertIn("schema", err)
+
 
 class TestBacktest(_GitRepo):
     def _commit(self, msg, **files):
