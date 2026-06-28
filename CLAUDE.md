@@ -30,7 +30,7 @@ cogpin.toml            the dogfood policy that gates THIS repo.
 action.yml              the composite GitHub Action — the change-layer DISTRIBUTION
                         surface (`uses: IvanWng97/cogpin@v0`); runs a rev-pinned engine
                         over the base-pinned config. self-gate.yml dogfoods it (`uses: ./`).
-examples/*/cogpin.toml  lift-and-adjust recipes (python · node-ts · pixtuoid · advisory).
+examples/*/cogpin.toml  lift-and-adjust recipes (python · node-ts · pixtuoid · monorepo · oracle · advisory).
 scripts/validate_plugin.py   plugin-packaging validator (manifests + frontmatter + action.yml).
 hooks/hooks.json        the PreToolUse + Stop hook wiring the plugin installs.
 .claude-plugin/         plugin.json + marketplace.json (the `/plugin install` surface).

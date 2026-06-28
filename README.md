@@ -415,6 +415,13 @@ Ready-to-lift policies:
   language), each proven by a `--diff-file` coverage fixture. `suggest` detects the
   top-K languages (not just the dominant one) and emits a per-language `languages`
   breakdown to author these from.
+- [`examples/oracle/cogpin.toml`](examples/oracle/cogpin.toml) — **the oracle-delegation
+  library**: the one moat-legal way to reach the *substance* band (did it typecheck, build,
+  did coverage hold, do the tests have teeth) — block on an **independent tool's** exit code
+  or CI conclusion via `run` / `require_checks_green` / `numeric_floor`, and gate the oracle's
+  *own* config (the bar number, the CI files, the `# type: ignore` / `pytest.mark.skip`
+  suppression markers) so the agent can't loosen the bar instead of meeting it. Zero new
+  engine code — a polyglot menu you adopt by deleting.
 - [`examples/advisory/cogpin.toml`](examples/advisory/cogpin.toml) — the advisory
   **judge** library: the eight semantic-weakening prompts (assertion-loosening,
   fake-impl, regex-relaxing, guard-removal, …) a diff fact can't prove, mined from
