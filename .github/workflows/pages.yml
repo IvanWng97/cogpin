@@ -9,10 +9,9 @@ on:
     paths: ['site/**', 'cogpin.py', 'assets/**', '.github/workflows/pages.yml']
   workflow_dispatch:
 
+# Least privilege at the top: only the deploy job gets the write/id-token scopes.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # One deploy at a time; don't cancel an in-flight one.
 concurrency:
@@ -41,6 +40,11 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    # Pages deploy needs these; scoped here, not at the workflow level, so the build job
+    # (which runs npm over the site's deps) never holds a write token or an OIDC identity.
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

@@ -1,0 +1,20 @@
+# Code owners. GitHub auto-requests a review from these accounts on a matching PR.
+#
+# This is also the owner-map cogpin's own approval primitives read: `require_approval_from`
+# / `approval_policy` resolve "an owner approved" against a file like this. It's the honest
+# dogfood of the feature.
+#
+# Solo today — one owner — so the dogfood `protected-gate-files` check stays `warn` (a hard
+# block would need an independent, non-author approval no solo repo can produce). Promote it
+# to `block` the day a second owner lands here. The agent-layer `self-protect` still
+# hard-blocks in-session edits to these files regardless.
+
+*                   @IvanWng97
+
+# The gate-defining files — the moat lives in these. Any change wants an owner's eyes.
+/cogpin.py          @IvanWng97
+/cogpin.toml        @IvanWng97
+/action.yml         @IvanWng97
+/hooks/hooks.json   @IvanWng97
+/.github/workflows/ @IvanWng97
+/.claude-plugin/    @IvanWng97

@@ -1,0 +1,41 @@
+name: Feature / primitive request
+description: A new check, field, or flag — or a whole new primitive.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before a **new primitive**: cogpin's rule is *delegation first* (CLAUDE.md → "Adding a
+        primitive"). If a `cogpin.toml` line over an existing tool — `run` a linter,
+        `require_checks_green` over a CI job, `approval_policy` over CODEOWNERS — already answers
+        the requirement, that's the fix, not engine code. A primitive is justified only for a
+        **fact no existing tool exposes**, and a `block` one must clear the moat
+        (`kind = "fact"` ∧ `provenance = "environment"`).
+  - type: textarea
+    id: requirement
+    attributes:
+      label: The requirement
+      description: The Definition-of-Done rule you want to enforce. What should pass; what should block?
+    validations:
+      required: true
+  - type: textarea
+    id: delegation
+    attributes:
+      label: Can an existing primitive + config answer it?
+      description: Which did you try (`run` / `require_checks_green` / `approval_policy` / …), and why it falls short.
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Would this BLOCK, or only WARN?
+      options:
+        - warn — a judgment / advisory signal
+        - block — an ungameable, environment-authored fact
+    validations:
+      required: true
+  - type: textarea
+    id: fact
+    attributes:
+      label: If block — what's the ungameable, environment-authored fact?
+      description: A diff line, a file status, the command string, a branch, a CI conclusion, a non-author approval. (A self-typed marker/attestation is agent-authored → it may only warn.)

@@ -1,0 +1,86 @@
+name: release
+
+# Cut a GitHub Release from a pushed vMAJOR.MINOR.PATCH tag, then move the floating major tag
+# (e.g. v0) the Action is distributed under (`uses: IvanWng97/cogpin@v0`) onto that commit. The
+# full DoD gate re-runs FIRST, so a tag can never ship an engine that doesn't pass its own gate.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: gate (re-run the DoD before shipping)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: byte-compile + unit tests
+        run: |
+          python -m py_compile cogpin.py
+          python -m unittest discover -s tests -p 'test_*.py'
+      - name: validate every shipped config
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in cogpin.toml examples/*/cogpin.toml; do
+            echo "── $f"
+            python cogpin.py validate --config "$f"
+          done
+      - name: plugin packaging
+        run: python scripts/validate_plugin.py
+
+  release:
+    name: publish release + move major tag
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the Release + force-move the major tag
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: extract this version's changelog section
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          awk -v ver="$ver" '
+            $0 ~ ("^## \\[" ver "\\]") { grab=1; next }
+            grab && /^## \[/ { exit }
+            grab { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            printf "See [CHANGELOG.md](CHANGELOG.md).\n" > RELEASE_NOTES.md
+          fi
+      - name: create the release (idempotent; prerelease if the tag has a -suffix)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          # Skip create if a re-run already published this tag, so the tag-move below can finish.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag already exists — skipping create"
+          else
+            flags=(--title "$tag" --notes-file RELEASE_NOTES.md --verify-tag)
+            case "$tag" in *-*) flags+=(--prerelease);; esac
+            gh release create "$tag" "${flags[@]}"
+          fi
+      - name: move the floating major tag (finals only)
+        if: ${{ !contains(github.ref_name, '-') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"; major="v${ver%%.*}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "$major" "$GITHUB_SHA"
+          git push -f origin "refs/tags/$major"

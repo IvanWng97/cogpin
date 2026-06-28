@@ -24,9 +24,18 @@ jobs:
         run: mypy cogpin.py
 
   actions:
-    name: actionlint
+    name: actionlint + zizmor
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - name: actionlint
         uses: raven-actions/actionlint@v2
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: zizmor (workflow-security static analysis; policy in .github/zizmor.yml)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pip install zizmor
+          zizmor --min-confidence=medium .github/workflows/ action.yml
