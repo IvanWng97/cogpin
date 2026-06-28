@@ -957,6 +957,114 @@ class TestGlobGuessing(unittest.TestCase):
         self.assertEqual(guess_globs([]), ([], [], ["**/*.md"]))
 
 
+class TestGuessScopes(unittest.TestCase):
+    """#19 top-K polyglot detection: guess_scopes (per-language) + the guess_globs flat union."""
+
+    def test_single_language_byte_identical(self):
+        # the flat union over a one-language repo MUST equal the old single-dominant output
+        py = ["src/app.py", "src/util.py", "tests/test_app.py", "docs/x.md"]
+        self.assertEqual(guess_globs(py), (["src/**/*.py"], ["tests/**/*.py", "**/test_*.py"],
+                                           ["**/*.md", "docs/**"]))
+        langs = R.guess_scopes(py)
+        self.assertEqual([ls.name for ls in langs], ["python"])
+
+    def test_stray_secondary_excluded_absolute_floor(self):
+        # 3 stray .py in a 50-file Rust repo: python is below the absolute floor → excluded
+        paths = [f"crates/x/src/f{i}.rs" for i in range(50)] + ["a.py", "b.py", "c.py"]
+        names = [ls.name for ls in R.guess_scopes(paths)]
+        self.assertEqual(names, ["rust"])
+        self.assertFalse(any(".py" in g for g in guess_globs(paths)[0]))
+
+    def test_real_secondary_included_size_independent(self):
+        # 200 .ts in a 5000-file Rust repo (~3.8%) MUST be included — a fraction gate would drop it
+        paths = [f"crates/x/src/f{i}.rs" for i in range(5000)] + [f"site/src/c{i}.ts" for i in range(200)]
+        names = [ls.name for ls in R.guess_scopes(paths)]
+        self.assertEqual(names, ["rust", "node"])               # dominant-first
+        code = guess_globs(paths)[0]
+        self.assertTrue(any(".rs" in g for g in code) and any(".ts" in g for g in code))
+
+    def test_secondary_floor_constant(self):
+        # exactly _SECONDARY_MIN_FILES of a secondary clears the floor; one fewer does not
+        base = [f"a{i}.py" for i in range(50)]
+        at = base + [f"x{i}.rs" for i in range(R._SECONDARY_MIN_FILES)]
+        below = base + [f"x{i}.rs" for i in range(R._SECONDARY_MIN_FILES - 1)]
+        self.assertIn("rust", [ls.name for ls in R.guess_scopes(at)])
+        self.assertNotIn("rust", [ls.name for ls in R.guess_scopes(below)])
+
+    def test_flat_layout_secondary_contributes_fallback(self):
+        # a secondary whose structured globs all miss must still emit its **/*{ext} fallback into
+        # the merged code — else it is "included" yet covers nothing (silent under-coverage)
+        paths = [f"a{i}.py" for i in range(40)] + [f"x{i}.rs" for i in range(15)]  # .rs at root, no crates/src
+        rust = next(ls for ls in R.guess_scopes(paths) if ls.name == "rust")
+        self.assertEqual(rust.code, ["**/*.rs"])
+        self.assertIn("**/*.rs", guess_globs(paths)[0])
+
+    def test_union_dedups_shared_glob(self):
+        # python + node both contribute tests/** — it must appear once in the merged tests
+        paths = [f"a{i}.py" for i in range(15)] + [f"b{i}.ts" for i in range(15)] + ["tests/t.py", "tests/t.ts"]
+        tests = guess_globs(paths)[1]
+        self.assertEqual(tests.count("tests/**"), 1)
+
+    def test_no_language_cap_every_floor_clearer_covered(self):
+        # NO max-lang cap: every floor-clearing language is in the breakdown AND the flat union
+        # (a cap would leave the lowest-ranked langs' files matched by no glob — under-coverage)
+        n = R._SECONDARY_MIN_FILES + 5
+        paths = ([f"a{i}.py" for i in range(n)] + [f"b{i}.rs" for i in range(n)]
+                 + [f"c{i}.go" for i in range(n)] + [f"d{i}.rb" for i in range(n)]
+                 + [f"e{i}.java" for i in range(n)])
+        self.assertEqual(len(R.guess_scopes(paths)), 5)
+        code = guess_globs(paths)[0]
+        for ext in (".py", ".rs", ".go", ".rb", ".java"):   # no language left uncovered
+            self.assertTrue(any(ext in g for g in code), ext)
+
+    def test_multi_ext_fallback_covers_present_exts(self):
+        # node is multi-ext (.ts/.tsx/.js/.jsx); a flat .tsx-only / lib-.js subtree whose curated
+        # globs all miss must fall back to a glob that MATCHES its files, not a dead **/*.ts
+        tsx = [f"a{i}.py" for i in range(40)] + [f"comp{i}.tsx" for i in range(15)]   # root .tsx, no src/
+        node = next(ls for ls in R.guess_scopes(tsx) if ls.name == "node")
+        self.assertTrue(any(R._glob_to_re(g).match("comp0.tsx") for g in node.code))
+        self.assertNotIn("**/*.ts", node.code)   # the old dead fallback must be gone
+        libjs = [f"a{i}.py" for i in range(40)] + [f"lib/m{i}.js" for i in range(15)]
+        node2 = next(ls for ls in R.guess_scopes(libjs) if ls.name == "node")
+        self.assertTrue(any(R._glob_to_re(g).match("lib/m0.js") for g in node2.code))
+
+    def test_secondary_floor_clamp_on_tiny_repo(self):
+        # the min(_SECONDARY_MIN_FILES, dominant) clamp: a near-parity secondary enters on a tiny
+        # repo (5 rs + 5 py → both), but one below parity does not (5 rs + 4 py → rust only)
+        self.assertEqual(sorted(ls.name for ls in R.guess_scopes(
+            [f"r{i}.rs" for i in range(5)] + [f"p{i}.py" for i in range(5)])), ["python", "rust"])
+        self.assertEqual([ls.name for ls in R.guess_scopes(
+            [f"r{i}.rs" for i in range(5)] + [f"p{i}.py" for i in range(4)])], ["rust"])
+
+    def test_empty_and_no_code_safe(self):
+        self.assertEqual(R.guess_scopes([]), [])
+        self.assertEqual(R.guess_scopes(["README.md", "LICENSE"]), [])   # no code lang
+        self.assertEqual(guess_globs(["README.md"]), ([], [], ["**/*.md"]))
+
+    def test_scan_dict_exposes_languages(self):
+        # the host-agent JSON contract gains `languages` without disturbing existing keys
+        scan = R.RepoScan(default_branch="main", code=["**/*.py"], tests=[], docs=["**/*.md"],
+                          test_cmd=None, test_cmd_source=None, claude_md_paths=[], house_rules=[],
+                          languages=[R.LangScope("python", 3, ["**/*.py"], [])])
+        d = R._scan_to_dict(scan)
+        self.assertEqual(d["languages"], [{"name": "python", "file_count": 3,
+                                           "code": ["**/*.py"], "tests": []}])
+        self.assertIn("code", d)   # existing keys intact
+
+    def test_render_toml_detected_comment_only_when_polyglot(self):
+        multi = R.RepoScan(default_branch="main", code=["**/*.py", "**/*.rs"], tests=[], docs=["**/*.md"],
+                           test_cmd=None, test_cmd_source=None, claude_md_paths=[], house_rules=[],
+                           languages=[R.LangScope("python", 40, ["**/*.py"], []),
+                                      R.LangScope("rust", 15, ["**/*.rs"], [])])
+        out = R.render_suggest_toml(multi)
+        self.assertIn("# detected: python(40), rust(15)", out)
+        self.assertIn('schema = 1', out)   # still parses as a draft
+        # single-language scan emits no detected comment (would be noise)
+        solo = dataclasses.replace(multi, code=["**/*.py"],
+                                   languages=[R.LangScope("python", 40, ["**/*.py"], [])])
+        self.assertNotIn("# detected:", R.render_suggest_toml(solo))
+
+
 class TestTestCommand(unittest.TestCase):
     """detect_test_command — manifest parsed as TEXT, never executed."""
 
@@ -3468,3 +3576,48 @@ class TestFromUnifiedDiffEdge(unittest.TestCase):
         # a pure chmod emits no +++/---/@@/Binary — path falls back to the `diff --git` line
         chmod = "diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n"
         self.assertEqual(DiffFacts.from_unified_diff(chmod).changed, [("M", "run.sh")])
+
+
+class TestMonorepoExample(unittest.TestCase):
+    """#19 Ask-2: the polyglot monorepo example's per-subtree scopes are PROVEN by fixtures —
+    `validate` can't catch a glob typo (no repo access), only a fixture can. This is the
+    anti-under-coverage gate the example must ship with (not `validate --config` alone)."""
+
+    def setUp(self):
+        root = os.path.dirname(os.path.abspath(R.__file__))   # ratchet.py sits at the repo root
+        self.mono = os.path.join(root, "examples", "monorepo")
+        if not os.path.exists(os.path.join(self.mono, "ratchet.toml")):
+            self.skipTest("examples/monorepo not present")
+
+    def _fx(self, name):
+        return os.path.join(self.mono, "fixtures", name)
+
+    def test_config_validates(self):
+        with open(os.path.join(self.mono, "ratchet.toml"), encoding="utf-8") as fh:
+            cfg = Config.parse(fh.read())   # parses + passes the moat (raises ConfigError otherwise)
+        ids = {c.id for c in cfg.checks}
+        self.assertTrue({"no-rust-dbg", "no-js-console", "no-py-debugger"} <= ids)
+
+    def test_rust_dbg_blocks_in_rust_subtree(self):
+        rc, _ = _quiet(R.cmd_fixture, self.mono, self._fx("rust-dbg.diff"), expect_block="no-rust-dbg")
+        self.assertEqual(rc, 0)
+
+    def test_js_console_blocks_every_composed_subtree(self):
+        # no-js-console's scope COMPOSES 4 literal globs (site+extension × .ts+.tsx). Each needs a
+        # single-subtree fixture, else a typo in any one glob silently under-covers with no failure.
+        for fx in ("js-console.diff", "js-console-site-ts.diff",
+                   "js-console-site-tsx.diff", "js-console-ext-tsx.diff"):
+            with self.subTest(fixture=fx):
+                rc, _ = _quiet(R.cmd_fixture, self.mono, self._fx(fx), expect_block="no-js-console")
+                self.assertEqual(rc, 0)
+
+    def test_py_debugger_blocks_in_scripts_subtree(self):
+        rc, _ = _quiet(R.cmd_fixture, self.mono, self._fx("py-debugger.diff"), expect_block="no-py-debugger")
+        self.assertEqual(rc, 0)
+
+    def test_cross_subtree_isolation(self):
+        # a Rust debug token living in the TS tree (and a JS token in the Rust tree) must trip
+        # NEITHER per-subtree rule — proof the literal-glob scoping actually confines each rule
+        rc, _ = _quiet(R.cmd_fixture, self.mono, self._fx("cross-isolation.diff"),
+                       expect_clean="no-rust-dbg,no-js-console")
+        self.assertEqual(rc, 0)

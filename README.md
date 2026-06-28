@@ -393,6 +393,12 @@ Ready-to-lift policies:
 - [`examples/node-ts/ratchet.toml`](examples/node-ts/ratchet.toml) — a Node/TS repo,
   including the team / PR-review layer (CODEOWNERS-lite, fresh-approval, checks-green).
 - [`examples/python/ratchet.toml`](examples/python/ratchet.toml) — a Python repo.
+- [`examples/monorepo/ratchet.toml`](examples/monorepo/ratchet.toml) — a **polyglot
+  monorepo** (Rust + TS site/extension + Python scripts): per-subtree denylists via
+  literal globs (the same "no debug prints" rule, a different pattern + scope per
+  language), each proven by a `--diff-file` coverage fixture. `suggest` detects the
+  top-K languages (not just the dominant one) and emits a per-language `languages`
+  breakdown to author these from.
 - [`examples/advisory/ratchet.toml`](examples/advisory/ratchet.toml) — the advisory
   **judge** library: the eight semantic-weakening prompts (assertion-loosening,
   fake-impl, regex-relaxing, guard-removal, …) a diff fact can't prove, mined from

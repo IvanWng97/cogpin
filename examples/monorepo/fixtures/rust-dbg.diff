@@ -1,0 +1,9 @@
+diff --git a/crates/api/src/handler.rs b/crates/api/src/handler.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/api/src/handler.rs
+@@ -0,0 +1,3 @@
++pub fn handle(req: &Request) -> Response {
++    println!("debug: incoming {:?}", req);
++}

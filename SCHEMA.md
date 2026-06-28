@@ -274,6 +274,15 @@ ratchet judge --cwd .           # emit advisory judge prompts (CI pipes to a mod
 ratchet init --config ratchet.toml          # write a minimal starter config
 ratchet validate --config ratchet.toml      # parse + the block-requires-fact invariant
 ratchet suggest --cwd . [--format json|toml]  # repo facts → ranked draft (CLAUDE.md house-rules → primitives); writes NOTHING
+    # POLYGLOT (#19): detects the top-K languages, not just the dominant one. The flat [repo].
+    #   code/tests are the union over every detected language (a secondary enters at >=
+    #   _SECONDARY_MIN_FILES=10 files — an ABSOLUTE floor, not a fraction, so a real 200-file
+    #   subtree in a 5000-file repo is covered while 3 stray files are not). EVERY floor-clearing
+    #   language is in the union (no cap → no language's files left uncovered).
+    #   --format json adds a `languages` array [{name, file_count, code, tests}] (dominant-first) so
+    #   a host agent can author PER-SUBTREE checks (a `console.log` forbid on JS-only, `println!` on
+    #   Rust-only) that the merged blob can't express; --format toml adds a `# detected:` comment.
+    #   See examples/monorepo/ for the literal-per-subtree recipe + its --diff-file coverage fixtures.
 ratchet draft-lint --cwd . [--config ratchet.toml.draft] [--simulate]  # strict superset of validate; gates on # TODO(ratchet:review) markers
 ratchet gaps --cwd . [--format text|json]   # advisory: which house-rules no check binds
 

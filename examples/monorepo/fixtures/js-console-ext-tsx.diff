@@ -1,0 +1,7 @@
+diff --git a/extension/src/Panel.tsx b/extension/src/Panel.tsx
+new file mode 100644
+index 0000000..8888888
+--- /dev/null
++++ b/extension/src/Panel.tsx
+@@ -0,0 +1 @@
++export const Panel = () => { console.debug("panel mount"); return null; };

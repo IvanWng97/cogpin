@@ -1,0 +1,8 @@
+diff --git a/scripts/migrate.py b/scripts/migrate.py
+new file mode 100644
+index 0000000..3333333
+--- /dev/null
++++ b/scripts/migrate.py
+@@ -0,0 +1,2 @@
++def run():
++    breakpoint()

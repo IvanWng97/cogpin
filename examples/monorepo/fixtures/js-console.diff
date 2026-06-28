@@ -1,0 +1,9 @@
+diff --git a/extension/src/command.ts b/extension/src/command.ts
+new file mode 100644
+index 0000000..2222222
+--- /dev/null
++++ b/extension/src/command.ts
+@@ -0,0 +1,2 @@
++export async function run() {
++  console.log("debugging the raycast command", state);
++}

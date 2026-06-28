@@ -1,0 +1,14 @@
+diff --git a/site/src/app.ts b/site/src/app.ts
+new file mode 100644
+index 0000000..4444444
+--- /dev/null
++++ b/site/src/app.ts
+@@ -0,0 +1 @@
++export function boot() { println!("a rust macro, in a .ts file"); }
+diff --git a/crates/api/src/lib.rs b/crates/api/src/lib.rs
+new file mode 100644
+index 0000000..5555555
+--- /dev/null
++++ b/crates/api/src/lib.rs
+@@ -0,0 +1 @@
++pub fn log(resp: &Resp) { console.log(resp); }
