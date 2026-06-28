@@ -1063,8 +1063,9 @@ class TestFullCoverage(unittest.TestCase):
         self.assertIsNotNone(max_added_file_bytes(c, DiffFacts(file_sizes={"img.png": -1}), r))  # binary, disallowed
 
     def test_max_added_file_bytes_allow_binary(self):
-        # allow_binary=true takes the `continue` arm (cogpin.py:1136) — a binary blob (size -1)
-        # is permitted, yet the size cap still applies to a non-binary oversized file.
+        # allow_binary=true skips the binary block (the `if not check.allow_binary` guard,
+        # cogpin.py:1134) — a binary blob (size -1) is permitted, yet the size cap still
+        # applies to a non-binary oversized file.
         c = one_check(
             '[[check]]\nid="big"\nkind="fact"\nseverity="block"\nprimitive="max_added_file_bytes"\n'
             'maxkb=500\nallow_binary=true'
