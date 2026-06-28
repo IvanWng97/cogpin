@@ -136,7 +136,7 @@ class Spec:
 # runners (the table holds no callable — that keeps mypy's per-call arity check and the route test).
 PRIMITIVE_SPECS: dict[str, "Spec"] = {
     "secret_scan": Spec("fact"),
-    "forbid_command": Spec("fact"),
+    "forbid_command": Spec("fact", _AGENT_ONLY),  # live-signal: reads the live command string
     "forbid_pattern": Spec("fact"),
     "forbid_removal": Spec("fact"),
     "forbid_delete": Spec("fact"),
@@ -316,6 +316,13 @@ def _as_int(v) -> int | None:
     return v
 
 
+def _regex_field_values(c: "Check") -> list[str]:
+    """The one source of truth for which Check fields are regexes — consumed by BOTH
+    Config.validate (the fail-loud compile guard) and draft_lint. A field added to only
+    one of the two sites would silently re-open the regex fail-open hole."""
+    return [v for v in (c.pattern, c.exempt, c.key, c.marker, c.when_marker, c.trigger, c.require, *c.custom) if v]
+
+
 @dataclass
 class Config:
     schema: int
@@ -468,9 +475,10 @@ class Config:
                 )
             # A `run` block is authoritative only at the change layer (repo author
             # controls the script there); never let it block from the agent layer.
-            if c.primitive == "run" and c.severity == "block" and c.layer == "agent":
+            if c.primitive == "run" and c.layer == "agent":
                 raise ConfigError(
-                    f"check `{c.id}`: a `run` block must live at the change layer, not agent"
+                    f"check `{c.id}`: a `run` check must live at the change layer, not agent "
+                    f"(no agent-layer runner dispatches it — it would silently never fire)"
                 )
             # Placement: a live-signal primitive (forbid_commit_on_branch reads the current
             # branch, self_protect the live Write/Edit target — both at the PreToolUse intercept)
@@ -489,6 +497,26 @@ class Config:
                 raise ConfigError(
                     f"check `{c.id}`: numeric_floor direction must be 'no_decrease' or "
                     f"'no_increase', got `{c.direction}`"
+                )
+            # Every populated regex field must COMPILE — an uncompilable pattern makes its
+            # primitive return None (a silent PASS), disabling a block gate on an author typo.
+            # (draft_lint compiles these too; the authoritative validate path must as well.)
+            for _rxv in _regex_field_values(c):
+                try:
+                    re.compile(_rxv)
+                except (re.error, TypeError) as _e:
+                    raise ConfigError(f"check `{c.id}`: invalid regex {_rxv!r}: {_e}")
+            # Typed string-enums: an unknown member selects zero targets → a vacuous PASS (the
+            # same fail-open class as `direction`). msg_scope drives the message primitives;
+            # status the file_must_contain A/M/D filter (compared upper-cased).
+            _bad_scope = [sc for sc in c.msg_scope if sc not in _MSG_SCOPES]
+            if _bad_scope:
+                raise ConfigError(
+                    f"check `{c.id}`: unknown msg_scope {_bad_scope} (known: {', '.join(_MSG_SCOPES)})"
+                )
+            if c.status is not None and (not isinstance(c.status, str) or c.status.upper() not in (ADDED, MODIFIED, DELETED)):
+                raise ConfigError(
+                    f"check `{c.id}`: status must be one of A/M/D, got `{c.status}`"
                 )
         # [capability] is a DECLARATION (policy), never a [[check]] — it can't block (a
         # primitive="capability" already fails "unknown primitive" above). The only validation
@@ -2264,13 +2292,10 @@ def draft_lint(text: str, *, existing_cfg: Config | None,
     findings: list[LintFinding] = []
     # 2 — every regex field compiles + isn't a match-everything no-op
     for c in cfg.checks:
-        rx_fields = [c.pattern, c.exempt, c.key, c.marker, c.when_marker, c.trigger, c.require, *c.custom]
-        for val in rx_fields:
-            if not val:
-                continue
+        for val in _regex_field_values(c):
             try:
                 re.compile(val)
-            except re.error:
+            except (re.error, TypeError):
                 findings.append(LintFinding("error", c.id, f"invalid regex: {val!r}"))
         if c.pattern is not None and c.pattern in _MATCH_EVERYTHING:
             findings.append(LintFinding("error", c.id, "pattern matches everything → enforces nothing"))

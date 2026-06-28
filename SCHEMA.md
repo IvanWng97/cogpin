@@ -152,9 +152,10 @@ need = "tests"                 # …a tests-scoped path must change too
   ignores the bypass env. The real gate.
 - **both** — evaluated in either context.
 
-Some primitives are constrained: `forbid_commit_on_branch` and `self_protect` read
-a *live* signal (current branch / the Write target) and must be `agent` or `both`;
-a `run` block may only `block` at the `change` layer.
+Some primitives are constrained: `forbid_command`, `forbid_commit_on_branch`, and
+`self_protect` read a *live* signal (the command string / current branch / the Write
+target) and must be `agent` or `both`; a `run` check must live at the `change` layer
+(any agent placement is rejected, at any severity).
 
 ---
 
@@ -162,8 +163,10 @@ a `run` block may only `block` at the `change` layer.
 
 ### Command / live-signal (agent layer)
 
-#### `forbid_command`
-The agent's command string.
+#### `forbid_command`  *(agent / both)*
+The agent's command string. Live-signal (reads the command at the PreToolUse intercept), so —
+like `forbid_commit_on_branch` / `self_protect` — it is agent-layer-only; `validate` rejects a
+`change`-layer (or default) placement, which could never fire at the authoritative layer.
 - `pattern` (regex) — matched anywhere in the command (catches `--no-verify` in any position).
 - `deny` (list) — **normalized**-verb match: strips `sudo` / `VAR=val` / `cd d &&` / `git -C p` / `git -c k=v` wrappers, then matches a contiguous token run, so the gated verb can't be smuggled past prefix matching.
 
@@ -227,7 +230,7 @@ the check skips rather than false-fires.
 
 | primitive | kind | params | does |
 |---|---|---|---|
-| `run` | fact\* | `cmd` | shells out; the exit code is the fact. `block` only at the change layer |
+| `run` | fact\* | `cmd` | shells out; the exit code is the fact. Change layer only — any agent placement is rejected, at any severity |
 | `attest` | advisory | `box`, `class`, `prompt` | a class-gated Stop-hook checklist box; blocks turn-end until ticked (forcing function only) |
 | `judge` | advisory | `prompt` | emitted by `cogpin judge` for a CI `continue-on-error` LLM substance check |
 

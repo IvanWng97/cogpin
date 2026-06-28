@@ -6,6 +6,26 @@ primitive / CLI surface may still change between minors — pin the action to th
 or a commit SHA for reproducibility. The config `schema` version is separate and bumps only on a
 breaking config change.
 
+## [Unreleased]
+
+### Fixed
+- **`validate` now fails LOUD on config typos that used to silently disable a gate** — the
+  fail-open class a whole-codebase audit flagged. An uncompilable regex in any field
+  (`pattern` / `exempt` / `key` / `marker` / `when_marker` / `trigger` / `require` / `custom`),
+  an unknown `msg_scope` member, or an out-of-range `status` now raise `ConfigError` at parse
+  time instead of making the primitive return `None` (a vacuous PASS). Same discipline the
+  `direction` enum already had; the regex compile already existed in `draft-lint` and is now in
+  the authoritative `validate` path too.
+
+### Changed
+- **`forbid_command` is now agent-layer-only** (joins `forbid_commit_on_branch` / `self_protect`
+  as a live-signal primitive). It reads the live command string, so a `change`-layer placement —
+  including the default — could never fire at the authoritative layer; `validate` now rejects it.
+  Declare `layer = "agent"` (every shipped recipe already does). This is what `SCHEMA.md` already
+  documented.
+- **A `run` check at `layer = "agent"` is rejected at any severity** (was: only `block`). No
+  agent-layer runner dispatches a `run`, so an agent-layer `warn` run was a silent no-op.
+
 ## [0.1.0] — 2026-06-28
 
 The first public release: one stdlib-only engine that turns an AI coding agent's "done" into an
