@@ -1,8 +1,11 @@
 """Stdlib-only test suite for ratchet (no pytest dependency — `python3 -m unittest`)."""
 
 import contextlib
+import dataclasses
+import inspect
 import io
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -10,6 +13,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import ratchet as R  # noqa: E402
 from ratchet import (  # noqa: E402
     HOUSE_RULE_MAP,
     PREPUSH_BLOCK,
@@ -1234,14 +1238,9 @@ class TestGapsBinding(unittest.TestCase):
 class TestMoatPreservation(unittest.TestCase):
     """Pin the moat against future HOUSE_RULE_MAP edits."""
 
-    _FACT_PRIMS = {
-        "forbid_command", "forbid_commit_on_branch", "self_protect", "secret_scan",
-        "forbid_pattern", "forbid_removal", "forbid_delete", "scope_lock", "numeric_floor",
-        "change_budget", "file_must_contain", "max_added_file_bytes", "path_requires",
-        "cooccur", "marker_present", "forbid_in_message", "require_message_pattern",
-        "commit_footer", "protected_path", "require_approval_from", "pattern_requires_approval",
-        "approval_policy", "require_checks_green", "run",
-    }
+    # the blockable (fact) primitives = all minus the advisory-by-nature ones. DERIVED so it
+    # cannot drift from PRIMITIVES; the literal regression-pin lives in TestNoDrift.
+    _FACT_PRIMS = R.PRIMITIVES - R._ADVISORY_ONLY
 
     def test_suggest_introduces_no_nonfact_block(self):
         cfg = Config.parse(render_suggest_toml(_reposcan(
@@ -2064,3 +2063,87 @@ class TestBasePinning(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             # clean diff would be rc 0, but the trusted base is unfetched → refuse (rc 1)
             self.assertEqual(cmd_check(self.d, allow_run=False, default_branch_arg="ghost"), 1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase A — merge-blocking drift guards: make the primitive parallel-lists go CI-red
+# instead of silently shipping a fail-open gate. Test-layer introspection only
+# (inspect/re over the engine source); the engine itself stays pure.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestNoDrift(unittest.TestCase):
+    """WHY the `(?:c|check)` binder in the dead-field scan: pure primitives bind
+    `check.<field>` while the `_eval_diff` dispatch binds `c.<field>`. A future rename of
+    either binder weakens these regexes into a FALSE-NEGATIVE (fail-safe: it never produces
+    a false failure, only misses a dead field) — keep the convention or update the scan."""
+
+    _ENGINE_SRC = inspect.getsource(R)
+    _ROOT = os.path.dirname(_RATCHET)
+
+    def _doc(self, rel):
+        with open(os.path.join(self._ROOT, rel), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_every_primitive_is_routed(self):
+        # a name in PRIMITIVES with no dispatch arm silently returns None — a never-firing gate
+        routers = [R._eval_diff, R.run_command_gate, R.run_self_protect_gate,
+                   R.run_branch_gate, R.attestation_gaps, R.cmd_judge]
+        routed = "\n".join(inspect.getsource(fn) for fn in routers)
+        for p in R.PRIMITIVES:
+            self.assertIn(f'"{p}"', routed, f"primitive {p!r} is in PRIMITIVES but no evaluator routes it")
+
+    def test_no_dead_check_field(self):
+        # a Check field parsed/declared but read by no primitive (the `Check.where` exhibit)
+        core = {"id", "kind", "severity", "primitive", "layer"}
+        for f in dataclasses.fields(R.Check):
+            if f.name in core:
+                continue
+            self.assertRegex(self._ENGINE_SRC, rf"(?:c|check)\.{f.name}\b",
+                             f"Check.{f.name} is declared/parsed but read by no primitive (dead field)")
+
+    def test_known_keys_all_parsed(self):
+        fr = inspect.getsource(R.Config._from_raw)
+        for k in R._KNOWN_CHECK_KEYS:
+            self.assertIn(f'"{k}"', fr, f"known key {k!r} is allowlisted but never read in _from_raw")
+
+    def test_known_check_keys_derivation_is_stable(self):
+        # the derived allowlist must equal the Check fields (+ the two aliases) — pins the swap
+        aliases = {"approvers": "require_approval_from", "cls": "class"}
+        self.assertEqual(R._KNOWN_CHECK_KEYS,
+                         frozenset(aliases.get(f.name, f.name) for f in dataclasses.fields(R.Check)))
+
+    def test_every_primitive_is_documented(self):
+        readme, schema, cov = self._doc("README.md"), self._doc("SCHEMA.md"), self._doc("docs/coverage-map.md")
+        for p in R.PRIMITIVES:
+            self.assertIn(f"`{p}", readme, f"{p} missing from the README primitive table")
+            self.assertIn(f"`{p}", schema, f"{p} missing from SCHEMA.md")
+            self.assertIn(f"`{p}", cov, f"{p} missing from docs/coverage-map.md (provenance)")
+
+    def test_primitive_count_matches_readme(self):
+        counts = {int(m) for m in re.findall(r"(\d+) primitives", self._doc("README.md"))}
+        self.assertEqual(counts, {len(R.PRIMITIVES)},
+                         f"README 'N primitives' count drifted from {len(R.PRIMITIVES)}")
+
+    def test_fact_prims_is_complement_of_advisory(self):
+        # regression pin for the derived TestMoatPreservation._FACT_PRIMS
+        self.assertEqual(R.PRIMITIVES - R._ADVISORY_ONLY, {
+            "forbid_command", "forbid_commit_on_branch", "self_protect", "secret_scan",
+            "forbid_pattern", "forbid_removal", "forbid_delete", "scope_lock", "numeric_floor",
+            "change_budget", "file_must_contain", "max_added_file_bytes", "path_requires",
+            "cooccur", "marker_present", "forbid_in_message", "require_message_pattern",
+            "commit_footer", "protected_path", "require_approval_from", "pattern_requires_approval",
+            "approval_policy", "require_checks_green", "run"})
+
+    def test_advisory_primitive_cannot_be_declared_block(self):
+        # the moat trusts the kind LABEL; an advisory-by-nature primitive mislabelled `fact`
+        # would ship a `block` that silently never fires (not in the diff dispatch). Reject it.
+        for prim, extra in (("judge", 'prompt="p"'), ("attest", 'box="x"\nclass="always"')):
+            bad = ('schema=1\n[repo]\ndefault_branch="main"\n[[check]]\nid="x"\nkind="fact"\n'
+                   f'severity="block"\nprimitive="{prim}"\n{extra}\n')
+            with self.assertRaises(ConfigError):
+                Config.parse(bad)
+        # the same primitives are valid as advisory
+        ok = ('schema=1\n[repo]\ndefault_branch="main"\n[[check]]\nid="j"\nkind="advisory"\n'
+              'severity="warn"\nprimitive="judge"\nprompt="p"\n')
+        self.assertEqual(len(Config.parse(ok).checks), 1)
