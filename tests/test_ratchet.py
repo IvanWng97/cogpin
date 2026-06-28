@@ -4,6 +4,7 @@ import contextlib
 import dataclasses
 import inspect
 import io
+import json
 import os
 import re
 import subprocess
@@ -2415,3 +2416,182 @@ class TestProvenanceMoat(unittest.TestCase):
                         'trigger="BREAKING"\nrequire="CHANGELOG"')
         self.assertIsNone(cooccur(wrn, DiffFacts(pr_body="BREAKING", commit_msgs=["docs: CHANGELOG"])))
         self.assertIsNotNone(cooccur(wrn, DiffFacts(pr_body="BREAKING change only")))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #24 — [capability] is a DECLARED floor (policy), not enforcement: ratchet parses +
+# validates it and compiles it to the harness via `capability emit`; it never contains.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestCapability(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _cfg(self, cap_toml):
+        with open(os.path.join(self.d, "ratchet.toml"), "w", encoding="utf-8") as fh:
+            fh.write('schema=1\n[repo]\ndefault_branch="main"\n' + cap_toml)
+
+    def _settings(self):
+        return json.load(open(os.path.join(self.d, ".claude", "settings.json")))
+
+    def _settings_exists(self):
+        return os.path.exists(os.path.join(self.d, ".claude", "settings.json"))
+
+    def test_capability_parses_and_defaults_empty(self):
+        cfg = Config.parse('schema=1\n[repo]\ndefault_branch="main"\n[capability]\n'
+                           'no_network=true\ndeny_paths=["~/.ssh/**"]\ndeny_commands=["curl"]\n'
+                           'allow_commands=["git"]\nfs_confine=["."]\n')
+        self.assertTrue(cfg.capability.no_network)
+        self.assertEqual(cfg.capability.deny_paths, ["~/.ssh/**"])
+        self.assertEqual(cfg.capability.backend, "claude-code")
+        self.assertFalse(cfg.capability.is_empty())
+        self.assertTrue(Config.parse('schema=1\n[repo]\ndefault_branch="main"\n').capability.is_empty())
+
+    def test_capability_unknown_backend_rejected(self):
+        with self.assertRaises(ConfigError):
+            Config.parse('schema=1\n[repo]\ndefault_branch="main"\n[capability]\n'
+                         'no_network=true\nbackend="nonsense"\n')
+
+    def test_emit_pure_render(self):
+        cap = R.Capability(no_network=True, deny_paths=["**/.env"],
+                           deny_commands=["curl"], allow_commands=["git"], fs_confine=["."])
+        deny, allow, warns = R._emit_claude_code(cap)
+        for e in ("Read(**/.env)", "Edit(**/.env)", "Write(**/.env)", "Bash(curl:*)", "WebFetch"):
+            self.assertIn(e, deny)
+        self.assertIn("Bash(git:*)", allow)
+        self.assertTrue(any("no_network" in w for w in warns))
+        self.assertTrue(any("fs_confine" in w for w in warns))
+
+    def test_emit_writes_idempotent_and_nonclobbering(self):
+        os.makedirs(os.path.join(self.d, ".claude"))
+        with open(os.path.join(self.d, ".claude", "settings.json"), "w") as fh:
+            json.dump({"permissions": {"deny": ["Bash(sudo:*)"]}, "model": "opus"}, fh)
+        self._cfg('[capability]\ndeny_commands=["curl"]\n')
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(R.cmd_capability_emit(self.d), 0)
+        s = self._settings()
+        self.assertIn("Bash(sudo:*)", s["permissions"]["deny"])   # user entry preserved
+        self.assertIn("Bash(curl:*)", s["permissions"]["deny"])   # managed entry added
+        self.assertEqual(s["model"], "opus")                      # unrelated key preserved
+        first = open(os.path.join(self.d, ".claude", "settings.json")).read()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            R.cmd_capability_emit(self.d)
+        self.assertEqual(open(os.path.join(self.d, ".claude", "settings.json")).read(), first)  # idempotent
+
+    def test_emit_drops_stale_managed_entry(self):
+        self._cfg('[capability]\ndeny_commands=["curl","wget"]\n')
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            R.cmd_capability_emit(self.d)
+        self._cfg('[capability]\ndeny_commands=["curl"]\n')   # wget removed from the stanza
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            R.cmd_capability_emit(self.d)
+        deny = self._settings()["permissions"]["deny"]
+        self.assertIn("Bash(curl:*)", deny)
+        self.assertNotIn("Bash(wget:*)", deny)   # stale managed entry removed
+
+    def test_emit_empty_floor_is_noop(self):
+        self._cfg('')
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(R.cmd_capability_emit(self.d), 0)
+        self.assertFalse(self._settings_exists())
+
+    def test_emit_other_backend_documents_never_contains(self):
+        self._cfg('[capability]\nno_network=true\nbackend="docker"\n')
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(R.cmd_capability_emit(self.d), 0)
+        self.assertFalse(self._settings_exists())  # ratchet declares; it does not emit for docker
+
+    def test_emit_dry_run_writes_nothing(self):
+        self._cfg('[capability]\ndeny_commands=["curl"]\n')
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(R.cmd_capability_emit(self.d, dry_run=True), 0)
+        self.assertIn("Bash(curl:*)", out.getvalue())
+        self.assertFalse(self._settings_exists())
+
+    def test_emit_writes_allow_e2e(self):
+        # allow must actually PERSIST (the allow path is reconciled, not silently dropped)
+        self._cfg('[capability]\nallow_commands=["git"]\n')
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(R.cmd_capability_emit(self.d), 0)
+        self.assertIn("Bash(git:*)", self._settings()["permissions"]["allow"])
+
+    def test_emit_drops_stale_allow(self):
+        # symmetry with deny: a command removed from allow_commands is retracted from allow
+        self._cfg('[capability]\nallow_commands=["git","npm"]\n')
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            R.cmd_capability_emit(self.d)
+        self._cfg('[capability]\nallow_commands=["git"]\n')   # npm removed
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            R.cmd_capability_emit(self.d)
+        allow = self._settings()["permissions"]["allow"]
+        self.assertIn("Bash(git:*)", allow)
+        self.assertNotIn("Bash(npm:*)", allow)   # stale managed allow removed
+
+    def test_emit_full_empty_retracts(self):
+        # emptying the WHOLE stanza retracts every managed entry, not just one dropped key
+        os.makedirs(os.path.join(self.d, ".claude"))
+        with open(os.path.join(self.d, ".claude", "settings.json"), "w") as fh:
+            json.dump({"permissions": {"deny": ["Bash(sudo:*)"]}, "model": "opus"}, fh)
+        self._cfg('[capability]\nno_network=true\ndeny_commands=["curl"]\nallow_commands=["git"]\n')
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            R.cmd_capability_emit(self.d)
+        self._cfg('')   # stanza removed entirely
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(R.cmd_capability_emit(self.d), 0)
+        s = self._settings()
+        self.assertEqual(s["model"], "opus")                       # unrelated key preserved
+        self.assertEqual(s["permissions"]["deny"], ["Bash(sudo:*)"])  # user entry preserved
+        self.assertNotIn("allow", s["permissions"])                # emptied managed key deleted
+        for managed in ("Bash(curl:*)", "WebFetch", "Bash(git:*)"):
+            self.assertNotIn(managed, s["permissions"].get("deny", []))
+            self.assertNotIn(managed, s["permissions"].get("allow", []))
+
+    def test_emit_full_empty_deletes_permissions_when_only_managed(self):
+        # if ratchet's entries were the ONLY thing in permissions, retraction drops the whole key
+        self._cfg('[capability]\ndeny_commands=["curl"]\n')
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            R.cmd_capability_emit(self.d)
+        self._cfg('')
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            R.cmd_capability_emit(self.d)
+        self.assertNotIn("permissions", self._settings())   # no vestigial empty container
+
+    def test_emit_refuses_garbled_settings(self):
+        # a present-but-unreadable settings.json must NOT be clobbered (fail closed → exit 1)
+        os.makedirs(os.path.join(self.d, ".claude"))
+        path = os.path.join(self.d, ".claude", "settings.json")
+        with open(path, "w") as fh:
+            fh.write("{ not valid json")
+        self._cfg('[capability]\ndeny_commands=["curl"]\n')
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(R.cmd_capability_emit(self.d), 1)
+        self.assertEqual(open(path).read(), "{ not valid json")   # left untouched
+
+    def test_emit_refuses_non_object_settings(self):
+        # valid JSON but a non-object (array) is also unusable → refuse, don't overwrite
+        os.makedirs(os.path.join(self.d, ".claude"))
+        path = os.path.join(self.d, ".claude", "settings.json")
+        with open(path, "w") as fh:
+            fh.write('["a list, not an object"]')
+        self._cfg('[capability]\ndeny_commands=["curl"]\n')
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(R.cmd_capability_emit(self.d), 1)
+        self.assertEqual(open(path).read(), '["a list, not an object"]')
+
+    def test_emit_guards_non_list_permission_values(self):
+        # a deny that's a bare string must not be shattered into characters when reconciling
+        os.makedirs(os.path.join(self.d, ".claude"))
+        with open(os.path.join(self.d, ".claude", "settings.json"), "w") as fh:
+            json.dump({"permissions": {"deny": "Bash(sudo:*)"}}, fh)   # string, not list
+        self._cfg('[capability]\ndeny_commands=["curl"]\n')
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(R.cmd_capability_emit(self.d), 0)
+        deny = self._settings()["permissions"]["deny"]
+        self.assertEqual(deny, ["Bash(curl:*)"])         # clean managed list, no char-shatter
+        self.assertNotIn("B", deny)
