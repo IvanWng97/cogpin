@@ -169,13 +169,18 @@ exclude_author = true
 exclude_bot = true
 min_approvals = 1
 
-# Don't accept a red (or still-pending) tree. Every required status check must have
-# concluded `success`.
+# Don't accept a red (or still-pending) tree. `need` NAMES the checks that must conclude
+# `success` — the fail-closed form: a named check that never reported counts as MISSING and
+# blocks. A *bare* list (no `need`) bare-iterates whatever the PR API returns, so an empty or
+# shrunken set (a removed/renamed check, a checks-fetch hiccup) would pass VACUOUSLY. Use the
+# rendered names from `gh pr checks` (a matrix job carries its suffix, e.g. `test (20.x)`), and
+# omit cogpin's own job so a same-workflow run can't self-block.
 [[check]]
 id = "checks-green"
 kind = "fact"
 severity = "block"
 primitive = "require_checks_green"
+need = ["lint", "test"]
 
 # THE teeth: the change layer runs the real lint + test suite from the base-pinned
 # policy. Pin configs (`--config`, isolated) so a head-side edit can't defang them.

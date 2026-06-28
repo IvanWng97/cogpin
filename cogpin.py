@@ -1710,7 +1710,9 @@ def _load_reviews(path: str) -> list[dict] | None:
 def _load_checks(path: str) -> list[dict] | None:
     """Normalize a `gh pr checks --json name,state` (or hand-rolled) array into
     `[{name, conclusion}]`. `conclusion` falls back to `state`/`status` (gh emits
-    SUCCESS/FAILURE/PENDING under `state`). None on a missing/garbled file (→ skip)."""
+    SUCCESS/FAILURE/PENDING under `state`). Returns None on a missing/garbled file — a
+    REQUESTED-but-unparseable `--checks-file` makes callers FAIL CLOSED (exit 2); a genuinely
+    absent path is the caller's `checks=None` skip (no PR context)."""
     raw = _read_json(path)
     if not isinstance(raw, list):
         return None
@@ -2669,11 +2671,15 @@ def cmd_check(
     facts.head_sha = head_sha or (_git(cwd, ["rev-parse", head]) or "").strip() or None
     facts.pr_author = pr_author
     if checks_file and os.path.exists(checks_file):
-        # Requested AND present: a garbled/unreadable file FAILS CLOSED (→ [], so a
-        # `need`-scoped require_checks_green blocks `missing`) rather than silently skipping
-        # a check we were told to enforce. A genuinely ABSENT path leaves checks=None →
-        # skip (no PR context) — the documented degrade, never a false-block.
-        facts.checks = _load_checks(checks_file) or []
+        # Requested AND present but UNPARSEABLE → FAIL CLOSED (exit 2), mirroring cmd_fixture.
+        # `or []` here was the M3 fail-open: a corrupt file → None → [] passes a BARE
+        # require_checks_green vacuously (an empty set bare-iterates to nothing). A genuinely
+        # ABSENT path still leaves checks=None → skip (no PR context) — the documented degrade.
+        facts.checks = _load_checks(checks_file)
+        if facts.checks is None:
+            print(f"cogpin: cannot parse --checks-file (expected a JSON array): {checks_file}",
+                  file=sys.stderr)
+            return 2
     if any(c.primitive == "max_added_file_bytes" for c in cfg.checks):
         _populate_file_sizes(cwd, base or "HEAD~1", head, facts)
     findings = run_change(cfg, facts, allow_run=allow_run)
@@ -2986,12 +2992,28 @@ def _config_advisories(cfg: Config) -> list[str]:
     blocked PR."""
     out = []
     for c in cfg.checks:
-        if c.primitive == "require_checks_green" and not c.need and not c.ignore:
-            out.append(
-                f"`{c.id}` (require_checks_green) sets neither `need` nor `ignore`: run inside "
-                "the workflow it gates, cogpin's own still-pending check self-blocks. Set "
-                '`ignore = ["<cogpin job name>"]`, or `need` only the other checks.'
+        if c.primitive != "require_checks_green":
+            continue
+        if not c.need:
+            # No allowlist (bare OR ignore-only) → it bare-iterates whatever checks the PR API
+            # returns, so an EMPTY set (a removed/renamed check, an `ignore` covering them all, a
+            # checks-fetch hiccup) passes vacuously. Only `need` names a check that MUST be
+            # present-and-green, failing closed on a missing one. ONE coherent note per check:
+            # `need` is the fix; `ignore` alone patches only the self-block and LEAVES this vacuum
+            # (so we don't offer it as a clean remedy — that would loop the user back to this note).
+            msg = (
+                f"`{c.id}` (require_checks_green) has no `need`: an empty/shrunken check set "
+                "passes vacuously (it can't detect a REMOVED or unreported required check). Name "
+                'what must be green — `need = ["<job>"]` (the only fail-closed form) — or rely on '
+                "branch-protection required contexts for removal-detection."
             )
+            if not c.ignore:
+                msg += (
+                    " Bare additionally self-blocks if cogpin runs in the workflow it gates: "
+                    "`need` the OTHER checks clears both that and the vacuum above; `ignore`-ing "
+                    "the cogpin job alone fixes only the self-block (this note stays)."
+                )
+            out.append(msg)
     return out
 
 

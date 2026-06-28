@@ -212,7 +212,7 @@ like `forbid_commit_on_branch` / `self_protect` — it is agent-layer-only; `val
 | `require_approval_from` | `paths`, `require_approval_from` (logins), `exclude_author`, `exclude_bot` | a change under `paths` has no APPROVED review from a listed owner |
 | `pattern_requires_approval` | `pattern`, `scope`, `exclude_author`, `exclude_bot` | an added line in scope matches `pattern` but has no independent approval |
 | `approval_policy` | `require_fresh`, `no_changes_requested`, `exclude_author`, `exclude_bot`, `min_approvals` | the count of **distinct** qualifying approvers is below `min_approvals`, or an outstanding `CHANGES_REQUESTED` remains |
-| `require_checks_green` | `need` (allowlist of check names; empty = all), `ignore` (denylist) | a required status check did not conclude `success` — a `need`-listed check that never reported counts as **missing** and blocks (no vacuous pass) |
+| `require_checks_green` | `need` (allowlist of check names; empty = bare-iterate all reported), `ignore` (denylist) | a required status check did not conclude `success`. A `need`-listed check that never reported counts as **missing** and blocks — the **only** fail-closed form. Bare (or `ignore`-only) bare-iterates whatever the PR API returns, so an **empty/shrunken** set (a removed-or-renamed check, an `ignore` covering them all, a checks-fetch hiccup) passes **vacuously**; `validate` prints a `note:` for those shapes and the GitHub Action fails closed on a genuine fetch error |
 
 > **Same-workflow race:** when cogpin runs as a job in the *same* workflow it gates, its
 > own check is still pending at query time and a bare `require_checks_green` (no `need`/`ignore`)
@@ -220,6 +220,11 @@ like `forbid_commit_on_branch` / `self_protect` — it is agent-layer-only; `val
 > checks. `cogpin validate` prints a `note:` when neither is set. Both lists match the **rendered**
 > check name exactly — a matrix job carries its suffix (e.g. `cogpin (ubuntu-latest)`), so use the
 > name as it appears in `gh pr checks`.
+>
+> **Removal-detection:** only `need` blocks when a required check is *absent* — a bare or
+> `ignore`-only list can't tell "all green" from "none reported" (an empty set iterates to a
+> vacuous pass). Name the must-be-green checks in `need`, or lean on branch-protection required
+> contexts for that axis.
 
 These read CI-supplied facts via `cogpin check` flags: `--pr-body-file`,
 `--approvals`, `--reviews-file` (a `gh pr view --json reviews` dump), `--head-sha`,

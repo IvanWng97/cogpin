@@ -110,12 +110,18 @@ runs:
                   login: .author.login, state: .state, commit_id: .commit.oid,
                   is_bot: (.author.__typename=="Bot"), author_association: .authorAssociation }]' \
           > "$reviews" || echo '[]' > "$reviews"
-        # Fail CLOSED: `gh pr checks` exits non-zero when checks are failing/pending but still
-        # writes the JSON — keep it; fall back to [] only when the output is genuinely empty
-        # (no checks configured), never conflating "red/pending" with "none" (that would let
-        # require_checks_green pass vacuously).
+        # `gh pr checks --json` writes the JSON array even when checks are red/pending (it just
+        # exits non-zero), AND `[]` when the PR has no checks — so a VALID ARRAY is authoritative
+        # regardless of exit code (that already covers the genuinely-no-checks case). ANY non-array
+        # outcome (empty/garbled stdout) means gh itself failed to report (auth, rate-limit,
+        # network): FAIL CLOSED with a sentinel pending check so require_checks_green blocks rather
+        # than passing vacuously on a fetch we never got. We never string-match the error text — a
+        # heuristic that wrote `[]` on a guessed "no checks" message would be a fail-OPEN misfire.
         gh pr checks "$PR" --json name,state > "$checks" 2>/dev/null || true
-        [ -s "$checks" ] || echo '[]' > "$checks"
+        if ! { [ -s "$checks" ] && jq -e 'type=="array"' "$checks" >/dev/null 2>&1; }; then
+          echo "::error::cogpin: 'gh pr checks' returned no usable data; failing closed (checks unavailable)"
+          printf '[{"name":"cogpin: checks unavailable","state":"PENDING"}]\n' > "$checks"
+        fi
         # The flat approvals list must already be FRESH (on head), human, and non-author so a
         # stale or bot approval can't satisfy protected_path. The engine re-verifies via reviews.
         approvals="$(jq -r --arg head "$HEAD_SHA" --arg author "$PR_AUTHOR" \
