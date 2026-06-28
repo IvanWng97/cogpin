@@ -24,7 +24,7 @@ jobs:
         run: mypy cogpin.py
 
   actions:
-    name: actionlint + zizmor
+    name: actionlint  # NOTE: branch protection requires this exact check name; also runs zizmor
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
