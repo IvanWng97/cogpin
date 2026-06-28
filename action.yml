@@ -19,7 +19,9 @@ inputs:
     description: Directory holding ratchet.toml (and, for engine=vendored, .ratchet/).
     default: "."
   default-branch:
-    description: Base branch to diff against / base-pin from.
+    description: >-
+      Trusted base branch — fetched for the diff AND passed to the engine as the base-pin
+      name, so the base can't be redirected by the PR-head config (`--default-branch`).
     default: ${{ github.event.repository.default_branch }}
   python-version:
     description: Python for the engine (needs >= 3.11 for tomllib).
@@ -73,6 +75,7 @@ runs:
         PR: ${{ github.event.pull_request.number }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        DEFAULT_BRANCH: ${{ inputs.default-branch }}
       run: |
         set -euo pipefail
         body="$CONFIG_DIR/.ratchet-pr-body.txt"
@@ -81,7 +84,7 @@ runs:
         gh pr view "$PR" --json body -q .body > "$body" || true
         # Reviews via GraphQL → the flat {login,state,commit_id,is_bot,author_association}
         # shape the engine consumes (REST/`gh pr view` can't surface is_bot / the review's commit oid).
-        gh api graphql -F owner="$OWNER" -F repo="$REPO" -F pr="$PR" -f query='
+        gh api graphql -f owner="$OWNER" -f repo="$REPO" -F pr="$PR" -f query='
           query($owner:String!,$repo:String!,$pr:Int!){
             repository(owner:$owner,name:$repo){
               pullRequest(number:$pr){
@@ -108,7 +111,8 @@ runs:
           --checks-file "$checks" \
           --approvals "$approvals" \
           --head-sha "$HEAD_SHA" \
-          --pr-author "$PR_AUTHOR"
+          --pr-author "$PR_AUTHOR" \
+          --default-branch "$DEFAULT_BRANCH"
 
     - name: ratchet check (push)
       if: github.event_name != 'pull_request'
@@ -116,4 +120,5 @@ runs:
       env:
         ENGINE: ${{ steps.prep.outputs.engine }}
         CONFIG_DIR: ${{ inputs.config-dir }}
-      run: python3 "$ENGINE" check --cwd "$CONFIG_DIR"
+        DEFAULT_BRANCH: ${{ inputs.default-branch }}
+      run: python3 "$ENGINE" check --cwd "$CONFIG_DIR" --default-branch "$DEFAULT_BRANCH"

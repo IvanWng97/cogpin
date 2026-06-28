@@ -1,6 +1,6 @@
 {
   "name": "ratchet",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Ungameable Definition-of-Done gate for AI coding agents. Denies --no-verify / secret-leaks in real time (PreToolUse), enforces the full closing-discipline as base-pinned diff facts at pre-push/CI.",
   "author": { "name": "Ivan Wng", "url": "https://github.com/IvanWng97" },
   "homepage": "https://github.com/IvanWng97/ratchet",

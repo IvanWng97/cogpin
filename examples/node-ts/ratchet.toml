@@ -165,8 +165,8 @@ severity = "block"
 primitive = "approval_policy"
 require_fresh = true
 no_changes_requested = true
-disallow_author = true
-disallow_bot = true
+exclude_author = true
+exclude_bot = true
 min_approvals = 1
 
 # Don't accept a red (or still-pending) tree. Every required status check must have

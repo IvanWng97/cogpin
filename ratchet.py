@@ -77,6 +77,18 @@ def _path_or_base_matches(path: str, patterns: list[str]) -> bool:
     return _path_matches(path, patterns) or _path_matches(base, patterns)
 
 
+def _path_tail_matches(path: str, patterns: list[str]) -> bool:
+    """Match a glob against the path OR any of its trailing segment-runs, so an ABSOLUTE
+    tool path (`/abs/repo/.github/workflows/x.yml`) still matches a repo-relative
+    multi-segment glob (`.github/workflows/**`) — `_path_or_base_matches` only tries the
+    full string + basename, which silently misses such globs for the live Write/Edit gate.
+    Backslashes normalize to `/` so a Windows tool path is covered too."""
+    norm = path.replace("\\", "/")
+    segs = norm.split("/")
+    cands = [norm] + ["/".join(segs[i:]) for i in range(1, len(segs))]
+    return any(_path_matches(c, patterns) for c in cands)
+
+
 def _rx(pat: str | None) -> re.Pattern[str] | None:
     if not pat:
         return None
@@ -172,7 +184,6 @@ class Check:
     ignore: list[str] = field(default_factory=list)
     when_marker: str | None = None      # path_requires: a PR-body marker as the `when` trigger
     marker: str | None = None           # marker_present: the block that must appear in the PR body
-    where: str | None = None            # (reserved — currently unused)
     cmd: str | None = None              # run: the shell command (its exit code is the fact)
     # cooccur: if `trigger` appears (diff/PR/commit), `require` must appear too
     trigger: str | None = None
@@ -207,14 +218,14 @@ class Check:
     # max_added_file_bytes: a per-file byte ceiling (KB) + whether binary blobs are allowed
     maxkb: int | None = None
     allow_binary: bool = False
-    # require_approval_from / *_approval: reviewer-identity facts from the PR API
+    # require_approval_from / pattern_requires_approval / approval_policy: reviewer-identity
+    # facts from the PR API. exclude_author/exclude_bot are the single vocabulary all three share.
     approvers: list[str] = field(default_factory=list)
     exclude_author: bool = False
+    exclude_bot: bool = False
     # approval_policy: deeper approval-state requirements
     require_fresh: bool = False
     no_changes_requested: bool = False
-    disallow_bot: bool = False
-    disallow_author: bool = False
     min_approvals: int | None = None
     cls: str | None = None  # attestation class: always | feature | public_surface | claude_md
     box: str | None = None  # the attestation checkbox label to look for (defaults to id)
@@ -296,7 +307,6 @@ class Config:
                         ignore=_as_list(c.get("ignore")),
                         when_marker=c.get("when_marker"),
                         marker=c.get("marker"),
-                        where=c.get("where"),
                         cmd=c.get("cmd"),
                         trigger=c.get("trigger"),
                         require=c.get("require"),
@@ -323,10 +333,9 @@ class Config:
                         allow_binary=bool(c.get("allow_binary", False)),
                         approvers=_as_list(c.get("require_approval_from")),
                         exclude_author=bool(c.get("exclude_author", False)),
+                        exclude_bot=bool(c.get("exclude_bot", False)),
                         require_fresh=bool(c.get("require_fresh", False)),
                         no_changes_requested=bool(c.get("no_changes_requested", False)),
-                        disallow_bot=bool(c.get("disallow_bot", False)),
-                        disallow_author=bool(c.get("disallow_author", False)),
                         min_approvals=_as_int(c.get("min_approvals")),
                         cls=c.get("class"),
                         box=c.get("box"),
@@ -383,6 +392,14 @@ class Config:
                     f"declare layer=\"agent\" (or \"both\"); the change-layer twin is "
                     f"protected_path"
                 )
+            # numeric_floor's `direction` selects both the floor/ceiling branch and the
+            # pairing arm; a typo'd value would silently disable the floor and invert the
+            # pairing — a fail-OPEN gate. Constrain it like the other enums.
+            if c.primitive == "numeric_floor" and c.direction not in (None, "no_decrease", "no_increase"):
+                raise ConfigError(
+                    f"check `{c.id}`: numeric_floor direction must be 'no_decrease' or "
+                    f"'no_increase', got `{c.direction}`"
+                )
 
     @property
     def footer_regex(self) -> str | None:
@@ -433,21 +450,26 @@ class DiffFacts:
                 f.changed.append((status, parts[-1]))
         diff = _git(cwd, ["diff", "--unified=0", rng])
         if diff:
-            # new = +++ b/<path> for added/modified; old = --- a/<path> for the removed
-            # side (the old path also covers whole-file deletes, where +++ is /dev/null).
+            # +++ b/<path> / --- a/<path> are FILE HEADERS, but a removed/added CONTENT line
+            # can itself start with `--- `/`+++ ` (an SQL/Lua `-- ` comment renders as
+            # `--- …` under a single `-` marker). Disambiguate by hunk state: headers sit in
+            # the per-file preamble (before the first `@@`); attribute +/- to a path only
+            # inside a hunk body. Else one such line poisons path attribution for the whole
+            # file — a scoped forbid_removal/secret_scan false-negative.
             new_path = old_path = ""
+            in_hunk = False
             for line in diff.splitlines():
-                if line.startswith("--- a/"):
-                    old_path = line[6:]
-                elif line.startswith("--- "):
-                    old_path = ""  # /dev/null (added file) → no removed-side path
-                elif line.startswith("+++ b/"):
-                    new_path = line[6:]
-                elif line.startswith("+++ "):
-                    new_path = ""
-                elif line.startswith("+") and not line.startswith("+++") and new_path:
+                if line.startswith("diff --git "):
+                    in_hunk = False  # next file's preamble begins
+                elif line.startswith("@@"):
+                    in_hunk = True
+                elif not in_hunk and line.startswith("--- "):
+                    old_path = line[6:] if line.startswith("--- a/") else ""
+                elif not in_hunk and line.startswith("+++ "):
+                    new_path = line[6:] if line.startswith("+++ b/") else ""
+                elif in_hunk and line.startswith("+") and new_path:
                     f.added.append((new_path, line[1:]))
-                elif line.startswith("-") and not line.startswith("---") and old_path:
+                elif in_hunk and line.startswith("-") and old_path:
                     f.removed.append((old_path, line[1:]))
         log = _git(cwd, ["log", "--format=%B%x1e", rng])
         if log:
@@ -544,13 +566,13 @@ def forbid_command(check: Check, facts: CommandFacts) -> str | None:
     # legacy `pattern`: a raw regex matched anywhere (catches --no-verify in any position)
     pat = _rx(check.pattern)
     if pat and pat.search(facts.command):
-        return f"command matches forbidden pattern for `{check.id}`"
+        return "command matches the forbidden pattern"
     # `deny`: a NORMALIZED verb match — strips `git -C`/`-c k=v`, `cd d &&`, `env X=Y`,
     # `sudo` wrappers so the gated verb can't be smuggled past prefix matching (#66176).
     if check.deny:
         hit = _deny_hit(facts.command, check.deny)
         if hit:
-            return f"`{check.id}`: forbidden command `{hit}`"
+            return f"forbidden command `{hit}`"
     return None
 
 
@@ -641,7 +663,7 @@ def scope_lock(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
     allow = _resolve(check.allow, repo)
     for _st, path in facts.changed:
         if not _path_matches(path, allow):
-            return f"`{check.id}`: {path} is outside the declared scope {check.allow}"
+            return f"{path} is outside the declared scope {check.allow}"
     return None
 
 
@@ -657,9 +679,9 @@ def self_protect(check: Check, tool_name: str, file_path: str) -> str | None:
     approval); this is the live forcing function. Non-write tools pass through."""
     if tool_name not in WRITE_TOOLS or not file_path:
         return None
-    if _path_or_base_matches(file_path, check.paths):
+    if _path_tail_matches(file_path, check.paths):
         return (
-            f"`{check.id}`: {file_path} is a protected gate-defining file — change it "
+            f"{file_path} is a protected gate-defining file — change it "
             f"in a reviewed PR, not in-session"
         )
     return None
@@ -691,7 +713,7 @@ def forbid_in_message(check: Check, facts: DiffFacts) -> str | None:
     blob = "\n".join(_msg_targets(facts, set(check.msg_scope) or set(_MSG_SCOPES))).lower()
     for t in check.tokens:
         if t.lower() in blob:
-            return f"`{check.id}`: forbidden token `{t}` in the commit/PR message"
+            return f"forbidden token `{t}` in the commit/PR message"
     return None
 
 
@@ -705,7 +727,7 @@ def require_message_pattern(check: Check, facts: DiffFacts) -> str | None:
         return None
     for t in _msg_targets(facts, set(check.msg_scope) or {"commit_subject"}):
         if not pat.search(t):
-            return f"`{check.id}`: message `{t[:50]}` does not match required `{check.pattern}`"
+            return f"message `{t[:50]}` does not match required `{check.pattern}`"
     return None
 
 
@@ -743,14 +765,14 @@ def numeric_floor(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
             # `floor` doubles as a CEILING under direction="no_increase" (block when the value
             # rises past it) — one field, two meanings selected by `direction`.
             if direction == "no_decrease" and new_val < check.floor:
-                return f"`{check.id}`: {prefix} {new_val:g} is below the floor {check.floor:g}"
+                return f"{prefix} {new_val:g} is below the floor {check.floor:g}"
             if direction == "no_increase" and new_val > check.floor:
-                return f"`{check.id}`: {prefix} {new_val:g} is above the ceiling {check.floor:g}"
+                return f"{prefix} {new_val:g} is above the ceiling {check.floor:g}"
         if prefix in olds:
             old_val = olds[prefix]
             weaker = new_val < old_val if direction == "no_decrease" else new_val > old_val
             if weaker:
-                return f"`{check.id}`: {prefix} weakened {old_val:g} → {new_val:g}"
+                return f"{prefix} weakened {old_val:g} → {new_val:g}"
     return None
 
 
@@ -768,18 +790,18 @@ def change_budget(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
     removed = [(p, l) for p, l in facts.removed if keep(p)]
     files = [p for _st, p in facts.changed if keep(p)]
     if check.max_added is not None and len(added) > check.max_added:
-        return f"`{check.id}`: {len(added)} added lines exceed the budget {check.max_added}"
+        return f"{len(added)} added lines exceed the budget {check.max_added}"
     if check.max_removed is not None and len(removed) > check.max_removed:
-        return f"`{check.id}`: {len(removed)} removed lines exceed the budget {check.max_removed}"
+        return f"{len(removed)} removed lines exceed the budget {check.max_removed}"
     if check.max_files is not None and len(files) > check.max_files:
-        return f"`{check.id}`: {len(files)} changed files exceed the budget {check.max_files}"
+        return f"{len(files)} changed files exceed the budget {check.max_files}"
     if check.max_file_added is not None:
         per: dict[str, int] = {}
         for p, _l in added:
             per[p] = per.get(p, 0) + 1
         worst = max(per.items(), key=lambda kv: kv[1], default=None)
         if worst and worst[1] > check.max_file_added:
-            return f"`{check.id}`: {worst[0]} adds {worst[1]} lines, over the per-file budget {check.max_file_added}"
+            return f"{worst[0]} adds {worst[1]} lines, over the per-file budget {check.max_file_added}"
     return None
 
 
@@ -801,7 +823,7 @@ def file_must_contain(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | No
         by_path.setdefault(p, []).append(l)
     for p in targets:
         if not any(pat.search(l) for l in by_path.get(p, [])):
-            return f"`{check.id}`: {p} must add a line matching `{check.pattern}`"
+            return f"{p} must add a line matching `{check.pattern}`"
     return None
 
 
@@ -819,10 +841,10 @@ def max_added_file_bytes(check: Check, facts: DiffFacts, repo: RepoCfg) -> str |
             continue
         if size < 0:
             if not check.allow_binary:
-                return f"`{check.id}`: {path} is a binary blob (keep it out of the diff or set allow_binary)"
+                return f"{path} is a binary blob (keep it out of the diff or set allow_binary)"
             continue
         if cap and size > cap:
-            return f"`{check.id}`: {path} is {size} bytes, over the {check.maxkb}KB cap"
+            return f"{path} is {size} bytes, over the {check.maxkb}KB cap"
     return None
 
 
@@ -840,7 +862,7 @@ def path_requires(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
         return None
     if any(_path_matches(p, need) for p in facts.changed_paths()):
         return None
-    return f"`{check.id}`: a triggering change requires touching {check.need}"
+    return f"a triggering change requires touching {check.need}"
 
 
 def cooccur(check: Check, facts: DiffFacts) -> str | None:
@@ -858,7 +880,7 @@ def cooccur(check: Check, facts: DiffFacts) -> str | None:
     )
     if satisfied:
         return None
-    return f"`{check.id}`: trigger present but required co-occurrence missing"
+    return "trigger present but required co-occurrence missing"
 
 
 def marker_present(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
@@ -876,18 +898,19 @@ def marker_present(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
         return None
     if m.search(facts.pr_body):
         return None
-    return f"`{check.id}`: required marker `{check.marker}` absent from PR body"
+    return f"required marker `{check.marker}` absent from PR body"
 
 
 def commit_footer(check: Check, footer_rx: str | None, facts: DiffFacts) -> str | None:
     # meta-driven: the footer regex is [meta].commit_footer, not a per-check field — hence the
-    # extra arg vs the rest of the family. `check` is here only for the id-prefixed reason.
+    # extra arg vs the rest of the family. `check` is kept for call-signature parity with the
+    # dispatch (the renderer now owns the id, so the reason itself no longer reads it).
     rx = _rx(footer_rx)
     if not rx:
         return None
     for msg in facts.commit_msgs:
         if not rx.search(msg):
-            return f"`{check.id}`: a commit is missing the required footer"
+            return "a commit is missing the required footer"
     return None
 
 
@@ -923,8 +946,8 @@ def _qualifying_approvers(facts: DiffFacts) -> set[str]:
     """APPROVED reviewers that may satisfy gate-file protection: non-author, non-bot, and
     fresh on the current head. A stale / bot / self approval does NOT qualify — that is what
     stops the 'approve-benign-then-push-malicious' bypass."""
-    return {(rv.get("login") or "")
-            for rv in _approved_reviews(facts, exclude_author=True, exclude_bot=True, fresh_only=True)}
+    return {lg for rv in _approved_reviews(facts, exclude_author=True, exclude_bot=True, fresh_only=True)
+            if (lg := rv.get("login"))}
 
 
 def protected_path(check: Check, facts: DiffFacts) -> str | None:
@@ -941,22 +964,23 @@ def protected_path(check: Check, facts: DiffFacts) -> str | None:
         if _qualifying_approvers(facts):
             return None
         return (
-            f"`{check.id}`: gate-defining file(s) changed ({touched[0]}…) without a "
+            f"gate-defining file(s) changed ({touched[0]}…) without a "
             f"fresh independent approval (non-author, non-bot, on the current head)"
         )
     if facts.approvals:  # degraded: a flat approvals list with no metadata to verify freshness
         return None
     return (
-        f"`{check.id}`: gate-defining file(s) changed ({touched[0]}…) "
+        f"gate-defining file(s) changed ({touched[0]}…) "
         f"without an independent approval"
     )
 
 
-def _approver_logins(facts: DiffFacts, exclude_author: bool) -> set[str]:
-    """The set of logins with a current APPROVED review (the PR author optionally
-    excluded, so a self-approval never satisfies a reviewer-identity gate)."""
-    return {(rv.get("login") or "")
-            for rv in _approved_reviews(facts, exclude_author=exclude_author)}
+def _approver_logins(facts: DiffFacts, exclude_author: bool, exclude_bot: bool = False) -> set[str]:
+    """The set of logins with a current APPROVED review (the PR author optionally excluded,
+    so a self-approval never satisfies a reviewer-identity gate; bots optionally excluded
+    too). An empty login (a deleted/ghost account → null) never qualifies."""
+    return {lg for rv in _approved_reviews(facts, exclude_author=exclude_author, exclude_bot=exclude_bot)
+            if (lg := rv.get("login"))}
 
 
 def require_approval_from(check: Check, facts: DiffFacts) -> str | None:
@@ -968,12 +992,12 @@ def require_approval_from(check: Check, facts: DiffFacts) -> str | None:
     touched = [p for p in facts.changed_paths() if _path_matches(p, check.paths)]
     if not touched:
         return None
-    approvers = _approver_logins(facts, check.exclude_author)
+    approvers = _approver_logins(facts, check.exclude_author, check.exclude_bot)
     allowed = set(check.approvers)
     if approvers & allowed:
         return None
     return (
-        f"`{check.id}`: {touched[0]} requires an approval from {sorted(allowed)} "
+        f"{touched[0]} requires an approval from {sorted(allowed)} "
         f"(have: {sorted(approvers) or 'none'})"
     )
 
@@ -995,33 +1019,36 @@ def pattern_requires_approval(check: Check, facts: DiffFacts, repo: RepoCfg) -> 
     )
     if not hit:
         return None
-    if _approver_logins(facts, check.exclude_author):
+    if _approver_logins(facts, check.exclude_author, check.exclude_bot):
         return None
-    return f"`{check.id}`: `{hit[1].strip()}` in {hit[0]} requires an independent approval"
+    return f"`{hit[1].strip()}` in {hit[0]} requires an independent approval"
 
 
 def approval_policy(check: Check, facts: DiffFacts) -> str | None:
     """Deeper approval-state requirements the bare 'approved' badge can't express:
     `require_fresh` (the approval is on the current head_sha, not a stale earlier commit),
-    `disallow_author` / `disallow_bot`, `no_changes_requested` (no outstanding
+    `exclude_author` / `exclude_bot`, `no_changes_requested` (no outstanding
     CHANGES_REQUESTED), and a `min_approvals` floor. reviews=None → skip.
     (Renamed from `approval_state_depth` in 0.x — the old name described nothing.)"""
     if facts.reviews is None:
         return None
     if check.no_changes_requested and any(
             (rv.get("state") or "").upper() == "CHANGES_REQUESTED" for rv in facts.reviews):
-        return f"`{check.id}`: an outstanding CHANGES_REQUESTED review must be resolved"
+        return "an outstanding CHANGES_REQUESTED review must be resolved"
     valid = _approved_reviews(
         facts,
-        exclude_author=check.disallow_author,
-        exclude_bot=check.disallow_bot,
+        exclude_author=check.exclude_author,
+        exclude_bot=check.exclude_bot,
         fresh_only=check.require_fresh,
     )
+    # Count DISTINCT non-empty logins, not raw review submissions — GitHub returns one node
+    # per submission, so one reviewer re-approving must not satisfy a min_approvals=2 floor.
+    approvers = {lg for rv in valid if (lg := rv.get("login"))}
     need = check.min_approvals if check.min_approvals is not None else 1
-    if len(valid) < need:
+    if len(approvers) < need:
         return (
-            f"`{check.id}`: {len(valid)} qualifying approval(s), need {need} "
-            f"(fresh/human/non-author)"
+            f"{len(approvers)} qualifying approval(s), need {need} "
+            f"(distinct, fresh/human/non-author)"
         )
     return None
 
@@ -1039,15 +1066,20 @@ def require_checks_green(check: Check, facts: DiffFacts) -> str | None:
         return None
     want = set(check.need)
     skip = set(check.ignore)
-    for ck in facts.checks:
-        name = ck.get("name") or ""
-        if want and name not in want:
-            continue
-        if name in skip:
-            continue
-        concl = (ck.get("conclusion") or "").lower()
+    present = {(ck.get("name") or ""): (ck.get("conclusion") or "").lower()
+               for ck in facts.checks if (ck.get("name") or "") not in skip}
+    if want:
+        # allowlist: every NAMED-required check must be present AND success. A required check
+        # that never reported (workflow removed in the PR head, not yet registered) is
+        # `missing`, not green — it must NOT pass vacuously (a fail-open on the named case).
+        for name in sorted(want):
+            concl = present.get(name)
+            if concl != "success":
+                return f"required check `{name}` is `{concl or 'missing'}`, not success"
+        return None
+    for name, concl in present.items():
         if concl != "success":
-            return f"`{check.id}`: check `{name}` is `{concl or 'pending'}`, not success"
+            return f"check `{name}` is `{concl or 'pending'}`, not success"
     return None
 
 
@@ -1239,7 +1271,10 @@ def attestation_gaps(cfg: Config, facts: DiffFacts, md: str) -> list[Finding]:
 _GIT_VALUE_OPTS = frozenset(
     {"-c", "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
 )
-_SHELL_SEP = re.compile(r"[;&|\n]+")
+# Split on shell separators AND grouping punctuation so a glued subshell verb (`(git push)`,
+# `$(git commit)`, `{git push;}`) can't hide the gated git verb behind a `(`/`{` from the
+# tokenized op scan — `( git push )` was already caught; the glued `(git` was the gap.
+_SHELL_SEP = re.compile(r"[;&|\n(){}]+")
 _MERGE_RE = re.compile(r"\bgh\s+pr\s+merge\b|\bgh\s+api\b[^|&;]*?/merge\b")
 
 
@@ -1401,9 +1436,12 @@ def _read_json(path: str):
 
 
 def _load_reviews(path: str) -> list[dict] | None:
-    """Normalize a `gh pr view --json reviews` (or hand-rolled) array into the engine's
-    review shape. Tolerates both the nested `{author:{login,is_bot}}` GitHub form and a
-    flat `{login,is_bot}` form. None on a missing/garbled file (→ checks skip)."""
+    """Normalize a reviews array into the engine's review shape. Tolerates both the nested
+    GraphQL `{author:{login,is_bot}, commit:{oid}}` form and a flat
+    `{login,is_bot,commit_id}` form. NOTE: `gh pr view --json reviews` omits the review's
+    commit oid, so freshness (require_fresh / protected_path) can't be verified from it —
+    use action.yml's GraphQL query when --head-sha is in play. None on a
+    missing/garbled file (→ checks skip)."""
     raw = _read_json(path)
     if not isinstance(raw, list):
         return None
@@ -1777,11 +1815,11 @@ _SAFE_CMD_CORPUS = ("git push origin feat", "git commit -m x", "git status", "np
 # hallucinated/typo'd key that _from_raw would otherwise silently `.get()`-drop.
 _KNOWN_CHECK_KEYS = frozenset({
     "id", "kind", "severity", "primitive", "layer", "pattern", "scope", "exempt", "strip_comments",
-    "when", "need", "ignore", "when_marker", "marker", "where", "cmd", "trigger", "require", "custom",
+    "when", "need", "ignore", "when_marker", "marker", "cmd", "trigger", "require", "custom",
     "forbid_paths", "paths", "require_approval", "unless_paired_add", "branch", "ops", "allow",
     "tokens", "msg_scope", "deny", "key", "direction", "floor", "max_added", "max_removed",
     "max_files", "max_file_added", "status", "maxkb", "allow_binary", "require_approval_from",
-    "exclude_author", "require_fresh", "no_changes_requested", "disallow_bot", "disallow_author",
+    "exclude_author", "exclude_bot", "require_fresh", "no_changes_requested",
     "min_approvals", "class", "box", "prompt",
 })
 
@@ -2098,17 +2136,28 @@ def _current_branch(cwd: str) -> str | None:
     return out.strip() if out and out.strip() else None
 
 
-def _resolve_base(cwd: str, default_branch: str) -> str | None:
+class BaseUnreachable(RuntimeError):
+    """The trusted base ref is unresolvable in the authoritative path — fail closed rather
+    than silently narrow the diff to HEAD~1 (which an earlier PR commit controls)."""
+
+
+def _resolve_base(cwd: str, default_branch: str, *, authoritative: bool = False) -> str | None:
     mb = _git(cwd, ["merge-base", f"origin/{default_branch}", "HEAD"])
     if mb and mb.strip():
         return mb.strip()
-    # no remote tracking → fall back to the previous commit (best-effort local)
     head_parent = _git(cwd, ["rev-parse", "HEAD~1"])
-    return head_parent.strip() if head_parent and head_parent.strip() else None
+    parent = head_parent.strip() if head_parent and head_parent.strip() else None
+    if authoritative and parent is not None:
+        # CI passed a TRUSTED --default-branch, so origin/<it> MUST be fetchable; it isn't,
+        # yet HEAD has history. Narrowing to HEAD~1 would diff against a PR-controlled commit
+        # (the base-pinning bypass). Refuse. (A true root commit → parent is None → degrade to
+        # the working tree, which has no prior commit to hide a weakening in.)
+        raise BaseUnreachable(default_branch)
+    return parent  # local/best-effort: the previous commit, or None at the repo root
 
 
 def _reasons(findings: list[Finding]) -> str:
-    return "; ".join(f.reason for f in findings)
+    return "; ".join(f"{f.id}: {f.reason}" for f in findings)
 
 
 def cmd_gate() -> int:
@@ -2232,6 +2281,7 @@ def cmd_check(
     pr_author: str | None = None,
     checks_file: str | None = None,
     allow_bypass: bool = False,
+    default_branch_arg: str | None = None,
 ) -> int:
     """CHANGE layer: 1 = blocking findings, 0 = clean (warns print, never fail).
 
@@ -2242,13 +2292,24 @@ def cmd_check(
     authoritative CI run never sets it."""
     try:
         wcfg = _read_working_config(cwd)
-        default_branch = wcfg.repo.default_branch
+        # The base branch NAME comes from a TRUSTED CLI flag (CI passes the repo's real
+        # default) when given, falling back to the working-tree config only for local use.
+        # Never let the PR-head config's default_branch SELECT the base — that is the
+        # base-pinning bypass (rename it to an unfetched ref → silent HEAD~1 fallback).
+        default_branch = default_branch_arg or wcfg.repo.default_branch
         if allow_bypass and _bypass_reason(wcfg, _attestation_text(cwd, wcfg)):
             print("ratchet: BYPASS (agent-layer, pre-push) — CI still enforces", file=sys.stderr)
             return 0
     except (OSError, ConfigError):
-        default_branch = "main"
-    base = _resolve_base(cwd, default_branch)
+        default_branch = default_branch_arg or "main"
+    try:
+        base = _resolve_base(cwd, default_branch, authoritative=default_branch_arg is not None)
+    except BaseUnreachable:
+        print(
+            f"ratchet: base ref origin/{default_branch} is unreachable — refusing to gate a "
+            f"narrowed diff (set 'fetch-depth: 0' on actions/checkout)", file=sys.stderr,
+        )
+        return 1
     try:
         cfg = load_config(cwd, base)
     except (OSError, ConfigError) as e:
@@ -2265,7 +2326,9 @@ def cmd_check(
     if approvals is not None:
         facts.approvals = [a.strip() for a in approvals.split(",") if a.strip()]
     if reviews_file:
-        facts.reviews = _load_reviews(reviews_file)
+        # A requested-but-garbled reviews file FAILS CLOSED (→ [], no qualifying approver),
+        # never silently downgrading to trust the unverified flat --approvals string.
+        facts.reviews = _load_reviews(reviews_file) or []
     facts.head_sha = head_sha or (_git(cwd, ["rev-parse", head]) or "").strip() or None
     facts.pr_author = pr_author
     if checks_file:
@@ -2887,10 +2950,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     c.add_argument("--pr-body-file", help="file holding the PR body (enables PR-body checks; CI only)")
     c.add_argument("--approvals", help="comma-separated approver logins (enables protected_path; CI only)")
-    c.add_argument("--reviews-file", help="JSON from `gh pr view --json reviews` (reviewer-identity checks; CI only)")
+    c.add_argument("--reviews-file", help="JSON reviews array login/state/commit_id/is_bot (CI only). Freshness needs the commit oid — use action.yml's GraphQL query, not `gh pr view`")
     c.add_argument("--head-sha", help="PR head commit SHA (freshness for approval_policy; CI only)")
     c.add_argument("--pr-author", help="PR author login (excludes self-approval; CI only)")
     c.add_argument("--checks-file", help="JSON from `gh pr checks --json name,state` (require_checks_green; CI only)")
+    c.add_argument("--default-branch", help="trusted base branch name (CI passes the repo's real default; overrides ratchet.toml so the base can't be redirected from the PR head)")
     c.add_argument("--allow-bypass", action="store_true", help="honour the agent-layer bypass (pre-push only)")
     j = sub.add_parser("judge", help="emit the advisory LLM-judge prompt(s) to stdout (CI)")
     j.add_argument("--cwd", default=".")
@@ -2938,6 +3002,7 @@ def main(argv: list[str] | None = None) -> int:
             pr_author=args.pr_author,
             checks_file=args.checks_file,
             allow_bypass=args.allow_bypass,
+            default_branch_arg=args.default_branch,
         )
     if args.cmd == "judge":
         return cmd_judge(args.cwd)
