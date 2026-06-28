@@ -4,7 +4,7 @@
   "owner": { "name": "Ivan Wng", "url": "https://github.com/IvanWng97" },
   "metadata": {
     "description": "The cogpin Definition-of-Done gate — install once, the closing-discipline enforces itself.",
-    "version": "0.3.0"
+    "version": "0.1.0"
   },
   "plugins": [
     {
