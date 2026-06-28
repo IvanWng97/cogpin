@@ -316,6 +316,13 @@ def _as_int(v) -> int | None:
     return v
 
 
+def _regex_field_values(c: "Check") -> list[str]:
+    """The one source of truth for which Check fields are regexes — consumed by BOTH
+    Config.validate (the fail-loud compile guard) and draft_lint. A field added to only
+    one of the two sites would silently re-open the regex fail-open hole."""
+    return [v for v in (c.pattern, c.exempt, c.key, c.marker, c.when_marker, c.trigger, c.require, *c.custom) if v]
+
+
 @dataclass
 class Config:
     schema: int
@@ -494,9 +501,7 @@ class Config:
             # Every populated regex field must COMPILE — an uncompilable pattern makes its
             # primitive return None (a silent PASS), disabling a block gate on an author typo.
             # (draft_lint compiles these too; the authoritative validate path must as well.)
-            for _rxv in (c.pattern, c.exempt, c.key, c.marker, c.when_marker, c.trigger, c.require, *c.custom):
-                if not _rxv:
-                    continue
+            for _rxv in _regex_field_values(c):
                 try:
                     re.compile(_rxv)
                 except (re.error, TypeError) as _e:
@@ -2287,13 +2292,10 @@ def draft_lint(text: str, *, existing_cfg: Config | None,
     findings: list[LintFinding] = []
     # 2 — every regex field compiles + isn't a match-everything no-op
     for c in cfg.checks:
-        rx_fields = [c.pattern, c.exempt, c.key, c.marker, c.when_marker, c.trigger, c.require, *c.custom]
-        for val in rx_fields:
-            if not val:
-                continue
+        for val in _regex_field_values(c):
             try:
                 re.compile(val)
-            except re.error:
+            except (re.error, TypeError):
                 findings.append(LintFinding("error", c.id, f"invalid regex: {val!r}"))
         if c.pattern is not None and c.pattern in _MATCH_EVERYTHING:
             findings.append(LintFinding("error", c.id, "pattern matches everything → enforces nothing"))
