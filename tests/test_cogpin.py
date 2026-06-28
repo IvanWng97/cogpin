@@ -974,15 +974,28 @@ class TestFullCoverage(unittest.TestCase):
         pending_self[0] = {"name": "ci", "conclusion": "failure"}
         self.assertIsNotNone(require_checks_green(guarded, DiffFacts(checks=pending_self)))
 
+    def test_require_checks_green_bare_empty_is_vacuous(self):
+        """M3 — WHY the advisory exists: bare mode (no `need`) bare-iterates the reported
+        checks, so an EMPTY set (a removed/renamed check, an `ignore` that covers them all,
+        a checks-fetch hiccup) iterates nothing → vacuous PASS. `need` is the only fail-closed
+        form: a named check that never reported counts as missing and blocks."""
+        bare = one_check('[[check]]\nid="rcg"\nkind="fact"\nseverity="block"\nprimitive="require_checks_green"')
+        self.assertIsNone(require_checks_green(bare, DiffFacts(checks=[])))   # the trap: vacuous PASS
+        needed = one_check('[[check]]\nid="rcg"\nkind="fact"\nseverity="block"\n'
+                           'primitive="require_checks_green"\nneed=["ci"]')
+        self.assertIsNotNone(require_checks_green(needed, DiffFacts(checks=[])))  # named check missing → block
+
     def test_require_checks_green_advisory(self):
-        """#5: validate surfaces the racy unconstrained shape (neither need nor ignore) but
-        does not flag a guarded one."""
-        racy = Config.parse('schema=1\n[repo]\ndefault_branch="main"\n[[check]]\nid="rcg"\n'
-                            'kind="fact"\nseverity="block"\nprimitive="require_checks_green"')
-        self.assertTrue(any("require_checks_green" in n for n in _config_advisories(racy)))
-        guarded = Config.parse('schema=1\n[repo]\ndefault_branch="main"\n[[check]]\nid="rcg"\n'
-                               'kind="fact"\nseverity="block"\nprimitive="require_checks_green"\nignore=["cogpin"]')
-        self.assertEqual(_config_advisories(guarded), [])
+        """#5 + M3: validate surfaces BOTH fail-open shapes — bare (no need/ignore) AND
+        ignore-only bare-iterate, so an empty check set passes vacuously. Only a `need`
+        allowlist fails closed on a missing check, so only `need` clears the advisory."""
+        def adv(extra=""):
+            return _config_advisories(Config.parse(
+                'schema=1\n[repo]\ndefault_branch="main"\n[[check]]\nid="rcg"\nkind="fact"\n'
+                'severity="block"\nprimitive="require_checks_green"' + extra))
+        self.assertTrue(any("require_checks_green" in n for n in adv()))                    # bare → warns
+        self.assertTrue(any("require_checks_green" in n for n in adv('\nignore=["cogpin"]')))  # ignore-only → still warns (vacuum)
+        self.assertEqual(adv('\nneed=["ci"]'), [])                                          # need-scoped → clean
 
 
 class TestGlobGuessing(unittest.TestCase):
@@ -2222,6 +2235,24 @@ class TestBasePinning(unittest.TestCase):
             rc = cmd_check(self.d, allow_run=False, default_branch_arg="main")
         self.assertEqual(rc, 1, "the .env added across the full base..HEAD range must be caught")
 
+    def test_corrupt_checks_file_fails_closed(self):
+        # M3: a requested --checks-file that won't parse must FAIL CLOSED (exit 2), never
+        # degrade to [] — which a bare require_checks_green reads as a vacuous all-green PASS.
+        from cogpin import cmd_check
+        self._w("cogpin.toml", self.STRICT)
+        self._git("add", "-A")
+        self._git("commit", "-qm", "base")
+        self._git("update-ref", "refs/remotes/origin/main", self._sha())
+        self._w("clean.txt", "ok")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "head")
+        bad = os.path.join(self.d, "checks.json")
+        with open(bad, "w", encoding="utf-8") as fh:
+            fh.write("{not json")  # garbled → _load_checks returns None
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            rc = cmd_check(self.d, allow_run=False, default_branch_arg="main", checks_file=bad)
+        self.assertEqual(rc, 2, "a corrupt --checks-file must fail closed, not pass vacuously")
+
     def test_authoritative_unreachable_base_fails_closed_e2e(self):
         from cogpin import cmd_check
         self._w("cogpin.toml", self.STRICT)
@@ -2481,9 +2512,13 @@ class TestReview5Robustness(unittest.TestCase):
         garbled = os.path.join(self.d, "checks.json")
         with open(garbled, "w", encoding="utf-8") as fh:
             fh.write("not json at all")
-        with contextlib.redirect_stdout(io.StringIO()):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             rc = R.cmd_check(self.d, allow_run=False, default_branch_arg="main", checks_file=garbled)
-        self.assertEqual(rc, 1, "a garbled checks file must fail closed, not silently skip the check")
+        # M3: a garbled --checks-file is a HARD parse error (exit 2), not a degrade to [] — that
+        # `[]` was a vacuous PASS for a BARE require_checks_green. Fails closed regardless of the
+        # config shape (here `need=["ci"]`), so the guarantee no longer hinges on `need` happening
+        # to block `missing`.
+        self.assertEqual(rc, 2, "a garbled checks file must fail closed (parse error), not skip or pass")
 
     # checks-file — a genuinely ABSENT checks file still SKIPS (no false-block)
     def test_absent_checks_file_skips(self):

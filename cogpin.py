@@ -2669,11 +2669,15 @@ def cmd_check(
     facts.head_sha = head_sha or (_git(cwd, ["rev-parse", head]) or "").strip() or None
     facts.pr_author = pr_author
     if checks_file and os.path.exists(checks_file):
-        # Requested AND present: a garbled/unreadable file FAILS CLOSED (→ [], so a
-        # `need`-scoped require_checks_green blocks `missing`) rather than silently skipping
-        # a check we were told to enforce. A genuinely ABSENT path leaves checks=None →
-        # skip (no PR context) — the documented degrade, never a false-block.
-        facts.checks = _load_checks(checks_file) or []
+        # Requested AND present but UNPARSEABLE → FAIL CLOSED (exit 2), mirroring cmd_fixture.
+        # `or []` here was the M3 fail-open: a corrupt file → None → [] passes a BARE
+        # require_checks_green vacuously (an empty set bare-iterates to nothing). A genuinely
+        # ABSENT path still leaves checks=None → skip (no PR context) — the documented degrade.
+        facts.checks = _load_checks(checks_file)
+        if facts.checks is None:
+            print(f"cogpin: cannot parse --checks-file (expected a JSON array): {checks_file}",
+                  file=sys.stderr)
+            return 2
     if any(c.primitive == "max_added_file_bytes" for c in cfg.checks):
         _populate_file_sizes(cwd, base or "HEAD~1", head, facts)
     findings = run_change(cfg, facts, allow_run=allow_run)
@@ -2986,11 +2990,25 @@ def _config_advisories(cfg: Config) -> list[str]:
     blocked PR."""
     out = []
     for c in cfg.checks:
-        if c.primitive == "require_checks_green" and not c.need and not c.ignore:
+        if c.primitive != "require_checks_green":
+            continue
+        if not c.need:
+            # bare OR ignore-only: no allowlist → it bare-iterates whatever checks the PR API
+            # returns, so an EMPTY set (a removed/renamed check, an `ignore` covering them all,
+            # a checks-fetch hiccup) passes vacuously. Only `need` names a check that MUST be
+            # present-and-green, failing closed on a missing one.
             out.append(
-                f"`{c.id}` (require_checks_green) sets neither `need` nor `ignore`: run inside "
-                "the workflow it gates, cogpin's own still-pending check self-blocks. Set "
-                '`ignore = ["<cogpin job name>"]`, or `need` only the other checks.'
+                f"`{c.id}` (require_checks_green) has no `need`: an empty/shrunken check set "
+                "passes vacuously (it can't detect a REMOVED or unreported required check). Name "
+                'what must be green — `need = ["<job>"]` — or rely on branch-protection required '
+                "contexts for removal-detection."
+            )
+        if not c.need and not c.ignore:
+            # bare specifically: cogpin's own still-pending job self-blocks a same-workflow run.
+            out.append(
+                f"`{c.id}` (require_checks_green) also sets no `ignore`: if cogpin runs in the "
+                "workflow it gates, its own still-pending check self-blocks. `ignore` the cogpin "
+                "job, or `need` only the others."
             )
     return out
 

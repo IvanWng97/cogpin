@@ -9,6 +9,14 @@ breaking config change.
 ## [Unreleased]
 
 ### Fixed
+- **`require_checks_green` no longer passes vacuously on an absent/corrupt check set** — the M3
+  fail-open from the audit. A bare (or `ignore`-only) list bare-iterates whatever checks the PR
+  API returns, so an *empty* set was a silent all-green PASS. Three guards now close it:
+  `cogpin check` **fails closed (exit 2)** on a `--checks-file` it can't parse (was: degrade to
+  `[]`); the GitHub Action distinguishes "no checks reported" (benign `[]`) from a genuine `gh`
+  failure and writes a fail-closed sentinel on the latter; and `validate` flags bare *and*
+  `ignore`-only shapes, steering to a `need` allowlist — the only form that detects a
+  removed/unreported required check.
 - **`validate` now fails LOUD on config typos that used to silently disable a gate** — the
   fail-open class a whole-codebase audit flagged. An uncompilable regex in any field
   (`pattern` / `exempt` / `key` / `marker` / `when_marker` / `trigger` / `require` / `custom`),
