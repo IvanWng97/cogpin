@@ -201,6 +201,31 @@ class Meta:
     feature_files: int = 3
 
 
+# backends `capability emit` knows how to render to; an unknown backend is a config error
+# (a declared-but-unrenderable floor is misleading). Only claude-code is emitted today.
+_CAPABILITY_BACKENDS = frozenset({"claude-code", "bubblewrap", "docker", "seccomp"})
+
+
+@dataclass
+class Capability:
+    """A DECLARED capability floor — POLICY, not enforcement. ratchet records and compares
+    this stanza and can EMIT it to a harness's native enforcement (`ratchet capability emit`),
+    but it NEVER reads it during gate/check evaluation and NEVER confines a syscall itself.
+    The OS/harness is the boundary; ratchet only declares the posture (see docs/composition.md).
+    Its integrity comes for free: it lives in ratchet.toml, which is self_protect'd and read
+    from the pinned base ref — so the floor is base-pinned without any new machinery."""
+    no_network: bool = False
+    fs_confine: list[str] = field(default_factory=list)
+    deny_paths: list[str] = field(default_factory=list)
+    allow_commands: list[str] = field(default_factory=list)
+    deny_commands: list[str] = field(default_factory=list)
+    backend: str = "claude-code"
+
+    def is_empty(self) -> bool:
+        return not (self.no_network or self.fs_confine or self.deny_paths
+                    or self.allow_commands or self.deny_commands)
+
+
 @dataclass
 class Check:
     id: str
@@ -296,6 +321,7 @@ class Config:
     repo: RepoCfg
     meta: Meta
     checks: list[Check]
+    capability: Capability = field(default_factory=Capability)
 
     @staticmethod
     def parse(text: str) -> "Config":
@@ -325,6 +351,15 @@ class Config:
             base_pinned=bool(m.get("base_pinned", True)),
             attestation_file=m.get("attestation_file", ".ratchet/attestation.md"),
             feature_files=int(m.get("feature_files", 3)),
+        )
+        cap = raw.get("capability", {})
+        capability = Capability(
+            no_network=bool(cap.get("no_network", False)),
+            fs_confine=_as_list(cap.get("fs_confine")),
+            deny_paths=_as_list(cap.get("deny_paths")),
+            allow_commands=_as_list(cap.get("allow_commands")),
+            deny_commands=_as_list(cap.get("deny_commands")),
+            backend=cap.get("backend", "claude-code"),
         )
         checks = []
         for c in raw.get("check", []):
@@ -382,7 +417,8 @@ class Config:
                 )
             except KeyError as e:
                 raise ConfigError(f"check missing required field {e}") from e
-        return Config(schema=raw.get("schema", 0), repo=repo, meta=meta, checks=checks)
+        return Config(schema=raw.get("schema", 0), repo=repo, meta=meta, checks=checks,
+                      capability=capability)
 
     def validate(self) -> None:
         if self.schema != SCHEMA_VERSION:
@@ -453,6 +489,15 @@ class Config:
                     f"check `{c.id}`: numeric_floor direction must be 'no_decrease' or "
                     f"'no_increase', got `{c.direction}`"
                 )
+        # [capability] is a DECLARATION (policy), never a [[check]] — it can't block (a
+        # primitive="capability" already fails "unknown primitive" above). The only validation
+        # is well-formedness: an unknown backend is a config error (a floor that can't be
+        # rendered is misleading). List shapes are coerced by _as_list; no_network by bool.
+        if self.capability.backend not in _CAPABILITY_BACKENDS:
+            raise ConfigError(
+                f"[capability] unknown backend `{self.capability.backend}` "
+                f"(known: {', '.join(sorted(_CAPABILITY_BACKENDS))})"
+            )
 
     @property
     def footer_regex(self) -> str | None:
@@ -1513,7 +1558,9 @@ def _read_json(path: str):
     try:
         with open(path, encoding="utf-8") as fh:
             return json.load(fh)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        # absent / unreadable / not-JSON / not-UTF-8 all collapse to "no usable doc" → None, so
+        # every caller degrades safe (a fail-closed gate or a default) instead of crashing.
         return None
 
 
@@ -2852,6 +2899,132 @@ def _protects_gate_files(cfg: Config) -> bool:
     return False
 
 
+def _str_list(v: object) -> list[str]:
+    """The str-only members of v if v is a list, else []. Guards against a settings.json (or
+    sidecar) whose `deny`/`allow` is a bare string — iterating that would shatter it into
+    characters and pollute the reconciled set."""
+    return [e for e in v if isinstance(e, str)] if isinstance(v, list) else []
+
+
+def _emit_claude_code(cap: Capability) -> tuple[list[str], list[str], list[str]]:
+    """Render a declared Capability floor to (deny, allow, warnings) for Claude Code
+    settings.json permissions. PURE — no I/O. `warnings` flag the postures settings.json
+    cannot actually GUARANTEE (egress, fs confinement) so emit never oversells: ratchet
+    declares the intent, the OS/harness is the boundary (see docs/composition.md)."""
+    deny: list[str] = []
+    allow: list[str] = []
+    warns: list[str] = []
+    for p in cap.deny_paths:
+        deny += [f"Read({p})", f"Edit({p})", f"Write({p})"]
+    for v in cap.deny_commands:
+        deny.append(f"Bash({v}:*)")
+    if cap.no_network:
+        deny += ["WebFetch", "WebSearch", "Bash(curl:*)", "Bash(wget:*)", "Bash(nc:*)"]
+        warns.append("no_network: settings.json denies the common egress verbs but CANNOT "
+                     "guarantee no network — real egress control is an OS/harness sandbox concern")
+    for v in cap.allow_commands:
+        allow.append(f"Bash({v}:*)")
+    if cap.allow_commands:
+        warns.append("allow_commands: for a TRUE allowlist set permissions.defaultMode to 'ask' "
+                     "or 'deny' in settings.json yourself — ratchet only adds the allow entries")
+    if cap.fs_confine:
+        warns.append(f"fs_confine {cap.fs_confine}: settings.json cannot confine the filesystem "
+                     "to a root — the declaration is recorded, but real confinement is an OS concern")
+    return list(dict.fromkeys(deny)), list(dict.fromkeys(allow)), warns
+
+
+def cmd_capability_emit(cwd: str = ".", backend: str | None = None, dry_run: bool = False) -> int:
+    """Compile the declared `[capability]` floor to the harness's native enforcement file.
+    GENERATE, never contain: ratchet writes the policy the harness will enforce and exits —
+    it is never in the syscall path. Idempotent + non-clobbering: it manages only the entries
+    it itself emitted (recorded in `.ratchet/capability-emitted.json`), never user-authored ones."""
+    root = _repo_root(cwd) or cwd
+    try:
+        cfg = _read_working_config(root)
+    except (OSError, ConfigError) as e:
+        print(f"ratchet: cannot read [capability] from ratchet.toml: {e}", file=sys.stderr)
+        return 1
+    cap = cfg.capability
+    target = backend or cap.backend
+    if target != "claude-code":
+        print(f"ratchet: [capability] declared for backend `{target}` — ratchet does not emit for "
+              f"it; wire your sandbox manually (ratchet declares the floor, the OS enforces)",
+              file=sys.stderr)
+        return 0
+    # _emit_claude_code returns ([],[],[]) for an empty floor — reconcile still runs so that
+    # EMPTYING the stanza RETRACTS what was emitted before; the per-key removal contract must
+    # hold for the all-empty transition, not just one key dropped from a non-empty stanza.
+    deny, allow, warns = _emit_claude_code(cap)
+    settings_path = os.path.join(root, ".claude", "settings.json")
+    sidecar_path = os.path.join(root, ".ratchet", "capability-emitted.json")
+    raw = _read_json(settings_path)
+    # FAIL CLOSED on a present-but-unusable settings.json: _read_json maps both "absent" and
+    # "garbled" to None, and a valid-but-non-object (a JSON array/string) parses to a non-dict —
+    # either way, proceeding would replace the user's file with a ratchet-only document and
+    # silently destroy their keys. Only an ABSENT file is a clean slate to write.
+    if os.path.exists(settings_path) and not isinstance(raw, dict):
+        print(f"ratchet: refusing to emit — {settings_path} exists but isn't a JSON object "
+              f"(fix or remove it first); not overwriting it", file=sys.stderr)
+        return 1
+    settings = raw if isinstance(raw, dict) else {}
+    prior = _read_json(sidecar_path)
+    prior = prior if isinstance(prior, dict) else {}
+    prior_deny, prior_allow = _str_list(prior.get("deny")), _str_list(prior.get("allow"))
+    # Warnings describe the DECLARED floor (postures settings.json can't truly guarantee — e.g.
+    # fs_confine, no_network egress). Surface them on every path that got this far, INCLUDING the
+    # declared-but-nothing-to-render case below, so a non-enforceable declaration is never silently
+    # swallowed (fs_confine renders no deny/allow entries, only a warning).
+    for w in warns:
+        print(f"ratchet: warning — {w}", file=sys.stderr)
+    if not deny and not allow and not prior_deny and not prior_allow:
+        # nothing emitted before AND nothing to render now. Distinguish a truly empty stanza from
+        # one that IS declared but renders no settings.json entries (e.g. fs_confine only), so the
+        # user isn't told their floor doesn't exist.
+        msg = ("no [capability] floor declared" if cap.is_empty()
+               else "[capability] declared but nothing is enforceable via settings.json (see warnings)")
+        print(f"ratchet: {msg} — nothing to emit", file=sys.stderr)
+        return 0
+    perms = settings.get("permissions")
+    perms = perms if isinstance(perms, dict) else {}
+    cur_deny, cur_allow = _str_list(perms.get("deny")), _str_list(perms.get("allow"))
+    # Drop ONLY the entries ratchet emitted last time (preserve user-authored ones), then append
+    # the freshly-rendered managed set deduped → idempotent (same stanza ⇒ byte-identical) and
+    # non-clobbering. deny AND allow are reconciled symmetrically: a key emptied (or the whole
+    # stanza removed) deletes its managed entries; a now-empty list deletes the key entirely so
+    # the rendered output never carries a vestigial `"allow": []` / `"deny": []` / `permissions`.
+    user_deny = [e for e in cur_deny if e not in prior_deny]
+    user_allow = [e for e in cur_allow if e not in prior_allow]
+    # The sidecar is ratchet's OWNERSHIP ledger — record only entries ratchet actually added
+    # (managed MINUS any that already existed as user-authored), NOT the full render. Otherwise a
+    # user-authored entry that string-collides with a managed one (e.g. a hand-written
+    # `Bash(curl:*)` deny alongside `no_network`) gets claimed as managed → silently deleted on a
+    # later retract, and the array reorders between identical emits (non-idempotent).
+    owned_deny = [e for e in deny if e not in user_deny]
+    owned_allow = [e for e in allow if e not in user_allow]
+    final = {"deny": user_deny + owned_deny, "allow": user_allow + owned_allow}
+    for k, v in final.items():
+        if v:
+            perms[k] = v
+        elif k in perms:
+            del perms[k]
+    if perms:
+        settings["permissions"] = perms
+    elif "permissions" in settings:
+        del settings["permissions"]
+    rendered = json.dumps(settings, indent=2) + "\n"
+    if dry_run:
+        print(rendered, end="")
+        return 0
+    _atomic_write(settings_path, rendered, confine=root)
+    _atomic_write(sidecar_path, json.dumps({"deny": owned_deny, "allow": owned_allow}, indent=2) + "\n", confine=root)
+    if deny or allow:
+        print(f"ratchet: emitted {len(deny)} deny + {len(allow)} allow entries to "
+              f".claude/settings.json (backend: claude-code) — the harness enforces, not ratchet")
+    else:
+        print("ratchet: retracted all ratchet-managed capability entries from .claude/settings.json")
+    return 0
+
+
 def cmd_install(cwd: str = ".", vendor: bool = True, config: bool = True,
                 hook: bool = True, ci: bool = True, gitignore: bool = True) -> int:
     """Idempotent, non-clobbering wiring of the change layer. No flags ⇒ do all five.
@@ -3090,6 +3263,12 @@ def main(argv: list[str] | None = None) -> int:
     dr = sub.add_parser("doctor", help="diagnose both layers (read-only; exit 1 only on a hard change-layer failure)")
     dr.add_argument("--cwd", default=".")
     dr.add_argument("--json", action="store_true", help="emit the per-check status array")
+    cap = sub.add_parser("capability", help="compile the declared [capability] floor to the harness (declare → emit; the OS enforces)")
+    capsub = cap.add_subparsers(dest="capcmd", required=True)
+    cape = capsub.add_parser("emit", help="render [capability] to the harness's native enforcement (.claude/settings.json)")
+    cape.add_argument("--cwd", default=".")
+    cape.add_argument("--backend", default=None, help="override [capability].backend (default: claude-code)")
+    cape.add_argument("--dry-run", action="store_true", help="print the merged settings.json without writing")
     sub.add_parser("selftest", help="run the in-process self-test")
 
     args = p.parse_args(argv)
@@ -3135,6 +3314,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_uninstall(args.cwd)
     if args.cmd == "doctor":
         return cmd_doctor(args.cwd, as_json=args.json)
+    if args.cmd == "capability":
+        return cmd_capability_emit(args.cwd, backend=args.backend, dry_run=args.dry_run)
     if args.cmd == "selftest":
         print("ratchet selftest: ok (run `python3 -m pytest` / `tests/test_ratchet.py` for the full suite)")
         return 0

@@ -362,6 +362,7 @@ python3 ratchet.py draft-lint # gate ratchet.toml.draft (the moat + outstanding 
 python3 ratchet.py gaps       # which CLAUDE.md rules are still prose with no mechanism
 python3 ratchet.py doctor     # diagnose both layers (or /ratchet-doctor)
 python3 ratchet.py validate   # checks the block-requires-fact invariant + structural sanity
+python3 ratchet.py capability emit  # compile [capability] → the harness (declare → emit; the OS enforces)
 ```
 
 The AI drafts to `ratchet.toml.draft`, never the live config; only the five

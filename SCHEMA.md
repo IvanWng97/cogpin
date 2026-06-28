@@ -66,6 +66,36 @@ to expand to these globs, or give a literal glob directly.
 
 ---
 
+## `[capability]` (optional)
+
+A **declared** capability floor — *policy, not enforcement*. ratchet records and compares
+this stanza and can **compile** it to a harness's native enforcement
+(`ratchet capability emit`), but it **never** reads it during gate/check evaluation and
+**never** confines a syscall itself. The OS / harness is the boundary; ratchet only declares
+the posture (see [`docs/composition.md`](docs/composition.md) and the
+[#24 re-brand](README.md)). Because it lives in `ratchet.toml`, it is `self_protect`'d and
+read from the pinned base ref for free.
+
+| key | type | default | meaning |
+|---|---|---|---|
+| `no_network` | bool | `false` | the agent should run with no outbound network |
+| `fs_confine` | list(glob) | `[]` | filesystem roots the agent is confined to (e.g. `["."]`) |
+| `deny_paths` | list(glob) | `[]` | paths the agent must never touch (`["~/.ssh/**","**/.env"]`) |
+| `allow_commands` | list(verb) | `[]` | command-verb allowlist (the strong, OS-enforceable default-deny posture) |
+| `deny_commands` | list(verb) | `[]` | command-verb denylist (a declaration to *compile out*, not a hook match) |
+| `backend` | string | `claude-code` | the `emit` target (`claude-code` \| `bubblewrap` \| `docker` \| `seccomp`); only `claude-code` is rendered today |
+
+`ratchet capability emit` (claude-code) translates the floor into `.claude/settings.json`
+`permissions` (`deny_paths` → `Read/Edit/Write(<p>)`; `deny_commands` → `Bash(<verb>:*)`;
+`no_network` → deny `WebFetch`/`WebSearch`/`curl`/`wget`/`nc` **+ a warning that settings.json
+cannot *guarantee* no egress**). It is idempotent and **non-clobbering** — it manages only
+the entries it itself emitted (recorded in `.ratchet/capability-emitted.json`), never your
+own. A non-`claude-code` backend is *documented, not emitted* (ratchet declares; you wire the
+sandbox). **`emit` generates; it never contains.** `--dry-run` prints the merged settings
+without writing.
+
+---
+
 ## `[[check]]`
 
 | key | type | required | meaning |
