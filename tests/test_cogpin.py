@@ -216,8 +216,11 @@ class TestConfig(unittest.TestCase):
             '\nlayer="agent"\nprimitive="forbid_command"',        # neither pattern nor deny
             '\nlayer="change"\nprimitive="run"',                  # no cmd
             '\nprimitive="cooccur"\ntrigger="x"',                 # has trigger, missing require
+            '\nprimitive="cooccur"\nrequire="y"',                 # has require, missing trigger (symmetric)
             '\nprimitive="require_approval_from"\npaths=["g/**"]', # has paths, missing approvers
+            '\nprimitive="require_approval_from"\nrequire_approval_from=["o"]',  # has approvers, missing paths
             '\nprimitive="path_requires"\nneed=["tests"]',        # has need, missing when/when_marker
+            '\nprimitive="path_requires"\nwhen=["code"]',         # has when, missing need (symmetric)
             '\nprimitive="change_budget"',                        # no caps at all
         ]
         for toml in cases:
