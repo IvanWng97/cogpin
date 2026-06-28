@@ -25,7 +25,7 @@ construction — see "the advisory frontier" below.
 | corner-cut class | primitive | provenance |
 |---|---|---|
 | Bypass the hooks (`--no-verify`, `HUSKY=0`, `SKIP_PREFLIGHT`) | `forbid_command{pattern}` | first-principles; the canonical agent escape |
-| Smuggle a gated verb past prefix matching (`git -C p push`, `cd d && …`, `env X=Y …`) | `forbid_command{deny}` (normalized) | mined — claude-code **#66176** ships the exact repro table; #49129 (113+ `rm -rf`/data-loss), #29082, #45974 (`git clean -fd`) |
+| Smuggle a gated verb past prefix matching (`git -C p push`, `cd d && …`, `env X=Y …`, or by quoting/splitting it — `git "push"`, `git p"ush"`, a backslash-newline continuation) | `forbid_command{deny}` (shlex-normalized) | mined — claude-code **#66176** ships the exact repro table; #49129 (113+ `rm -rf`/data-loss), #29082, #45974 (`git clean -fd`) |
 | Commit straight to `main` / the shared checkout | `forbid_commit_on_branch` | first-principles; the "branch first" house rule |
 | Loosen the gate's own config mid-session | `self_protect` (agent) / `protected_path` (change) | first-principles + the base-pin keystone |
 | Scope creep — edit a subsystem outside the task | `scope_lock` | mined — **#34230** (titled "SCOPE LOCK violation"), #23067 (destroyed out-of-scope files), #64473/#18695/#57094/#62402, feature reqs #61888/#70236 (10+ reports; the single most-reported class) |

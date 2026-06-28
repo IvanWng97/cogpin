@@ -9,6 +9,16 @@ breaking config change.
 ## [Unreleased]
 
 ### Fixed
+- **Quoting or splitting a gated git verb no longer evades the agent-layer deny** — the M4
+  finding. The git-op tokenizer stripped whole quoted *spans* before scanning, so `git "push"`,
+  `git p"ush"`, `git 'commit'`, and a backslash-newline continuation lost their verb token and
+  slipped past `forbid_commit_on_branch` / `forbid_command{deny}` — yet ran the real verb in a
+  shell. It now tokenizes with `shlex` (quote glyphs removed, quoted *content* kept as one token,
+  continuations folded), so the verb is caught while a verb merely *named* in a quoted string
+  (`echo "git push"` / `echo "gh pr merge"`) stays one token and is not a false hit. The `gh pr
+  merge` / `gh api …/merge` detection is token-aware for the same reason, and matches a
+  path-qualified (`/usr/bin/gh`) or backtick-substituted invocation too. Malformed input
+  (unbalanced quotes) degrades toward detection. `shlex` is stdlib — one file / zero deps preserved.
 - **`require_checks_green` no longer passes vacuously on an absent/corrupt check set** — the M3
   fail-open from the audit. A bare (or `ignore`-only) list bare-iterates whatever checks the PR
   API returns, so an *empty* set was a silent all-green PASS. Three guards now close it:

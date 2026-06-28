@@ -168,7 +168,7 @@ The agent's command string. Live-signal (reads the command at the PreToolUse int
 like `forbid_commit_on_branch` / `self_protect` — it is agent-layer-only; `validate` rejects a
 `change`-layer (or default) placement, which could never fire at the authoritative layer.
 - `pattern` (regex) — matched anywhere in the command (catches `--no-verify` in any position).
-- `deny` (list) — **normalized**-verb match: strips `sudo` / `VAR=val` / `cd d &&` / `git -C p` / `git -c k=v` wrappers, then matches a contiguous token run, so the gated verb can't be smuggled past prefix matching.
+- `deny` (list) — **normalized**-verb match: shlex-tokenizes (quote glyphs stripped, quoted content kept whole, backslash-newline folded) and strips `sudo` / `VAR=val` / `cd d &&` / `git -C p` / `git -c k=v` wrappers, then matches a contiguous token run — so the gated verb can't be smuggled past prefix matching by wrapping it OR by quoting/splitting it (`git "push"`, `git p"ush"`). A verb merely *named* inside a quoted string (`echo "git push"`) stays one token and is not a false hit.
 
 #### `forbid_commit_on_branch`  *(agent / both)*
 - `branch` (list of globs, default `[default_branch]`) — the protected branches.

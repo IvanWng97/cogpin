@@ -325,7 +325,7 @@ Every check reads only facts — never your code.
 
 | primitive | kind | decides over |
 |---|---|---|
-| `forbid_command{pattern,deny}` | fact | the agent's command string — `deny` matches the **normalized** verb, defeating `git -C/p push` / `cd d && …` / `env X=Y …` wrappers (agent layer) |
+| `forbid_command{pattern,deny}` | fact | the agent's command string — `deny` matches the **normalized** verb (shlex-tokenized), defeating `git -C/p push` / `cd d && …` / `env X=Y …` wrappers **and** quote/split evasion (`git "push"`) (agent layer) |
 | `forbid_commit_on_branch{branch,ops}` | fact | the live current branch (agent layer) |
 | `self_protect{paths}` | fact | a live Write/Edit to a gate-defining file — the real-time twin of `protected_path` (agent layer) |
 | `secret_scan{forbid_paths,custom}` | fact | added lines vs token shapes + forbidden file globs |
