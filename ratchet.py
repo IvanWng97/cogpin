@@ -1770,8 +1770,10 @@ class LangScope:
 # A secondary language needs a REAL area, not a stray file or two. An ABSOLUTE floor, never a
 # fraction: a 200-file TS site in a 5000-file Rust repo is ~3.8%, so any fraction gate high
 # enough to drop 3 stray files also drops the real site (under-coverage = the cardinal sin).
+# No max-language cap: the flat union must cover EVERY floor-clearing language (a cap would
+# leave the lowest-ranked langs' files matched by no glob — the same under-coverage), and the
+# breakdown is bounded by _LANG_PROFILES (≤6) anyway.
 _SECONDARY_MIN_FILES = 10
-_MAX_LANGS = 4  # cap the per-language breakdown (6 profiles; rarely bites)
 
 
 def guess_scopes(paths: list[str]) -> list[LangScope]:
@@ -1780,8 +1782,10 @@ def guess_scopes(paths: list[str]) -> list[LangScope]:
     dominant language (most code files) is always included; a SECONDARY enters only at
     `>= min(_SECONDARY_MIN_FILES, dominant_count)` files (the clamp lets a near-parity
     secondary in on a tiny repo while 3-in-5000 stays out). Globs are kept only if they match
-    ≥1 path, with the per-lang code fallback applied PER LANG (so a flat-layout secondary still
-    contributes `**/*{ext}`, never silently empty). Empty/garbled tree → []. Never raises."""
+    ≥1 path; if a lang's structured globs ALL miss (a flat/non-src layout), it falls back to
+    `**/*{ext}` for EACH of its extensions actually present — never a single ext that could
+    match nothing (a `.tsx`-only node tree must not fall back to a dead `**/*.ts`). Empty/
+    garbled tree → []. Never raises."""
     if not paths:
         return []
     present = sorted(
@@ -1800,20 +1804,17 @@ def guess_scopes(paths: list[str]) -> list[LangScope]:
     for rank, (n, _i, lang) in enumerate(present):
         if rank >= 1 and n < floor:
             break  # sorted desc → every later lang is also below the floor
-        out.append(LangScope(lang.name, n, keep(lang.code_globs) or [f"**/*{lang.exts[0]}"],
-                             keep(lang.test_globs)))
-        if len(out) >= _MAX_LANGS:
-            break
+        # fallback over the PRESENT extensions only, so a multi-ext lang (node: .ts/.tsx/.js/
+        # .jsx) whose curated globs miss still emits a glob that matches its actual files.
+        fallback = [f"**/*{e}" for e in lang.exts if any(p.endswith(e) for p in paths)]
+        out.append(LangScope(lang.name, n, keep(lang.code_globs) or fallback, keep(lang.test_globs)))
     return out
 
 
-def guess_globs(paths: list[str]) -> tuple[list[str], list[str], list[str]]:
-    """(code, tests, docs) globs for a tracked-path list — the FLAT union over `guess_scopes`
-    (every detected language, dominant-first), kept for the `[repo]` defaults + the single-
-    language contract (a one-lang repo's output is byte-identical to the old dominant pick).
-    `code`/`tests` dedup first-wins, preserving each lang's most-specific-first order. docs
-    default `["**/*.md"]`, plus `docs/**` iff a docs/ path exists. Empty/garbled tree →
-    ([], [], ["**/*.md"]) — never raises."""
+def _flat_globs(scopes: list[LangScope], paths: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """Flatten per-language scopes into the (code, tests, docs) `[repo]` defaults: code/tests
+    are the dominant-first union (first-wins dedup, each lang's most-specific-first order
+    preserved); docs default `["**/*.md"]` + `docs/**` iff a docs/ path exists."""
     docs = ["**/*.md"]
     if any(p.startswith("docs/") for p in paths):
         docs.append("docs/**")
@@ -1828,8 +1829,14 @@ def guess_globs(paths: list[str]) -> tuple[list[str], list[str], list[str]]:
                     out.append(g)
         return out
 
-    scopes = guess_scopes(paths)
     return (_union([s.code for s in scopes]), _union([s.tests for s in scopes]), docs)
+
+
+def guess_globs(paths: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """(code, tests, docs) globs — the FLAT union over `guess_scopes` (every detected language),
+    kept for the `[repo]` defaults + the single-language contract (a one-lang repo's output is
+    byte-identical to the old dominant pick). Empty/garbled tree → ([], [], ["**/*.md"])."""
+    return _flat_globs(guess_scopes(paths), paths)
 
 
 def detect_test_command(cwd: str) -> tuple[str | None, str | None]:
@@ -2052,8 +2059,8 @@ def scan_repo(cwd: str) -> RepoScan:
     """Orchestrate the deterministic facts: tracked paths → globs; default branch; test
     command; each CLAUDE.md/AGENTS.md → scan_house_rules → dedup → rank."""
     paths = _tracked_paths(cwd)
-    code, tests, docs = guess_globs(paths)
-    languages = guess_scopes(paths)  # per-language breakdown for per-subtree authoring (#19)
+    languages = guess_scopes(paths)             # per-language breakdown (#19); scanned once...
+    code, tests, docs = _flat_globs(languages, paths)  # ...and flattened to the [repo] defaults
     branch = _detect_default_branch(cwd)
     cmd, src = detect_test_command(cwd)
     cm_paths = [p for p in paths if _path_matches(p, ["**/CLAUDE.md", "**/AGENTS.md"])]

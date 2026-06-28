@@ -1,0 +1,7 @@
+diff --git a/site/src/widget.ts b/site/src/widget.ts
+new file mode 100644
+index 0000000..6666666
+--- /dev/null
++++ b/site/src/widget.ts
+@@ -0,0 +1 @@
++export const init = () => { console.warn("site widget debug", props); };

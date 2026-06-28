@@ -1005,13 +1005,36 @@ class TestGuessScopes(unittest.TestCase):
         tests = guess_globs(paths)[1]
         self.assertEqual(tests.count("tests/**"), 1)
 
-    def test_max_langs_cap(self):
-        # never emit more than _MAX_LANGS languages even when more clear the floor
+    def test_no_language_cap_every_floor_clearer_covered(self):
+        # NO max-lang cap: every floor-clearing language is in the breakdown AND the flat union
+        # (a cap would leave the lowest-ranked langs' files matched by no glob — under-coverage)
         n = R._SECONDARY_MIN_FILES + 5
         paths = ([f"a{i}.py" for i in range(n)] + [f"b{i}.rs" for i in range(n)]
                  + [f"c{i}.go" for i in range(n)] + [f"d{i}.rb" for i in range(n)]
                  + [f"e{i}.java" for i in range(n)])
-        self.assertLessEqual(len(R.guess_scopes(paths)), R._MAX_LANGS)
+        self.assertEqual(len(R.guess_scopes(paths)), 5)
+        code = guess_globs(paths)[0]
+        for ext in (".py", ".rs", ".go", ".rb", ".java"):   # no language left uncovered
+            self.assertTrue(any(ext in g for g in code), ext)
+
+    def test_multi_ext_fallback_covers_present_exts(self):
+        # node is multi-ext (.ts/.tsx/.js/.jsx); a flat .tsx-only / lib-.js subtree whose curated
+        # globs all miss must fall back to a glob that MATCHES its files, not a dead **/*.ts
+        tsx = [f"a{i}.py" for i in range(40)] + [f"comp{i}.tsx" for i in range(15)]   # root .tsx, no src/
+        node = next(ls for ls in R.guess_scopes(tsx) if ls.name == "node")
+        self.assertTrue(any(R._glob_to_re(g).match("comp0.tsx") for g in node.code))
+        self.assertNotIn("**/*.ts", node.code)   # the old dead fallback must be gone
+        libjs = [f"a{i}.py" for i in range(40)] + [f"lib/m{i}.js" for i in range(15)]
+        node2 = next(ls for ls in R.guess_scopes(libjs) if ls.name == "node")
+        self.assertTrue(any(R._glob_to_re(g).match("lib/m0.js") for g in node2.code))
+
+    def test_secondary_floor_clamp_on_tiny_repo(self):
+        # the min(_SECONDARY_MIN_FILES, dominant) clamp: a near-parity secondary enters on a tiny
+        # repo (5 rs + 5 py → both), but one below parity does not (5 rs + 4 py → rust only)
+        self.assertEqual(sorted(ls.name for ls in R.guess_scopes(
+            [f"r{i}.rs" for i in range(5)] + [f"p{i}.py" for i in range(5)])), ["python", "rust"])
+        self.assertEqual([ls.name for ls in R.guess_scopes(
+            [f"r{i}.rs" for i in range(5)] + [f"p{i}.py" for i in range(4)])], ["rust"])
 
     def test_empty_and_no_code_safe(self):
         self.assertEqual(R.guess_scopes([]), [])
@@ -3579,10 +3602,14 @@ class TestMonorepoExample(unittest.TestCase):
         rc, _ = _quiet(R.cmd_fixture, self.mono, self._fx("rust-dbg.diff"), expect_block="no-rust-dbg")
         self.assertEqual(rc, 0)
 
-    def test_js_console_blocks_in_extension_subtree(self):
-        # the fixture touches the extension/ subtree — proves the COMPOSED multi-glob scope covers it
-        rc, _ = _quiet(R.cmd_fixture, self.mono, self._fx("js-console.diff"), expect_block="no-js-console")
-        self.assertEqual(rc, 0)
+    def test_js_console_blocks_every_composed_subtree(self):
+        # no-js-console's scope COMPOSES 4 literal globs (site+extension × .ts+.tsx). Each needs a
+        # single-subtree fixture, else a typo in any one glob silently under-covers with no failure.
+        for fx in ("js-console.diff", "js-console-site-ts.diff",
+                   "js-console-site-tsx.diff", "js-console-ext-tsx.diff"):
+            with self.subTest(fixture=fx):
+                rc, _ = _quiet(R.cmd_fixture, self.mono, self._fx(fx), expect_block="no-js-console")
+                self.assertEqual(rc, 0)
 
     def test_py_debugger_blocks_in_scripts_subtree(self):
         rc, _ = _quiet(R.cmd_fixture, self.mono, self._fx("py-debugger.diff"), expect_block="no-py-debugger")

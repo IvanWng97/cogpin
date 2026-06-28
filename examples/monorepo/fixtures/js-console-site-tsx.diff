@@ -1,0 +1,7 @@
+diff --git a/site/src/Page.tsx b/site/src/Page.tsx
+new file mode 100644
+index 0000000..7777777
+--- /dev/null
++++ b/site/src/Page.tsx
+@@ -0,0 +1 @@
++export const Page = () => { console.log("render", state); return null; };
