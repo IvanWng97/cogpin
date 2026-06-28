@@ -3136,15 +3136,17 @@ def _config_advisories(cfg: Config) -> list[str]:
 
 
 def cmd_validate(path: str) -> int:
+    # `os.path.isdir` (not an `except IsADirectoryError`): Windows raises PermissionError, not
+    # IsADirectoryError, on `open(<dir>)` — the explicit check is the portable path.
+    if os.path.isdir(path):
+        print(f"cogpin: expected a file, not a directory: {path} (pass the path to a cogpin.toml)",
+              file=sys.stderr)
+        return 1
     try:
         with open(path, encoding="utf-8") as fh:
             cfg = Config.parse(fh.read())
     except FileNotFoundError:
         print(f"cogpin: config file not found: {path} (expected a .toml file)", file=sys.stderr)
-        return 1
-    except IsADirectoryError:
-        print(f"cogpin: expected a file, not a directory: {path} (pass the path to a cogpin.toml)",
-              file=sys.stderr)
         return 1
     except (OSError, ConfigError) as e:
         print(f"cogpin: invalid config: {e}", file=sys.stderr)
