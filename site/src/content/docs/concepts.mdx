@@ -18,7 +18,7 @@ A/M/D status, the command string, the current branch, PR/commit metadata, review
 approvals. Only facts may hard-block. Anything that needs **judgment** — an LLM-judge, a
 self-attestation the agent ticks — is **advisory**: it warns or nudges, never blocks.
 
-This is the whole guarantee. A forgetful or over-confident agent can’t pass a block it
+This one rule is the whole guarantee — what we mean by ratchet’s “moat.” A forgetful or over-confident agent can’t pass a block it
 didn’t actually satisfy, because it never wrote the evidence the block reads. And the
 boundary can’t silently erode, because `validate` rejects any `block` that isn’t a `fact`.
 The honest flip side: anything genuinely semantic (did the test *meaningfully* exercise the
@@ -27,6 +27,15 @@ change? is this refactor safe?) stays advisory — ratchet surfaces it, a human 
 ## Two layers, one config
 
 <img src={`${base}assets/layers.svg`} alt="The agent layer and the change layer enforce the same config twice" style="width:100%;max-width:840px;display:block;margin:1rem auto;" />
+
+<details>
+<summary>Text version of the diagram</summary>
+
+Two enforcement points, one config: the **agent layer** (Claude Code `PreToolUse` / `Stop`,
+live as the agent works, bypassable) and the **change layer** (git pre-push + CI,
+authoritative, base-pinned, ignores the bypass). The table below is the full breakdown.
+
+</details>
 
 | Layer | Fires at | Authority |
 |---|---|---|
@@ -44,6 +53,15 @@ being gated on**.
 
 <img src={`${base}assets/bypass.svg`} alt="Base-pinning: the gate is read from the base ref, not the PR head" style="width:100%;max-width:840px;display:block;margin:1rem auto;" />
 
+<details>
+<summary>Text version of the diagram</summary>
+
+ratchet reads `ratchet.toml` from the **base ref**, not the PR head. So a diff that relaxes
+a check is judged against the *old* policy — the secret it adds is still blocked even if the
+PR’s own config has zero blocks left. The diff can’t loosen the gate that gates it.
+
+</details>
+
 - **Base-pinning** — `ratchet.toml` (and your gate-defining files) are read from the pinned
   base ref, never the PR head. A same-PR edit that relaxes a check is evaluated against the
   *old* policy, so it can’t disarm itself.
@@ -54,7 +72,7 @@ being gated on**.
 ## Coverage map
 
 The primitive library isn’t a guess. Its fact-kind rules were derived two ways: a
-first-principles pass over the closing-discipline, then an **empirical mining** of real
+first-principles pass over how agents cut corners, then an **empirical mining** of real
 AI-authored history — a 30-agent sweep over nine corpora (the Claude Code issue tracker,
 public `CLAUDE.md`/`AGENTS.md` repos, AI-authored reverts, a real review ledger, competitor
 rule sets) that produced 95 findings, 19 candidate gaps, and **six** adversarially-verified
@@ -67,7 +85,7 @@ fact-kind gaps.
 | Lower a coverage threshold / raise retries | `numeric_floor` | 20+ real commits in ~6 weeks (85→75, →19%, →5%) |
 | Commit a multi-MB binary (zero diff lines) | `max_added_file_bytes` | invisible to every line-based rule; mirrors pre-commit’s most-installed hook |
 | `[skip ci]` to disarm the host | `forbid_in_message` | one token disarms the change layer’s own CI |
-| Approve-then-push games (stale / self / bot) | `approval_state_depth` | the gameable shape behind a bare approval check |
+| Approve-then-push games (stale / self / bot) | `approval_policy` | the gameable shape behind a bare approval check |
 
 The eight **semantic-weakening** classes a fact can’t prove — assertion-loosening, fake
 implementation, regex relaxing, guard removal, silent fallback, tautological test, scope

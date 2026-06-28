@@ -36,7 +36,7 @@ from ratchet import (  # noqa: E402
     _replace_or_append_block,
     _strip_block,
     _ticked,
-    approval_state_depth,
+    approval_policy,
     attestation_gaps,
     change_budget,
     change_classes,
@@ -179,6 +179,7 @@ class TestPrimitives(unittest.TestCase):
             '[[check]]\nid="s"\nkind="fact"\nseverity="block"\nprimitive="secret_scan"\n'
             'forbid_paths=[".env", "*.pem"]\ncustom=["re_[A-Za-z0-9]{16,}"]'
         )
+        # DiffFacts shapes used throughout: added/removed = (path, line); changed = (status, path) with status A/M/D
         f = DiffFacts(added=[("src/a.rs", 'let k = "re_abcdefabcdefabcdef";')])
         self.assertIsNotNone(secret_scan(c, f))
         # forbidden path at root AND nested (basename match), but not on delete
@@ -275,11 +276,14 @@ class TestPrimitives(unittest.TestCase):
         self.assertIsNone(forbid_pattern(c, DiffFacts(added=[("src/a.rs", 'let x = "--no-verify";')]), r))
 
     def test_commit_footer_requires_every_commit(self):
+        # commit_footer is meta-driven (the footer is [meta].commit_footer, not a check
+        # field), so it takes (check, footer_rx, facts) — check is only for the id-prefix.
+        cf = one_check('[[check]]\nid="cf"\nkind="fact"\nseverity="warn"\nprimitive="commit_footer"')
         pat = r"Co-Authored-By: Claude"
         ok = DiffFacts(commit_msgs=["feat: x\n\nCo-Authored-By: Claude Opus"])
         bad = DiffFacts(commit_msgs=["feat: y"])
-        self.assertIsNone(commit_footer(pat, ok))
-        self.assertIsNotNone(commit_footer(pat, bad))
+        self.assertIsNone(commit_footer(cf, pat, ok))
+        self.assertIsNotNone(commit_footer(cf, pat, bad))
 
     def test_protected_path_skips_without_pr_context(self):
         c = one_check(
@@ -761,9 +765,11 @@ class TestMinedPrimitives(unittest.TestCase):
 
 
 class TestFullCoverage(unittest.TestCase):
-    """The remaining ranked + mined gaps that complete the coverage map: count budgets,
-    positive content, message-require, byte size, self-protect, and the PR-review-API
-    family (reviews/head_sha/pr_author/checks facts)."""
+    """The remaining ranked + mined gaps that complete the coverage map. Primitives:
+    change_budget, file_must_contain, max_added_file_bytes, require_message_pattern,
+    self_protect, and the PR-review-API family — protected_path, require_approval_from,
+    pattern_requires_approval, approval_policy, require_checks_green
+    (reviews/head_sha/pr_author/checks facts)."""
 
     def test_change_budget(self):
         c = one_check('[[check]]\nid="cb"\nkind="fact"\nseverity="warn"\nprimitive="change_budget"\nmax_added=5\nmax_files=2')
@@ -851,24 +857,35 @@ class TestFullCoverage(unittest.TestCase):
         nomatch = DiffFacts(added=[("Cargo.toml", "# just a comment")], pr_author="zoe", reviews=[])
         self.assertIsNone(pattern_requires_approval(c, nomatch, r))
 
+    # name kept as test_approval_state_depth — editing this `def test_` line (e.g. renaming to
+    # approval_policy) registers as a removal and trips this repo's own keep-tests gate.
     def test_approval_state_depth(self):
         c = one_check(
-            '[[check]]\nid="asd"\nkind="fact"\nseverity="block"\nprimitive="approval_state_depth"\n'
+            '[[check]]\nid="asd"\nkind="fact"\nseverity="block"\nprimitive="approval_policy"\n'
             'require_fresh=true\nno_changes_requested=true\ndisallow_author=true\ndisallow_bot=true\nmin_approvals=1'
         )
-        self.assertIsNone(approval_state_depth(c, DiffFacts()))  # no PR ctx → skip
+        self.assertIsNone(approval_policy(c, DiffFacts()))  # no PR ctx → skip
         ok = DiffFacts(head_sha="abc", pr_author="alice", reviews=[{"login": "bob", "state": "APPROVED", "commit_id": "abc", "is_bot": False}])
-        self.assertIsNone(approval_state_depth(c, ok))
+        self.assertIsNone(approval_policy(c, ok))
         stale = DiffFacts(head_sha="abc", pr_author="alice", reviews=[{"login": "bob", "state": "APPROVED", "commit_id": "OLD", "is_bot": False}])
-        self.assertIsNotNone(approval_state_depth(c, stale))  # approval not on head
+        self.assertIsNotNone(approval_policy(c, stale))  # approval not on head
         sa = DiffFacts(head_sha="abc", pr_author="alice", reviews=[{"login": "alice", "state": "APPROVED", "commit_id": "abc", "is_bot": False}])
-        self.assertIsNotNone(approval_state_depth(c, sa))     # self-approval
+        self.assertIsNotNone(approval_policy(c, sa))     # self-approval
         cr = DiffFacts(head_sha="abc", pr_author="alice", reviews=[
             {"login": "bob", "state": "APPROVED", "commit_id": "abc", "is_bot": False},
             {"login": "carol", "state": "CHANGES_REQUESTED", "commit_id": "abc", "is_bot": False}])
-        self.assertIsNotNone(approval_state_depth(c, cr))     # outstanding changes-requested
+        self.assertIsNotNone(approval_policy(c, cr))     # outstanding changes-requested
         bot = DiffFacts(head_sha="abc", pr_author="alice", reviews=[{"login": "dependabot", "state": "APPROVED", "commit_id": "abc", "is_bot": True}])
-        self.assertIsNotNone(approval_state_depth(c, bot))    # bot-only approval
+        self.assertIsNotNone(approval_policy(c, bot))    # bot-only approval
+
+    def test_approval_policy_fresh_is_fail_closed_on_missing_commit(self):
+        # a review with no recorded commit_id is NOT fresh (fail-closed) — consistent with
+        # protected_path. In CI action.yml always supplies commit_id, so this pins the edge.
+        c = one_check('[[check]]\nid="ap"\nkind="fact"\nseverity="block"\nprimitive="approval_policy"\n'
+                      'require_fresh=true\nmin_approvals=1')
+        f = DiffFacts(head_sha="abc", pr_author="alice",
+                      reviews=[{"login": "bob", "state": "APPROVED", "commit_id": None, "is_bot": False}])
+        self.assertIsNotNone(approval_policy(c, f))  # no commit_id ⇒ not fresh ⇒ blocks
 
     def test_require_checks_green(self):
         c = one_check('[[check]]\nid="rcg"\nkind="fact"\nseverity="block"\nprimitive="require_checks_green"')
@@ -1057,7 +1074,7 @@ class TestHouseRuleScan(unittest.TestCase):
         self.assertLess(ids.index("secret-scan"), ids.index("deferral-has-issue"))
 
 
-def _scan(rules_text="", branch="main", cmd="just test"):
+def _reposcan(rules_text="", branch="main", cmd="just test"):
     from ratchet import scan_house_rules
     return RepoScan(
         default_branch=branch, code=["src/**/*.py"], tests=["tests/**/*.py"], docs=["**/*.md"],
@@ -1070,10 +1087,10 @@ class TestSuggestRender(unittest.TestCase):
     """render_suggest_toml — an all-warn (+commented/judge) starter that always parses."""
 
     def test_render_validates(self):
-        Config.parse(render_suggest_toml(_scan("Run the tests. Two-lens review. Don't loosen an assertion.")))
+        Config.parse(render_suggest_toml(_reposcan("Run the tests. Two-lens review. Don't loosen an assertion.")))
 
     def test_render_is_all_warn_except_safe_core(self):
-        cfg = Config.parse(render_suggest_toml(_scan("Use conventional commits. Keep docs current.")))
+        cfg = Config.parse(render_suggest_toml(_reposcan("Use conventional commits. Keep docs current.")))
         by_id = {c.id: c for c in cfg.checks}
         blocks = {c.id for c in cfg.checks if c.severity == "block"}
         # protected-gate-files is born warn (solo repos have no independent approver); the
@@ -1083,18 +1100,18 @@ class TestSuggestRender(unittest.TestCase):
         self.assertEqual(by_id["protected-gate-files"].primitive, "protected_path")
 
     def test_render_has_draft_banner_and_todos(self):
-        toml = render_suggest_toml(_scan("Use conventional commits."))
+        toml = render_suggest_toml(_reposcan("Use conventional commits."))
         self.assertIn("ratchet.toml.draft", toml)
         self.assertIn("# TODO(ratchet:review)", toml)
 
     def test_render_commented_blocks_for_run_and_approval(self):
-        toml = render_suggest_toml(_scan("Run the tests. Owner approval from CODEOWNERS. Stay in scope."))
+        toml = render_suggest_toml(_reposcan("Run the tests. Owner approval from CODEOWNERS. Stay in scope."))
         # run / require_approval_from / scope_lock render commented-out
         self.assertIn("# [[check]]", toml)
         self.assertNotIn('\nid = "tests-pass"', toml)  # only its commented form
 
     def test_render_includes_repo_and_base_pinned(self):
-        toml = render_suggest_toml(_scan())
+        toml = render_suggest_toml(_reposcan())
         self.assertIn("base_pinned = true", toml)
         self.assertIn('default_branch =', toml)
 
@@ -1104,11 +1121,11 @@ class TestDraftLint(unittest.TestCase):
 
     def _base(self, rules=""):
         # a render with no markers cleared: strip markers to get a clean armed-or-advisory draft
-        return render_suggest_toml(_scan(rules))
+        return render_suggest_toml(_reposcan(rules))
 
     def _clean(self):
         # safe-core only, no house-rules → zero markers → clean
-        return render_suggest_toml(_scan(""))
+        return render_suggest_toml(_reposcan(""))
 
     def _levels(self, text, existing=None, head=None):
         return [f.level for f in draft_lint(text, existing_cfg=existing, head_facts=head)]
@@ -1223,11 +1240,11 @@ class TestMoatPreservation(unittest.TestCase):
         "change_budget", "file_must_contain", "max_added_file_bytes", "path_requires",
         "cooccur", "marker_present", "forbid_in_message", "require_message_pattern",
         "commit_footer", "protected_path", "require_approval_from", "pattern_requires_approval",
-        "approval_state_depth", "require_checks_green", "run",
+        "approval_policy", "require_checks_green", "run",
     }
 
     def test_suggest_introduces_no_nonfact_block(self):
-        cfg = Config.parse(render_suggest_toml(_scan(
+        cfg = Config.parse(render_suggest_toml(_reposcan(
             "Run the tests. Two-lens review. Conventional commits. Don't loosen an assertion. "
             "Owner approval. Coverage must not drop. No [skip ci]. Keep docs current."
         )))

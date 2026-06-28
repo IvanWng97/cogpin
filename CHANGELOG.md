@@ -1,10 +1,32 @@
 # Changelog
 
 All notable changes to ratchet. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
-this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The
-config `schema` version is separate and bumps only on a breaking config change.
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html). ratchet is on a **0.x** line, so the
+primitive / CLI surface may still change between minors — pin the action to a SHA for full
+reproducibility. The config `schema` version is separate and bumps only on a breaking config change.
 
-## [Unreleased]
+## [0.2.0] — 2026-06-27
+
+Version reset. The `1.0.0` tag was premature for a no-customers, still-stabilizing project,
+so ratchet is back on an honest **0.x** line and the action ref is now `@v0`. A real `1.0`
+ships once the primitive surface and config `schema` are frozen.
+
+### Changed (breaking)
+- **Primitive `approval_state_depth` → `approval_policy`** — the old name described nothing.
+  Rename any `primitive = "approval_state_depth"` in your `ratchet.toml`.
+- **Action ref `@v1` → `@v0`** — `uses: IvanWng97/ratchet@v0` (and the `/v0/` raw-engine URL).
+
+### Hardening
+- **Approval freshness is now uniformly fail-closed.** The three duplicated approval-filter
+  loops are consolidated into one `_approved_reviews` helper; `protected_path` previously
+  counted an approval with a *missing* `commit_id` as valid (fail-open) — a missing or
+  mismatched commit no longer qualifies, matching `approval_policy`.
+
+### Internal & docs
+- Engine clarity pass — `forbid_pattern` / `numeric_floor` WHY-docs, grouped `Check` fields,
+  `commit_footer` id-prefixed reason, a single `CommandFacts.from_tool_input`.
+- README mermaid diagrams (base-pinning flow, two-layer sequence) + `<details>` folds;
+  `SCHEMA.md` worked `[[check]]` example; site copy clarified + SVG text fallbacks.
 
 ### Fixed (PR #1 two-lens-review follow-ups)
 - **`require_checks_green` self-race (#5)** — when ratchet runs as a job in the same workflow
@@ -25,12 +47,10 @@ config `schema` version is separate and bumps only on a breaking config change.
   the flag did nothing. `ratchet uninstall --no-hook` now exits non-zero (unrecognized argument)
   rather than no-op'ing. `install --no-hook` is unaffected.
 
-## [1.0.0] — 2026-06-27
+## [1.0.0] — withdrawn
 
-First stable release. The `@v1` floating major tag and the `/v1/` raw-engine URL
-now resolve; `IvanWng97/ratchet@v1` and the curl install are live. SemVer applies
-to the v1 surface from here — features and fixes ship as v1.x; a breaking change
-goes to `v2`. The config `schema` version (currently `1`) is a separate lever.
+Tagged prematurely (no customers, the surface was still moving) and rolled back into the
+0.x line above; kept as a record of what shipped. The notes below are historical.
 
 ### Security / hardening (two-lens review of the adoption arc)
 - **`protected_path` now requires a FRESH, human, non-author approval** when the `reviews`
@@ -74,7 +94,7 @@ goes to `v2`. The config `schema` version (currently `1`) is a separate lever.
   `# TODO(ratchet:review)` markers), and `ratchet gaps` (which house-rules no check binds).
   The AI writes the draft; the human's `mv …draft …toml` rename is the sign-off, and only
   the five safe-core ids may be born at `severity="block"`.
-- `action.yml` — a composite GitHub Action (`uses: IvanWng97/ratchet@v1`) running its own
+- `action.yml` — a composite GitHub Action (`uses: IvanWng97/ratchet@v0`) running its own
   **rev-pinned** engine over the consumer's **base-pinned** config (`engine: pinned`), so
   neither judge nor policy is read from the PR head. It bakes the gh fact-gathering (PR
   body, reviews via GraphQL → the flat shape the engine consumes, checks, approvals,
@@ -98,7 +118,7 @@ goes to `v2`. The config `schema` version (currently `1`) is a separate lever.
   review from a named owner.
 - `pattern_requires_approval` — an added line matching a pattern (a new dependency, an
   `unsafe`) needs an independent approval.
-- `approval_state_depth` — fresh-on-head / human / non-author / no-`CHANGES_REQUESTED`
+- `approval_policy` — fresh-on-head / human / non-author / no-`CHANGES_REQUESTED`
   approval depth the bare "approved" badge can't express.
 - `require_checks_green` — every required status check must have concluded `success`.
 - New PR-fact CLI flags on `ratchet check`: `--reviews-file`, `--head-sha`,

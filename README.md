@@ -23,7 +23,7 @@ A **fact** decides only over things the agent can't fake — the normalized diff
 the command it's about to run, PR/commit metadata, reviewer approvals. Those may
 hard-block. Anything that needs *judgment* (an LLM-judge, a self-attestation) is
 **advisory** — it warns or nudges, never blocks. That single invariant is the
-whole moat: a forgetful or over-confident agent can't pass a block it didn't
+whole guarantee — ratchet's "moat": a forgetful or over-confident agent can't pass a block it didn't
 actually satisfy, because **it never authored the evidence the block reads.**
 
 One language-agnostic engine, one per-repo `ratchet.toml`. The engine reads git
@@ -38,6 +38,21 @@ Every shortcut an agent takes to *look* done maps to a fact it can't author. The
 right-hand column is the ungameable signal each rule reads:
 
 <p align="center"><img src="assets/catches.svg" alt="Each corner-cut and the fact that catches it" width="840"></p>
+
+<details><summary><b>Same mapping in text</b> — for screen readers / narrow screens</summary>
+
+| corner-cut the agent takes | the fact that catches it |
+|---|---|
+| strip an assertion / guard line | `forbid_removal` — a *removed* line in scope |
+| delete the failing test file | `forbid_delete` — file D-status |
+| commit straight to `main` | `forbid_commit_on_branch` — the live branch |
+| `--no-verify` to skip the hook | `forbid_command` — the normalized command verb |
+| lower a coverage threshold (85→75) | `numeric_floor` — the value's *direction* |
+| edit a subsystem outside the task | `scope_lock` — the A/M/D allowlist |
+| commit a secret / `.env` / key | `secret_scan` — token shapes + forbidden paths |
+| "I reviewed it" when it wasn't | `protected_path` / `attest` — approval facts |
+
+</details>
 
 The three **NEW** rules close the canonical "make CI green by doing less"
 corner-cuts that pure pattern-matching is blind to — they extend the engine's
@@ -88,7 +103,21 @@ ratchet doesn't replace `CLAUDE.md`; it's the mechanism half of the idea your
 
 ## Two layers, one config
 
-<p align="center"><img src="assets/layers.svg" alt="The agent layer and the change layer enforce the same config twice" width="840"></p>
+The same config is enforced twice — once *live* as the agent works, once *authoritatively*
+in CI. When each fires:
+
+```mermaid
+sequenceDiagram
+    actor A as AI agent
+    participant AL as Agent layer (live)
+    participant CL as Change layer (CI)
+    A->>AL: --no-verify / commit to main
+    AL-->>A: ❌ denied in real time — bypassable, logged
+    A->>AL: end turn, tests unrun
+    AL-->>A: ⚠ Stop nag: DoD not met
+    A->>CL: git push / open PR
+    CL-->>A: ✅ / ❌ base-pinned gate — un-bypassable
+```
 
 | Layer | Fires at | Authority |
 |---|---|---|
@@ -133,12 +162,13 @@ CI, base-pinned, un-bypassable) is per-repo. Run once, inside Claude Code:
 /ratchet-init
 ```
 
-That single command runs `ratchet install` — vendors the single-file engine to
-`.ratchet/ratchet.py`, scaffolds `ratchet.toml`, wires a pre-push managed block
-into your effective hooks dir (coexisting with any husky/lefthook/pre-commit you
-already run — it appends, never clobbers), and scaffolds
-`.github/workflows/ratchet.yml` — then drafts a project-specific policy from your
-`CLAUDE.md` house rules **as `ratchet.toml.draft` for you to review and rename**.
+That single command runs `ratchet install`, which (idempotently, never clobbering):
+
+- **vendors** the engine to `.ratchet/ratchet.py` — committed, so every clone has it;
+- **scaffolds** a starter `ratchet.toml`;
+- **appends** a pre-push managed block to your effective hooks dir (coexists with husky / lefthook / pre-commit);
+- **scaffolds** `.github/workflows/ratchet.yml`;
+- **drafts** a project-specific policy from your `CLAUDE.md` house rules as `ratchet.toml.draft`, for you to review and rename.
 Commit `.ratchet/ratchet.py`, `ratchet.toml`, and the workflow, and every clone —
 every agent, every PR — meets the same gate. Then `/ratchet-doctor` confirms both
 layers are live. No npm, no package manager, no binary download — one
@@ -154,7 +184,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with: { fetch-depth: 0 }          # base-pinning needs history
-      - uses: IvanWng97/ratchet@v1         # rev-pinned engine over your base-pinned config
+      - uses: IvanWng97/ratchet@v0         # rev-pinned engine over your base-pinned config
 ```
 
 The action runs its **own rev-pinned `ratchet.py`** (not the repo's head-side copy)
@@ -162,6 +192,8 @@ over your **base-pinned `ratchet.toml`** — so a PR can neither rewrite the eng
 `exit 0` nor relax the policy in the same diff it's gated on. It also gathers the PR
 facts (body, reviews, checks, approvals) so the reviewer-identity and checks-green
 primitives work with zero extra config.
+
+<details><summary><b>Not on GitHub Actions? / No Claude Code?</b></summary>
 
 **Not on GitHub Actions?** The engine is the same everywhere. A teammate who wants
 their *local* pre-push (CI already gates them) runs
@@ -175,18 +207,31 @@ pointing at the same vendored engine (`entry: python3 .ratchet/ratchet.py check`
 > **No Claude Code?** The change layer is tool-agnostic. Vendor the engine once
 > without the plugin — pin a tag and fetch the one file, then `install --no-vendor`:
 > ```sh
-> mkdir -p .ratchet && curl -fsSL https://raw.githubusercontent.com/IvanWng97/ratchet/v1/ratchet.py -o .ratchet/ratchet.py
+> mkdir -p .ratchet && curl -fsSL https://raw.githubusercontent.com/IvanWng97/ratchet/v0/ratchet.py -o .ratchet/ratchet.py
 > python3 .ratchet/ratchet.py install --no-vendor   # wires hook + CI + gitignore
 > ```
 > It's a documented one-liner, not a bootstrapper to maintain — every later install
 > re-runs the already-committed engine.
+
+</details>
 
 ## Why it's bypass-proof
 
 A `fact` block is only ungameable if the agent can't edit the gate **in the same
 diff it's being gated on**.
 
-<p align="center"><img src="assets/bypass.svg" alt="Base-pinning: the gate is read from the base ref, not the PR head" width="840"></p>
+```mermaid
+flowchart LR
+    subgraph prhead["the agent's PR (head)"]
+      cfg["ratchet.toml<br/>blocks → warns"]
+      secret["the diff<br/>adds a secret"]
+    end
+    base["ratchet.toml at the BASE ref<br/>blocks intact"]
+    cfg -. "ignored — policy is never<br/>read from the PR head" .-> check
+    base ==> check{{"ratchet check"}}
+    secret ==> check
+    check ==> out["🔒 secret still BLOCKED<br/>the diff can't loosen<br/>the gate that gates it"]
+```
 
 1. **Base-pinning** — `ratchet.toml` (and your gate-defining files) are read from
    the pinned base ref, never the PR head. A same-PR edit that relaxes a check is
@@ -245,6 +290,8 @@ Every check reads only facts — never your code.
 (first-principles vs mined from real AI-authored failures) is in
 [`docs/coverage-map.md`](docs/coverage-map.md).
 
+<details><summary><b>All 23 primitives</b> — full field reference in <a href="SCHEMA.md"><code>SCHEMA.md</code></a></summary>
+
 | primitive | kind | decides over |
 |---|---|---|
 | `forbid_command{pattern,deny}` | fact | the agent's command string — `deny` matches the **normalized** verb, defeating `git -C/p push` / `cd d && …` / `env X=Y …` wrappers (agent layer) |
@@ -268,11 +315,13 @@ Every check reads only facts — never your code.
 | `protected_path{paths,require_approval}` | fact | gate-defining files changed → need a **fresh, human, non-author** approval (CI; `warn` by default on solo repos, promote to `block` with a reviewer) |
 | `require_approval_from{paths,require_approval_from,exclude_author}` | fact | a change under `paths` needs an APPROVED review from a named owner (CODEOWNERS-lite; CI) |
 | `pattern_requires_approval{pattern,scope,exclude_author}` | fact | an added line matching `pattern` (a new dep, an `unsafe`) needs an independent approval (CI) |
-| `approval_state_depth{require_fresh,no_changes_requested,disallow_author,disallow_bot,min_approvals}` | fact | the approval is fresh (on head), human, non-author, with no outstanding changes-requested (CI) |
+| `approval_policy{require_fresh,no_changes_requested,disallow_author,disallow_bot,min_approvals}` | fact | the approval is fresh (on head), human, non-author, with no outstanding changes-requested (CI) |
 | `require_checks_green{need,ignore}` | fact | every (required) status check concluded `success` (CI); `ignore` excludes ratchet's own same-run job |
 | `run{cmd}` | fact\* | shell-out; the exit code is the fact (**`block` only at the change layer**) |
 | `attest{box,class}` | advisory | a class-gated `Stop`-hook checklist box — blocks turn-end until ticked (forcing function; the change layer is the ungameable gate) |
 | `judge{prompt}` | advisory | an advisory LLM-judge prompt (CI `continue-on-error` substance check) |
+
+</details>
 
 ### What it does and doesn't claim
 
@@ -334,8 +383,9 @@ guard this very repo with the primitives it ships.
 
 ## Status
 
-v0.1 — engine (23 primitives) + Claude Code plugin (agent layer) + one-command
+**v0.2.0 — early stage (0.x; the primitive / CLI surface may still change between
+minors).** Engine (23 primitives) + Claude Code plugin (agent layer) + one-command
 `/ratchet-init` wiring (`install` / `uninstall` / `doctor`) + AI-assisted config
 draft (`suggest` / `draft-lint` / `gaps`) + a rev-pinned composite GitHub Action
-(change layer) + tutorial site. Stdlib Python (3.11+), no third-party deps, no
-package manager. MIT.
+(`@v0`, change layer) + tutorial site. Stdlib Python (3.11+), no third-party deps,
+no package manager. MIT.

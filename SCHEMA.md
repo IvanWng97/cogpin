@@ -63,6 +63,41 @@ to expand to these globs, or give a literal glob directly.
 All remaining keys are primitive parameters — each primitive reads only the ones
 listed for it.
 
+A complete check reads top-to-bottom as *id · is-it-ungameable · how-hard · which-evaluator · its-params*:
+
+```toml
+[[check]]
+id        = "keep-tests"        # unique
+kind      = "fact"              # ungameable → allowed to block
+severity  = "block"             # block REQUIRES kind = "fact"
+primitive = "forbid_removal"    # the evaluator
+scope     = "tests"             # a [repo] named scope, or a literal glob
+pattern   = '^\s*def test_'     # the removed-line shape that blocks
+```
+
+That blocks any diff that *deletes* a `def test_…` line under `tests/`. Two of the
+subtler primitives, inline:
+
+```toml
+# coverage can't ratchet down — blocks if `fail_under = N` drops across the diff
+[[check]]
+id = "coverage-floor"
+kind = "fact"
+severity = "block"
+primitive = "numeric_floor"
+key = 'fail_under\s*=\s*(\d+)'  # group 1 = the tracked value
+direction = "no_decrease"
+
+# touch the engine → you must touch a test (else just warn)
+[[check]]
+id = "engine-needs-tests"
+kind = "fact"
+severity = "warn"
+primitive = "path_requires"
+when = "code"                  # if a code-scoped path changed…
+need = "tests"                 # …a tests-scoped path must change too
+```
+
 ### Layers
 
 - **agent** — fires at the Claude Code `PreToolUse` / `Stop` hook, in real time.
@@ -102,7 +137,7 @@ The agent's command string.
 | `forbid_removal` | `pattern`, `scope`, `exempt`, `strip_comments` | a **removed** line in scope matches `pattern` |
 | `forbid_delete` | `scope`, `unless_paired_add`, `exempt` | a file under scope is **deleted** (D-status); `unless_paired_add` suppresses a paired rename/replace |
 | `scope_lock` | `allow` | any A/M/D path falls **outside** the allowlist (an empty `allow` is inert) |
-| `numeric_floor` | `key` (regex, group 1 = value), `direction` (`no_decrease`\|`no_increase`), `floor`, `scope` | the value weakens across the −/+ hunks on the same key, or crosses `floor` |
+| `numeric_floor` | `key` (regex, group 1 = value), `direction` (`no_decrease`\|`no_increase`), `floor`, `scope` | the value weakens across the −/+ hunks on the same key, or crosses `floor` — read as a **minimum** under `no_decrease`, a **ceiling** under `no_increase` |
 | `change_budget` | `max_added`, `max_removed`, `max_files`, `max_file_added`, `scope` | a count ceiling is exceeded |
 | `file_must_contain` | `scope`, `pattern`, `status` (default `A`) | a changed file of `status` in scope adds **no** line matching `pattern` |
 | `max_added_file_bytes` | `maxkb`, `allow_binary`, `scope` | an added/modified file exceeds `maxkb`, or is binary while `allow_binary=false` |
@@ -127,7 +162,7 @@ The agent's command string.
 | `protected_path` | `paths`, `require_approval` | a gate-defining file changed without a **fresh, human, non-author** approval — when the `reviews` fact is present (CI), the approval must be on the current `head_sha`, not a bot, and not the author, so an approval of an earlier benign commit can't cover a later one (a flat `--approvals` list with no review metadata is only a degraded fallback). Born `warn` in the scaffold for solo repos (no independent approver); promote to `block` with a reviewer |
 | `require_approval_from` | `paths`, `require_approval_from` (logins), `exclude_author` | a change under `paths` has no APPROVED review from a listed owner |
 | `pattern_requires_approval` | `pattern`, `scope`, `exclude_author` | an added line in scope matches `pattern` but has no independent approval |
-| `approval_state_depth` | `require_fresh`, `no_changes_requested`, `disallow_author`, `disallow_bot`, `min_approvals` | the qualifying-approval count is below `min_approvals`, or an outstanding `CHANGES_REQUESTED` remains |
+| `approval_policy` | `require_fresh`, `no_changes_requested`, `disallow_author`, `disallow_bot`, `min_approvals` | the qualifying-approval count is below `min_approvals`, or an outstanding `CHANGES_REQUESTED` remains |
 | `require_checks_green` | `need` (allowlist of check names; empty = all), `ignore` (denylist) | a required status check did not conclude `success` |
 
 > **Same-workflow race:** when ratchet runs as a job in the *same* workflow it gates, its
@@ -194,7 +229,7 @@ exit `0`.
 `install` **vendors** the engine to `.ratchet/ratchet.py` (committed, base-pinnable,
 offline) rather than referencing `${CLAUDE_PLUGIN_ROOT}` — that var exists only in a
 live Claude session, while the change layer must run in CI / a teammate's pre-push /
-a fresh clone. The composite GitHub Action (`uses: IvanWng97/ratchet@v1`) runs its
+a fresh clone. The composite GitHub Action (`uses: IvanWng97/ratchet@v0`) runs its
 **own rev-pinned `ratchet.py`** over your **base-pinned config** by default
 (`engine: pinned`), so neither the judge (engine) nor the policy (config) is read
 from the PR head — a PR can't self-neuter the gate. `engine: vendored` runs the
@@ -202,4 +237,4 @@ consumer's HEAD `.ratchet/ratchet.py` instead, for teams that pin `.ratchet/**` 
 `protected_path` + branch protection — the action **refuses `engine: vendored` under
 `pull_request_target`** (it would execute untrusted PR-head code with a privileged
 token). Pin the action to a release SHA (`uses: IvanWng97/ratchet@<sha>`) for a
-fully reproducible engine; the `@v1` floating major tag is convenience, not a pin.
+fully reproducible engine; the `@v0` floating major tag is convenience, not a pin.

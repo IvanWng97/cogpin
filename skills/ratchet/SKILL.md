@@ -54,7 +54,7 @@ for a genuine, logged exception, not for avoiding the work.
    - name-status pairing → `path_requires`, `cooccur`
    - commit/PR message → `forbid_in_message`, `require_message_pattern`, `commit_footer`, `marker_present`
    - reviewer identity / checks (CI) → `protected_path`, `require_approval_from`,
-     `pattern_requires_approval`, `approval_state_depth`, `require_checks_green`
+     `pattern_requires_approval`, `approval_policy`, `require_checks_green`
    - language-specific (lint/test exit code) → `run` (**`block` only at the change layer**)
    - forcing functions → `attest` (Stop checklist), `judge` (advisory LLM prompt)
 3. Keep `base_pinned = true`. Add gate-defining files (`ratchet.toml`,
