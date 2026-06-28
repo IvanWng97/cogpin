@@ -1,0 +1,312 @@
+# ratchet recipe — THE ORACLE DELEGATION LIBRARY.
+#
+# The only moat-legal way to gate the *substance* band (does it typecheck, did it
+# build, did coverage hold, do the tests have teeth) is to block on the output of an
+# INDEPENDENT ORACLE — an environment-authored fact the gated agent cannot fabricate.
+# The engine already exposes the seams; this file is a recipe, NOT new engine code:
+#
+#   • `run`                 — shells out; the EXIT CODE is the fact (block @ change only).
+#   • `require_checks_green`— a CI status-check CONCLUSION is the fact (fail-closed on
+#                             missing/pending; supplied by `gh pr checks` in CI).
+#   • `numeric_floor`       — a tracked number in committed text; blocks a weakening move.
+#
+# All three are provenance="environment" (PRIMITIVE_SPECS): git / the OS / the PR API
+# author the fact, not a token the agent types — so per THE ONE RULE
+#   severity="block"  REQUIRES  kind="fact"  AND  provenance="environment"
+# they are the *only* primitives here allowed to hard-block on substance.
+#
+# NO in-engine per-oracle parsers: ratchet never reads coverage.xml / lcov /
+# cargo-mutants JSON / mypy text. The oracle parses its own format and exits non-zero;
+# ratchet reads the exit code (or the CI conclusion) and nothing else. The threshold /
+# regex stays consumer-supplied (in the `run` cmd or the oracle's own config file).
+#
+# ⚠ THIS IS A POLYGLOT MENU (python · ts · rust), NOT a drop-in config. Copied WHOLESALE it
+#   hard-blocks every PR: every `run` block shells out (an absent toolchain exits non-zero →
+#   block), every `require_checks_green need=[…]` is fail-CLOSED (a CI job not named exactly
+#   `coverage`/`perf-budget` counts as missing → block), and the OR-pairs (2a/2b, 4/4b) ship
+#   BOTH enabled. `validate` only checks shape — it never runs them — so a wrong row passes
+#   validate and bites in CI. ADOPT IT BY DELETING: keep the rows for YOUR stack, pick ONE of
+#   each OR-pair, wire the matching CI jobs, and (solo repo, no independent approver) downgrade
+#   the approval-gated `protect-oracle-ci` to `warn`. Then:  python3 .ratchet/ratchet.py validate
+schema = 1
+
+[repo]
+default_branch = "main"
+code  = ["src/**", "*.py", "src/**/*.ts", "src/**/*.tsx", "crates/**/*.rs", "src/**/*.rs"]
+tests = ["tests/**", "**/test_*.py", "**/*.test.ts", "**/*.spec.ts", "**/*_test.rs"]
+docs  = ["**/*.md", "docs/**"]
+# The oracle's OWN config + the CI that runs it — the load-bearing precondition surface.
+# (`scope`/`paths` take a literal glob list; these aren't named [repo] scopes, just reused.)
+
+[meta]
+base_pinned    = true                  # change layer reads policy from the pinned BASE ref:
+                                       # a PR can't loosen the oracle in the same diff it gates.
+bypass_env     = "RATCHET_BYPASS"      # AGENT-layer escape hatch only (always logged); the
+                                       # change layer (the real oracle gate) IGNORES it.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AGENT LAYER (real-time PreToolUse / Stop) — the forcing function. Keeps the agent
+# from disabling the oracle's invocation path mid-session. Bypassable + always logged;
+# the change layer below is the authoritative backstop.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Can't skip the pre-push hook (which runs the oracles locally) or unsign.
+# moat: forbid_command reads the agent's literal command string (environment fact).
+[[check]]
+id = "no-verify"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "forbid_command"
+pattern = "--no-verify|--no-gpg-sign|HUSKY=0|SKIP="
+
+# If on main, branch first. moat: forbid_commit_on_branch reads the live current branch.
+[[check]]
+id = "branch-first"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "forbid_commit_on_branch"
+branch = ["main", "master"]
+ops = ["commit", "push"]
+
+# Real-time deny of a Write/Edit to the ORACLE'S OWN surface (its config + the CI that
+# runs it). The agent can't loosen the bar mid-session; the change-layer numeric_floor /
+# protected_path checks below are the authoritative PR backstop. moat: self_protect reads
+# the live Write/Edit target path (an environment fact at the PreToolUse intercept).
+[[check]]
+id = "self-protect-oracle-config"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "self_protect"
+paths = [
+  "ratchet.toml", ".ratchet/**", ".github/workflows/**",
+  "pyproject.toml", "setup.cfg", ".coveragerc", "tox.ini",
+  "package.json", "tsconfig.json", "vitest.config.*", "jest.config.*",
+  "Cargo.toml", "deny.toml",
+]
+
+# ═════════════════════════════════════════════════════════════════════════════
+# CHANGE LAYER — THE ORACLES (authoritative, base-pinned, ignores the bypass).
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── (1) typecheck / build / lint via `run` — the cheap, deterministic substance band ──
+# Each shells out to an INDEPENDENT tool over the agent's ACTUAL code; the exit code is
+# the fact. moat: kind=fact + provenance=environment (the OS authors the exit status, not
+# the agent) → block-legal. `run` blocks ONLY at the change layer (repo author owns the
+# script there) — `validate` rejects a `run` block at the agent layer. Enable your stack.
+
+[[check]]
+id = "oracle-typecheck-mypy"
+kind = "fact"
+severity = "block"
+layer = "change"
+primitive = "run"
+cmd = "python3 -m mypy --strict ."
+
+[[check]]
+id = "oracle-build-tsc"
+kind = "fact"
+severity = "block"
+layer = "change"
+primitive = "run"
+cmd = "npx --no-install tsc --noEmit"
+
+[[check]]
+id = "oracle-lint-clippy"
+kind = "fact"
+severity = "block"
+layer = "change"
+primitive = "run"
+# clippy as an oracle: -D warnings turns every lint into a non-zero exit = the fact.
+cmd = "cargo clippy --all-targets --all-features -- -D warnings"
+
+[[check]]
+id = "oracle-build-cargo"
+kind = "fact"
+severity = "block"
+layer = "change"
+primitive = "run"
+cmd = "cargo build --locked --all-targets"
+
+# ── (2) coverage floor — two complementary oracles ───────────────────────────────────
+# (2a) The CI coverage job's CONCLUSION is the fact. need=["coverage"] means a coverage
+# check that never reported counts as MISSING and blocks (no vacuous pass) — fail-closed.
+# moat: require_checks_green reads the PR API conclusion (environment) → block-legal.
+# need is set (not empty) so ratchet's own still-pending job can't self-block this run.
+[[check]]
+id = "oracle-coverage-ci"
+kind = "fact"
+severity = "block"
+layer = "change"
+primitive = "require_checks_green"
+need = ["coverage"]
+
+# (2b) Or run the coverage oracle directly: the threshold lives in the TOOL's flag, not in
+# ratchet — pytest/c8 parse their own format and exit non-zero below fail_under. The exit
+# code is the fact. (Pick 2a OR 2b for your repo; both shown for the menu.)
+[[check]]
+id = "oracle-coverage-run"
+kind = "fact"
+severity = "block"
+layer = "change"
+primitive = "run"
+cmd = "python3 -m pytest -q --cov --cov-fail-under=90"
+
+# (2c) GATE THE BAR (ask 2): a lowered `fail_under` in the same PR is byte-identical to a
+# raise to a one-sided scanner. numeric_floor pairs the number across the −/+ hunks on the
+# SAME key and blocks the WEAKENING direction (no_decrease = it's a minimum). The agent
+# can't meet the oracle by lowering it. moat: the regulated artifact IS the committed
+# number (environment) → block-legal.
+[[check]]
+id = "coverage-floor-no-decrease"
+kind = "fact"
+severity = "block"
+layer = "change"
+primitive = "numeric_floor"
+key = 'fail_under\s*=\s*([0-9.]+)'
+direction = "no_decrease"
+scope = ["pyproject.toml", "setup.cfg", ".coveragerc", "tox.ini"]
+
+# (2d) GATE THE BAR, part two: deleting the `fail_under` line is the other way to defeat
+# 2c (numeric_floor needs a surviving key to pair). forbid_removal blocks the REMOVED
+# threshold line. moat: a removed line is a diff fact (environment) → block-legal.
+[[check]]
+id = "keep-coverage-gate"
+kind = "fact"
+severity = "block"
+layer = "change"
+primitive = "forbid_removal"
+pattern = 'fail_under|--cov-fail-under'
+scope = ["pyproject.toml", "setup.cfg", ".coveragerc", "tox.ini", ".github/workflows/**"]
+
+# ── (3) mutation score — ADVISORY-FIRST (warn) ───────────────────────────────────────
+# Mutation testing is expensive and flaky, so it's a SIGNAL first, not a gate. severity=
+# warn means it never blocks regardless of provenance — a fact check at warn is honest
+# even while the oracle stabilizes. The CI job runs cargo-mutants / mutmut and the
+# conclusion is surfaced; ratchet just reads it.
+# PROMOTE TO BLOCK once the mutation job is deterministic and fast enough: flip severity
+# to "block" — it's already kind=fact + a require_checks_green conclusion (environment),
+# so it clears the moat the moment you do.
+[[check]]
+id = "oracle-mutation-advisory"
+kind = "fact"
+severity = "warn"
+layer = "change"
+primitive = "require_checks_green"
+need = ["mutation"]
+
+# ── (4) perf / size budget via numeric_floor direction=no_increase ───────────────────
+# The CI perf/size job writes the MEASURED number into a committed snapshot file
+# (`.perf/budget.txt: bundle_kb = 248`). numeric_floor with direction=no_increase treats
+# it as a CEILING: it blocks if the measured value GROWS across the diff, and `floor`
+# doubles as the absolute ceiling (block when the value rises past it). moat: the tracked
+# number is committed text (environment) → block-legal. No parser in the engine — the
+# perf oracle produces the number; ratchet only compares it.
+[[check]]
+id = "oracle-size-budget-no-increase"
+kind = "fact"
+severity = "block"
+layer = "change"
+primitive = "numeric_floor"
+key = 'bundle_kb\s*=\s*([0-9.]+)'
+direction = "no_increase"
+floor = 256
+scope = [".perf/budget.txt", "perf-budget.toml"]
+
+# (4b) Or gate perf via the CI conclusion: the bench oracle (criterion / hyperfine /
+# size-limit) fails its own job on a regression; require_checks_green reads the verdict.
+[[check]]
+id = "oracle-perf-ci"
+kind = "fact"
+severity = "block"
+layer = "change"
+primitive = "require_checks_green"
+need = ["perf-budget"]
+
+# ═════════════════════════════════════════════════════════════════════════════
+# (5) GATE THE ORACLE'S OWN CONFIG — the load-bearing precondition (ask 2).
+# Without this, the agent meets the oracle by LOOSENING it and Goodhart relocates one
+# level up. (2c/2d above already gate the coverage bar; below gate the budget ceiling,
+# the CI workflow files, and the suppression markers that defeat each oracle.)
+# ═════════════════════════════════════════════════════════════════════════════
+
+# (5a) Can't RAISE the size/perf budget ceiling in the same PR (the inverse of 2c — for a
+# "max" budget, raising the number is the weakening move, so no_increase). moat: committed
+# number (environment) → block-legal.
+[[check]]
+id = "budget-ceiling-no-increase"
+kind = "fact"
+severity = "block"
+layer = "change"
+primitive = "numeric_floor"
+key = 'max_(?:bundle|size)_kb\s*=\s*([0-9.]+)'
+direction = "no_increase"
+scope = ["perf-budget.toml", "size-limit.json", "package.json"]
+
+# (5b) Base-pin/protect the CI workflow files that RUN the oracles — a head-side edit that
+# deletes the coverage/mutation/perf job would silently defang every require_checks_green
+# above. protected_path needs a FRESH, human, NON-author approval on the head_sha for any
+# change to these paths (skips on local pre-push with no PR context; CI supplies reviews).
+# moat: a non-author approval is a PR-API fact (environment) → block-legal. Born here as
+# block for a reviewed repo; downgrade to "warn" for a solo repo with no independent
+# approver (a self-approval can never satisfy it).
+[[check]]
+id = "protect-oracle-ci"
+kind = "fact"
+severity = "block"
+layer = "change"
+primitive = "protected_path"
+paths = [".github/workflows/**", "ratchet.toml", ".ratchet/**"]
+require_approval = true
+
+# (5c) Block NEWLY-ADDED suppression markers that defeat the TYPE oracle (mypy / tsc).
+# An added `# type: ignore` / `@ts-ignore` is an ungameable diff fact — its presence is
+# environment-authored even though whether it's *justified* is a judgment. We block the
+# presence (the issue's ask); whitelist a vetted one via `exempt` rather than loosening.
+# moat: an added line is a diff fact (environment) → block-legal.
+[[check]]
+id = "forbid-type-suppression"
+kind = "fact"
+severity = "block"
+layer = "both"
+primitive = "forbid_pattern"
+pattern = '#\s*type:\s*ignore|@ts-(?:ignore|expect-error)|//\s*@ts-nocheck'
+scope = "code"
+strip_comments = false
+
+# (5d) Block newly-added markers that defeat the COVERAGE oracle.
+[[check]]
+id = "forbid-coverage-suppression"
+kind = "fact"
+severity = "block"
+layer = "change"
+primitive = "forbid_pattern"
+pattern = '#\s*pragma:\s*no\s*cover|/\*\s*istanbul ignore|//\s*c8 ignore|#\[coverage\(off\)\]'
+scope = "code"
+
+# (5e) Block newly-added markers that defeat the LINT oracle (clippy / eslint). #[allow]
+# has legitimate uses — `exempt` a vetted module/line rather than dropping the gate; or
+# downgrade to "warn" if your crate needs broad allows. moat: added diff fact (environment).
+[[check]]
+id = "forbid-lint-suppression"
+kind = "fact"
+severity = "block"
+layer = "change"
+primitive = "forbid_pattern"
+pattern = '#!?\[allow\(|eslint-disable|//\s*nolint'
+scope = "code"
+exempt = '#!\[allow\(clippy::module_name_repetitions\)\]'
+
+# (5f) Block newly-added markers that defeat the TEST oracle: a focused/skipped test
+# silently disables the rest of the suite (it.only) or removes teeth (test.skip / #[ignore]
+# / pytest.mark.skip), so the oracle exits zero over less. moat: added diff fact (environment).
+[[check]]
+id = "forbid-test-suppression"
+kind = "fact"
+severity = "block"
+layer = "change"
+primitive = "forbid_pattern"
+pattern = '\b(?:describe|it|test)\.only\s*\(|\bfdescribe\b|\bfit\b|\.skip\s*\(|@(?:unittest\.skip|pytest\.mark\.(?:skip|xfail))\b|#\[ignore\]'
+scope = "tests"
