@@ -348,7 +348,7 @@ Every check reads only facts — never your code.
 | `pattern_requires_approval{pattern,scope,exclude_author,exclude_bot}` | fact | an added line matching `pattern` (a new dep, an `unsafe`) needs an independent approval (CI) |
 | `approval_policy{require_fresh,no_changes_requested,exclude_author,exclude_bot,min_approvals}` | fact | the approval is fresh (on head), human, non-author, with no outstanding changes-requested; `min_approvals` counts **distinct** reviewers (CI) |
 | `require_checks_green{need,ignore}` | fact | every (required) status check concluded `success` (CI); `ignore` excludes cogpin's own same-run job |
-| `run{cmd}` | fact\* | shell-out; the exit code is the fact (**`block` only at the change layer**) |
+| `run{cmd}` | fact\* | shell-out; the exit code is the fact (**change layer only — any agent placement is rejected**) |
 | `attest{box,class}` | advisory | a class-gated `Stop`-hook checklist box — blocks turn-end until ticked (forcing function; the change layer is the ungameable gate) |
 | `judge{prompt}` | advisory | an advisory LLM-judge prompt (CI `continue-on-error` substance check) |
 

@@ -128,7 +128,7 @@ class TestConfig(unittest.TestCase):
         self.assertIn("requires kind=fact", str(e.exception))
 
     def test_fact_block_is_allowed(self):
-        ok = MIN + '\n[[check]]\nid="x"\nkind="fact"\nseverity="block"\nprimitive="forbid_command"\npattern="--no-verify"\n'
+        ok = MIN + '\n[[check]]\nid="x"\nkind="fact"\nseverity="block"\nlayer="agent"\nprimitive="forbid_command"\npattern="--no-verify"\n'
         self.assertEqual(len(Config.parse(ok).checks), 1)
 
     def test_run_block_must_be_change_layer(self):
@@ -136,6 +136,67 @@ class TestConfig(unittest.TestCase):
         with self.assertRaises(ConfigError) as e:
             Config.parse(bad)
         self.assertIn("change layer", str(e.exception))
+
+    def test_invalid_regex_in_field_rejected(self):
+        # M1: an uncompilable regex makes its primitive return None (PASS), silently disabling a
+        # gate on an author typo. validate must fail LOUD over every populated regex field.
+        for prim, field in (
+            ("forbid_pattern", 'pattern="["'),
+            ("numeric_floor", 'key="(unclosed"'),
+            ("secret_scan", 'custom=["(bad"]'),
+        ):
+            bad = MIN + f'\n[[check]]\nid="rx"\nkind="fact"\nseverity="warn"\nprimitive="{prim}"\n{field}\n'
+            with self.assertRaises(ConfigError, msg=f"{prim} {field} must be rejected") as e:
+                Config.parse(bad)
+            self.assertIn("regex", str(e.exception))
+
+    def test_valid_regex_still_accepted(self):
+        ok = MIN + '\n[[check]]\nid="rx"\nkind="fact"\nseverity="warn"\nprimitive="forbid_pattern"\npattern="foo.*bar"\n'
+        self.assertEqual(len(Config.parse(ok).checks), 1)
+
+    def test_invalid_msg_scope_rejected(self):
+        # M2: a typo'd msg_scope yields zero targets → forbid_in_message passes vacuously (fail-open).
+        bad = MIN + '\n[[check]]\nid="m"\nkind="fact"\nseverity="warn"\nprimitive="forbid_in_message"\npattern="x"\nmsg_scope=["subject"]\n'
+        with self.assertRaises(ConfigError) as e:
+            Config.parse(bad)
+        self.assertIn("msg_scope", str(e.exception))
+
+    def test_invalid_status_rejected(self):
+        # M2: status="added" → (.upper()) "ADDED" matches no A/M/D → file_must_contain passes vacuously.
+        bad = MIN + '\n[[check]]\nid="s"\nkind="fact"\nseverity="warn"\nprimitive="file_must_contain"\npattern="SPDX"\nstatus="added"\n'
+        with self.assertRaises(ConfigError) as e:
+            Config.parse(bad)
+        self.assertIn("status", str(e.exception))
+
+    def test_forbid_command_is_agent_only(self):
+        # L1: forbid_command reads the live command string → a change-layer (incl. the DEFAULT)
+        # placement never fires at the authoritative layer; reject it like its live-signal peers.
+        for layer in ("", '\nlayer="change"'):
+            bad = MIN + f'\n[[check]]\nid="fc"\nkind="fact"\nseverity="block"\nprimitive="forbid_command"\npattern="--no-verify"{layer}\n'
+            with self.assertRaises(ConfigError, msg=f"layer={layer!r} must be rejected") as e:
+                Config.parse(bad)
+            self.assertIn("agent", str(e.exception))
+        ok = MIN + '\n[[check]]\nid="fc"\nkind="fact"\nseverity="block"\nlayer="agent"\nprimitive="forbid_command"\npattern="--no-verify"\n'
+        self.assertEqual(len(Config.parse(ok).checks), 1)
+
+    def test_run_agent_layer_rejected_any_severity(self):
+        # L2: a `run` at the agent layer is dispatched by NO runner → a silent no-op at any severity.
+        bad = MIN + '\n[[check]]\nid="r"\nkind="fact"\nseverity="warn"\nlayer="agent"\nprimitive="run"\ncmd="true"\n'
+        with self.assertRaises(ConfigError) as e:
+            Config.parse(bad)
+        self.assertIn("change layer", str(e.exception))
+
+    def test_non_string_scalar_field_rejected_cleanly(self):
+        # The new typed-field guards must raise ConfigError (the clean, fail-CLOSED path that the
+        # load handlers catch), never an AttributeError/TypeError that escapes as a raw traceback,
+        # when a TOML scalar is non-string (e.g. `status = 1`, `pattern = 1`).
+        for prim, field in (
+            ("file_must_contain", 'pattern="X"\nstatus=1'),
+            ("forbid_pattern", "pattern=1"),
+        ):
+            bad = MIN + f'\n[[check]]\nid="n"\nkind="fact"\nseverity="warn"\nprimitive="{prim}"\n{field}\n'
+            with self.assertRaises(ConfigError, msg=f"{prim} {field!r}"):
+                Config.parse(bad)
 
     def test_str_or_vec_normalizes(self):
         cfg = MIN + '\n[[check]]\nid="p"\nkind="fact"\nseverity="warn"\nprimitive="path_requires"\nwhen="code"\nneed=["a","b"]\n'
@@ -175,7 +236,7 @@ class TestFacts(unittest.TestCase):
 
 class TestPrimitives(unittest.TestCase):
     def test_forbid_command_denies_no_verify(self):
-        c = one_check('[[check]]\nid="nv"\nkind="fact"\nseverity="block"\nprimitive="forbid_command"\npattern="--no-verify"')
+        c = one_check('[[check]]\nid="nv"\nkind="fact"\nseverity="block"\nlayer="agent"\nprimitive="forbid_command"\npattern="--no-verify"')
         self.assertIsNotNone(forbid_command(c, CommandFacts("git push --no-verify")))
         self.assertIsNone(forbid_command(c, CommandFacts("git push")))
 
@@ -2286,7 +2347,7 @@ class TestPrimitiveSpecs(unittest.TestCase):
 
     def test_agent_only_primitives_pinned(self):
         agent_only = {n for n, s in R.PRIMITIVE_SPECS.items() if s.layers != R._ANY_LAYER}
-        self.assertEqual(agent_only, {"forbid_commit_on_branch", "self_protect"})
+        self.assertEqual(agent_only, {"forbid_command", "forbid_commit_on_branch", "self_protect"})
         for n in agent_only:
             self.assertEqual(R.PRIMITIVE_SPECS[n].layers, R._AGENT_ONLY)
 
