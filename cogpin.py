@@ -2362,7 +2362,7 @@ def is_bound(hit: HouseRuleHit, checks: list[Check]) -> tuple[bool, Check | None
         if hit.match_token is None:
             return (True, c)
         hay = " ".join(filter(None, [
-            c.pattern, c.marker, c.key, " ".join(c.deny), " ".join(c.allow),
+            c.pattern, c.marker, c.key, c.box, c.cls, " ".join(c.deny), " ".join(c.allow),
             " ".join(c.tokens), " ".join(c.need),
         ])).lower()
         if hit.match_token.lower() in hay:
