@@ -161,6 +161,20 @@ target) and must be `agent` or `both`; a `run` check must live at the `change` l
 
 ## Primitives
 
+> **Required params (validate-enforced).** A primitive missing the field(s) it cannot function
+> without loads clean but is a **silent no-op** — its evaluator early-returns, so the gate never
+> fires. `cogpin validate` rejects these at parse time:
+> `forbid_pattern` / `forbid_removal` / `require_message_pattern` / `file_must_contain` /
+> `pattern_requires_approval` → `pattern`; `forbid_command` → `pattern` **or** `deny`;
+> `forbid_in_message` → `tokens`; `marker_present` → `marker`; `numeric_floor` → `key`;
+> `scope_lock` → `allow`; `self_protect` / `protected_path` → `paths`; `require_approval_from` →
+> `paths` **and** `require_approval_from`; `cooccur` → `trigger` **and** `require`; `path_requires`
+> → `need` **and** (`when` **or** `when_marker`); `change_budget` → at least one `max_*` cap;
+> `run` → `cmd`; `commit_footer` → `[meta].commit_footer` (the footer regex, meta-scoped).
+> Primitives with a documented empty/default mode (`secret_scan`, `forbid_delete`,
+> `forbid_commit_on_branch`, `require_checks_green`, `approval_policy`, `max_added_file_bytes`,
+> `attest`/`judge`) take no required param.
+
 ### Command / live-signal (agent layer)
 
 #### `forbid_command`  *(agent / both)*

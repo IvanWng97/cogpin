@@ -198,6 +198,83 @@ class TestConfig(unittest.TestCase):
             with self.assertRaises(ConfigError, msg=f"{prim} {field!r}"):
                 Config.parse(bad)
 
+    def test_param_less_check_rejected(self):
+        # #45: a primitive missing the field(s) it cannot function without LOADS clean but is a
+        # silent no-op (the evaluator early-returns None). validate must reject it LOUD.
+        cases = [
+            '\nprimitive="forbid_pattern"',                       # no pattern
+            '\nprimitive="forbid_removal"',
+            '\nprimitive="require_message_pattern"',
+            '\nprimitive="file_must_contain"',
+            '\nprimitive="pattern_requires_approval"',
+            '\nprimitive="marker_present"',                       # no marker
+            '\nprimitive="forbid_in_message"',                    # no tokens
+            '\nprimitive="numeric_floor"',                        # no key
+            '\nprimitive="scope_lock"',                           # no allow
+            '\nprimitive="protected_path"',                       # no paths
+            '\nlayer="agent"\nprimitive="self_protect"',          # no paths
+            '\nlayer="agent"\nprimitive="forbid_command"',        # neither pattern nor deny
+            '\nlayer="change"\nprimitive="run"',                  # no cmd
+            '\nprimitive="cooccur"\ntrigger="x"',                 # has trigger, missing require
+            '\nprimitive="cooccur"\nrequire="y"',                 # has require, missing trigger (symmetric)
+            '\nprimitive="require_approval_from"\npaths=["g/**"]', # has paths, missing approvers
+            '\nprimitive="require_approval_from"\nrequire_approval_from=["o"]',  # has approvers, missing paths
+            '\nprimitive="path_requires"\nneed=["tests"]',        # has need, missing when/when_marker
+            '\nprimitive="path_requires"\nwhen=["code"]',         # has when, missing need (symmetric)
+            '\nprimitive="change_budget"',                        # no caps at all
+        ]
+        for toml in cases:
+            with self.assertRaises(ConfigError, msg=f"{toml!r} must reject") as e:
+                one_check('[[check]]\nid="x"\nkind="fact"\nseverity="warn"' + toml)
+            self.assertIn("never fires", str(e.exception), f"{toml!r}: should be the required-param guard")
+
+    def test_required_param_present_validates(self):
+        # the with-param forms validate clean — incl. a `change_budget` cap of 0 (0 is a real
+        # strict ceiling, NOT a missing field) and when_marker satisfying path_requires' trigger.
+        for toml in (
+            '\nprimitive="forbid_pattern"\npattern="TODO"',
+            '\nprimitive="numeric_floor"\nkey="cov"',
+            '\nprimitive="cooccur"\ntrigger="a"\nrequire="b"',
+            '\nprimitive="path_requires"\nwhen=["code"]\nneed=["tests"]',
+            '\nprimitive="path_requires"\nwhen_marker="x"\nneed=["tests"]',
+            '\nprimitive="require_approval_from"\npaths=["g/**"]\nrequire_approval_from=["o"]',
+            '\nlayer="agent"\nprimitive="forbid_command"\ndeny=["git push"]',
+            '\nlayer="agent"\nprimitive="self_protect"\npaths=["x"]',
+            '\nprimitive="change_budget"\nmax_added=0',
+        ):
+            one_check('[[check]]\nid="x"\nkind="fact"\nseverity="warn"' + toml)  # must not raise
+
+    def test_defensible_default_primitives_validate_bare(self):
+        # primitives with a DOCUMENTED empty/default mode must NOT be newly rejected by #45.
+        for toml in (
+            '\nprimitive="secret_scan"',
+            '\nprimitive="forbid_delete"',
+            '\nlayer="agent"\nprimitive="forbid_commit_on_branch"',
+            '\nprimitive="require_checks_green"',
+            '\nprimitive="approval_policy"',
+            '\nprimitive="max_added_file_bytes"',
+        ):
+            one_check('[[check]]\nid="x"\nkind="fact"\nseverity="warn"' + toml)  # must not raise
+
+    def test_required_param_error_names_toml_key_not_attr(self):
+        # #45 review: the message must name the TOML KEY the user types (require_approval_from),
+        # not the internal attribute (`approvers`) — else it points at a non-existent knob.
+        with self.assertRaises(ConfigError) as e:
+            one_check('[[check]]\nid="x"\nkind="fact"\nseverity="warn"\n'
+                      'primitive="require_approval_from"\npaths=["g/**"]')
+        self.assertIn("require_approval_from", str(e.exception))
+        self.assertNotIn("`approvers`", str(e.exception))
+
+    def test_commit_footer_requires_meta_footer(self):
+        # #45: commit_footer's load-bearing param is meta-scoped — a check with no
+        # [meta].commit_footer loads clean but never fires. Reject it; accept it with the meta key.
+        with self.assertRaises(ConfigError) as e:
+            Config.parse(MIN + '\n[[check]]\nid="cf"\nkind="fact"\nseverity="warn"\nprimitive="commit_footer"\n')
+        self.assertIn("[meta].commit_footer", str(e.exception))
+        ok = ('schema=1\n[repo]\ndefault_branch="main"\n[meta]\ncommit_footer="Co-Authored-By"\n'
+              '[[check]]\nid="cf"\nkind="fact"\nseverity="warn"\nprimitive="commit_footer"\n')
+        self.assertEqual(len(Config.parse(ok).checks), 1)
+
     def test_str_or_vec_normalizes(self):
         cfg = MIN + '\n[[check]]\nid="p"\nkind="fact"\nseverity="warn"\nprimitive="path_requires"\nwhen="code"\nneed=["a","b"]\n'
         chk = Config.parse(cfg).checks[0]
@@ -342,9 +419,10 @@ class TestPrimitives(unittest.TestCase):
         self.assertIsNone(forbid_pattern(c, DiffFacts(added=[("src/a.rs", 'let x = "--no-verify";')]), r))
 
     def test_commit_footer_requires_every_commit(self):
-        # commit_footer is meta-driven (the footer is [meta].commit_footer, not a check
-        # field), so it takes (check, footer_rx, facts) — check is only for the id-prefix.
-        cf = one_check('[[check]]\nid="cf"\nkind="fact"\nseverity="warn"\nprimitive="commit_footer"')
+        # commit_footer is meta-driven (the footer is [meta].commit_footer, not a check field),
+        # so it takes (check, footer_rx, facts) — check is only for the id-prefix. Built directly
+        # because validate now rejects a commit_footer check with no [meta].commit_footer (#45).
+        cf = Check(id="cf", kind="fact", severity="warn", primitive="commit_footer")
         pat = r"Co-Authored-By: Claude"
         ok = DiffFacts(commit_msgs=["feat: x\n\nCo-Authored-By: Claude Opus"])
         bad = DiffFacts(commit_msgs=["feat: y"])
@@ -767,8 +845,9 @@ class TestMinedPrimitives(unittest.TestCase):
         self.assertIsNotNone(scope_lock(c, DiffFacts(changed=[("M", "src/a.py"), ("M", "infra/deploy.tf")]), r))
         # A/M/D all count — a deletion outside scope blocks too
         self.assertIsNotNone(scope_lock(c, DiffFacts(changed=[("D", "prod/secrets.py")]), r))
-        # empty allow → never blocks (unconfigured)
-        empty = one_check('[[check]]\nid="e"\nkind="fact"\nseverity="block"\nprimitive="scope_lock"')
+        # empty allow → never blocks (defense-in-depth: validate now REJECTS a param-less
+        # scope_lock (#45), but the evaluator stays defensively inert if one is built directly).
+        empty = Check(id="e", kind="fact", severity="block", primitive="scope_lock")
         self.assertIsNone(scope_lock(empty, DiffFacts(changed=[("M", "anything")]), r))
 
     def test_scope_lock_resolves_named_scopes(self):
@@ -3399,7 +3478,7 @@ class TestFixtureBlind(unittest.TestCase):
                 + '[[check]]\nid = "no-big"\nkind = "fact"\nseverity = "block"\nlayer = "change"\n'
                   'primitive = "max_added_file_bytes"\nmaxkb = 1\nscope = "code"\n'
                 + '[[check]]\nid = "needs-approval"\nkind = "fact"\nseverity = "block"\n'
-                  'primitive = "protected_path"\nscope = "code"\n'
+                  'primitive = "protected_path"\npaths = ["*.py"]\n'
                 + '[[check]]\nid = "ci-green"\nkind = "fact"\nseverity = "block"\nlayer = "change"\n'
                   'primitive = "require_checks_green"\nneed = ["build"]\n')
         return R.Config.parse(toml)
@@ -3566,7 +3645,7 @@ _FXB_CFG = (
     '[[check]]\nid = "approve"\nkind = "fact"\nseverity = "warn"\n'
     'primitive = "approval_policy"\nscope = "code"\n'                            # reviews only
     '[[check]]\nid = "prot"\nkind = "fact"\nseverity = "warn"\n'
-    'primitive = "protected_path"\nscope = "code"\n'                            # reviews OR approvals
+    'primitive = "protected_path"\npaths = ["*.py"]\n'                          # reviews OR approvals
 )
 
 

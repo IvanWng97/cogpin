@@ -174,6 +174,40 @@ _ADVISORY_ONLY = frozenset(n for n, s in PRIMITIVE_SPECS.items() if s.kind == "a
 # fact → they may only warn/attest, never block (the second clause of the tightened moat).
 _AGENT_PROVENANCE = frozenset(n for n, s in PRIMITIVE_SPECS.items() if s.provenance != "environment")
 
+# Per-primitive LOAD-BEARING params (#45): a check missing these loads clean but is a silent
+# no-op — the evaluator early-returns None / matches nothing, so the gate never fires and the
+# adopter believes a toothless check holds. Each value is an AND-list of OR-groups: at least one
+# field in EVERY group must be present. Primitives with a documented empty/default mode are
+# ABSENT here on purpose (secret_scan→DEFAULT_SECRETS, forbid_delete→all deletions,
+# forbid_commit_on_branch→default branch+ops, require_checks_green→bare all-green, approval_policy
+# →min-1, max_added_file_bytes→still blocks binaries, attest/judge→advisory).
+_REQUIRED_PARAMS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "forbid_pattern": (("pattern",),),
+    "forbid_removal": (("pattern",),),
+    "require_message_pattern": (("pattern",),),
+    "file_must_contain": (("pattern",),),
+    "pattern_requires_approval": (("pattern",),),
+    "marker_present": (("marker",),),
+    "forbid_in_message": (("tokens",),),
+    "numeric_floor": (("key",),),
+    "scope_lock": (("allow",),),
+    "self_protect": (("paths",),),
+    "protected_path": (("paths",),),
+    "run": (("cmd",),),
+    "cooccur": (("trigger",), ("require",)),                 # both, else inert
+    "require_approval_from": (("paths",), ("approvers",)),   # no paths→inert; no approvers→unclearable
+    "path_requires": (("need",), ("when", "when_marker")),   # need AND a trigger
+    "forbid_command": (("pattern", "deny"),),               # at least one
+    "change_budget": (("max_added", "max_removed", "max_files", "max_file_added"),),
+}
+
+
+def _present(val: object) -> bool:
+    """A config value counts as SUPPLIED iff it is not None / "" / [] — but 0 IS supplied (a
+    `change_budget` cap of 0 is a real, strict ceiling, not a missing field)."""
+    return val is not None and val != "" and val != []
+
+
 
 class ConfigError(Exception):
     """A malformed config is a hard error — never a silently-degraded gate."""
@@ -518,6 +552,27 @@ class Config:
             if c.status is not None and (not isinstance(c.status, str) or c.status.upper() not in (ADDED, MODIFIED, DELETED)):
                 raise ConfigError(
                     f"check `{c.id}`: status must be one of A/M/D, got `{c.status}`"
+                )
+            # Load-bearing params (#45): a primitive missing the field(s) it cannot function
+            # without LOADS clean but is a silent no-op (its evaluator early-returns None). Placed
+            # LAST so a more-fundamental error (bad regex / enum / layer) still surfaces first.
+            for _group in _REQUIRED_PARAMS.get(c.primitive, ()):
+                if not any(_present(getattr(c, _f, None)) for _f in _group):
+                    # name the TOML KEY, not the internal attr (approvers ← require_approval_from),
+                    # so the fix the message points at is the one the user can actually type.
+                    _names = " or ".join(f"`{_FIELD_ALIASES.get(_f, _f)}`" for _f in _group)
+                    raise ConfigError(
+                        f"check `{c.id}`: {c.primitive} requires {_names} — without it the check "
+                        f"loads clean but can never do useful work (it never fires, or with a "
+                        f"partial config can never be satisfied)"
+                    )
+            # commit_footer's load-bearing param is META-scoped ([meta].commit_footer), not a Check
+            # attribute — so it can't live in _REQUIRED_PARAMS, but a footer-less one is the same
+            # #45 silent no-op (_rx(None) → None → the evaluator early-returns).
+            if c.primitive == "commit_footer" and not _present(self.meta.commit_footer):
+                raise ConfigError(
+                    f"check `{c.id}`: commit_footer requires `[meta].commit_footer` (the footer "
+                    f"regex) — without it the check loads clean but never fires"
                 )
         # [capability] is a DECLARATION (policy), never a [[check]] — it can't block (a
         # primitive="capability" already fails "unknown primitive" above). The only validation
