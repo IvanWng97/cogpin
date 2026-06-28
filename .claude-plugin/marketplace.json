@@ -1,14 +1,14 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "ratchet",
+  "name": "cogpin",
   "owner": { "name": "Ivan Wng", "url": "https://github.com/IvanWng97" },
   "metadata": {
-    "description": "The ratchet Definition-of-Done gate — install once, the closing-discipline enforces itself.",
+    "description": "The cogpin Definition-of-Done gate — install once, the closing-discipline enforces itself.",
     "version": "0.3.0"
   },
   "plugins": [
     {
-      "name": "ratchet",
+      "name": "cogpin",
       "source": "./",
       "description": "Real-time PreToolUse command gate + base-pinned change-layer diff-fact enforcement of the whole DoD chain.",
       "category": "governance"

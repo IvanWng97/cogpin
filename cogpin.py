@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""ratchet — Definition-of-Done gate for AI coding agents.
+"""cogpin — Definition-of-Done gate for AI coding agents.
 
-ONE language-agnostic engine, ONE per-repo `ratchet.toml`. The engine reads only
+ONE language-agnostic engine, ONE per-repo `cogpin.toml`. The engine reads only
 normalized git/diff/PR *facts* + the config; it NEVER imports project code.
 Anything language-specific goes through the `run` escape hatch.
 
@@ -197,7 +197,7 @@ class Meta:
     # the pinned base ref, never the PR head. Defaults ON.
     base_pinned: bool = True
     # agent-layer attestation (the Stop-hook checklist the agent must tick)
-    attestation_file: str = ".ratchet/attestation.md"
+    attestation_file: str = ".cogpin/attestation.md"
     # a change is "feature-shaped" at >= this many changed files (or a new code module)
     feature_files: int = 3
 
@@ -209,11 +209,11 @@ _CAPABILITY_BACKENDS = frozenset({"claude-code", "bubblewrap", "docker", "seccom
 
 @dataclass
 class Capability:
-    """A DECLARED capability floor — POLICY, not enforcement. ratchet records and compares
-    this stanza and can EMIT it to a harness's native enforcement (`ratchet capability emit`),
+    """A DECLARED capability floor — POLICY, not enforcement. cogpin records and compares
+    this stanza and can EMIT it to a harness's native enforcement (`cogpin capability emit`),
     but it NEVER reads it during gate/check evaluation and NEVER confines a syscall itself.
-    The OS/harness is the boundary; ratchet only declares the posture (see docs/composition.md).
-    Its integrity comes for free: it lives in ratchet.toml, which is self_protect'd and read
+    The OS/harness is the boundary; cogpin only declares the posture (see docs/composition.md).
+    Its integrity comes for free: it lives in cogpin.toml, which is self_protect'd and read
     from the pinned base ref — so the floor is base-pinned without any new machinery."""
     no_network: bool = False
     fs_confine: list[str] = field(default_factory=list)
@@ -244,7 +244,7 @@ class Check:
     when: list[str] = field(default_factory=list)
     need: list[str] = field(default_factory=list)
     # require_checks_green: check names to EXCLUDE (denylist complement of `need`) — chiefly
-    # ratchet's OWN job, which is still pending while it gates the same workflow run.
+    # cogpin's OWN job, which is still pending while it gates the same workflow run.
     ignore: list[str] = field(default_factory=list)
     when_marker: str | None = None      # path_requires: a PR-body marker as the `when` trigger
     marker: str | None = None           # marker_present: the block that must appear in the PR body
@@ -350,7 +350,7 @@ class Config:
             bypass_env=m.get("bypass_env"),
             commit_footer=m.get("commit_footer"),
             base_pinned=bool(m.get("base_pinned", True)),
-            attestation_file=m.get("attestation_file", ".ratchet/attestation.md"),
+            attestation_file=m.get("attestation_file", ".cogpin/attestation.md"),
             feature_files=int(m.get("feature_files", 3)),
         )
         cap = raw.get("capability", {})
@@ -658,7 +658,7 @@ class DiffFacts:
     @staticmethod
     def from_unified_diff(text: str) -> "DiffFacts":
         """Acquisition source #3 (#18): build DiffFacts from a raw git-format unified diff (a
-        fixture file) so a consumer can regression-test ratchet.toml against crafted diffs.
+        fixture file) so a consumer can regression-test cogpin.toml against crafted diffs.
         Reuses the SAME added/removed body parse as from_range; derives `changed` from the file
         headers (a fixture has no git to query for `--name-status`). REQUIRES git format (the
         `diff --git` header) — a plain `diff -u` carries no rename/delete/binary status, so
@@ -879,7 +879,7 @@ WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 
 def self_protect(check: Check, tool_name: str, file_path: str) -> str | None:
     """Agent-layer real-time gate: a Write/Edit to a gate-defining file (the
-    `ratchet.toml`, the engine, the hook `settings.json`) is denied at the PreToolUse
+    `cogpin.toml`, the engine, the hook `settings.json`) is denied at the PreToolUse
     intercept — the agent can't quietly loosen the gate it's gated by mid-session.
     The change-layer twin is `protected_path` (which demands an independent PR
     approval); this is the live forcing function. Non-write tools pass through."""
@@ -955,7 +955,7 @@ def _num_hits(lines: list[tuple[str, str]], scope: list[str], key_rx: re.Pattern
 
 
 def numeric_floor(check: Check, facts: DiffFacts, repo: RepoCfg) -> str | None:
-    """The namesake ratchet: pair a numeric token across the remove/add hunks on the
+    """The one-way floor: pair a numeric token across the remove/add hunks on the
     SAME key and block a weakening direction (lower coverage / raised retries), plus an
     optional absolute floor. forbid_removal/forbid_pattern see one side only — neither
     computes direction (85→75 is byte-identical to 75→85)."""
@@ -1272,9 +1272,9 @@ def require_checks_green(check: Check, facts: DiffFacts) -> str | None:
     proven green yet.
 
     `need` narrows to an allowlist of check names; `ignore` is the denylist complement
-    (all green EXCEPT these). When ratchet runs as a job in the SAME workflow it gates,
+    (all green EXCEPT these). When cogpin runs as a job in the SAME workflow it gates,
     its own check is still pending at query time and would self-block — exclude it via
-    `ignore = ["<ratchet job name>"]` (or `need` only the others). See SCHEMA.md."""
+    `ignore = ["<cogpin job name>"]` (or `need` only the others). See SCHEMA.md."""
     if facts.checks is None:
         return None
     want = set(check.need)
@@ -1313,18 +1313,18 @@ def has_block(findings: list[Finding]) -> bool:
 
 
 def load_config(cwd: str, base_ref: str | None) -> Config:
-    """The decisive bypass-proof load: read `ratchet.toml` from the PINNED BASE ref,
+    """The decisive bypass-proof load: read `cogpin.toml` from the PINNED BASE ref,
     never the PR head, so a same-diff edit can't relax the gate it's gated by.
-    Falls back to the working tree only when the base ref has no ratchet.toml yet
+    Falls back to the working tree only when the base ref has no cogpin.toml yet
     (e.g. the first-ever commit adding it)."""
     if base_ref:
-        text = _git(cwd, ["show", f"{base_ref}:ratchet.toml"])
+        text = _git(cwd, ["show", f"{base_ref}:cogpin.toml"])
         if text is not None:
             cfg = Config.parse(text)
             if cfg.meta.base_pinned:
                 return cfg
             # base_pinned explicitly off → honour the working-tree policy instead
-    with open(os.path.join(cwd, "ratchet.toml"), encoding="utf-8") as fh:
+    with open(os.path.join(cwd, "cogpin.toml"), encoding="utf-8") as fh:
         return Config.parse(fh.read())
 
 
@@ -1972,7 +1972,7 @@ HOUSE_RULE_MAP: tuple[_Rule, ...] = (
     _Rule("secret-scan", r"no secrets?|(don'?t|never|do not) commit.*(secret|credential)|\.env\b|API key", "secret_scan",
           {"forbid_paths": [".env", ".env.*", "*.pem", "*.key", "id_rsa", "*.p12"]}, "change", "block", "high"),
     _Rule("self-protect", r"don'?t (edit|weaken).*(gate|config)|protected (files|paths)", "self_protect",
-          {"paths": ["ratchet.toml", ".ratchet/**", ".github/workflows/**"]}, "agent", "block", "high"),
+          {"paths": ["cogpin.toml", ".cogpin/**", ".github/workflows/**"]}, "agent", "block", "high"),
     _Rule("no-force-push", r"never (force.?push|push.*--force)|don'?t force-?push", "forbid_command",
           {"deny": ["git push --force", "git push -f"]}, "agent", "warn", "medium", "--force"),
     _Rule("tests-pass", r"run the tests|tests? (must )?pass|all tests green|preflight|make.*test", "run",
@@ -1999,7 +1999,7 @@ HOUSE_RULE_MAP: tuple[_Rule, ...] = (
           {}, "change", "warn", "medium"),
     _Rule("scope-lock", r"stay in scope|don'?t touch unrelated|scope ?lock", "scope_lock",
           {"allow": ["TODO"]}, "change", "commented", "low"),
-    _Rule("coverage-ratchet", r"coverage|fail_under|don'?t lower (coverage|the threshold)", "numeric_floor",
+    _Rule("coverage-floor", r"coverage|fail_under|don'?t lower (coverage|the threshold)", "numeric_floor",
           {"key": r"fail_under\s*=\s*([0-9.]+)", "direction": "no_decrease",
            "scope": ["pyproject.toml", "setup.cfg", ".coveragerc"]}, "change", "warn", "medium"),
     _Rule("no-skip-ci", r"\[skip ci\]|\[ci skip\]|don'?t disable CI", "forbid_in_message",
@@ -2085,12 +2085,12 @@ def scan_repo(cwd: str) -> RepoScan:
                     house_rules=rank_house_rules(hits), languages=languages)
 
 
-_REVIEW_MARKER = "# TODO(ratchet:review)"
+_REVIEW_MARKER = "# TODO(cogpin:review)"
 _DRAFT_BANNER = (
-    "# ratchet.toml.draft — drafted by `ratchet suggest` + your review. This is NOT the\n"
+    "# cogpin.toml.draft — drafted by `cogpin suggest` + your review. This is NOT the\n"
     "# live gate: only the five safe-core checks have teeth; everything else is warn +\n"
-    "# a `# TODO(ratchet:review)` marker. Arm a rule = set it to `block` AND delete its\n"
-    "# marker. When `ratchet draft-lint` exits 0, `mv ratchet.toml.draft ratchet.toml`."
+    "# a `# TODO(cogpin:review)` marker. Arm a rule = set it to `block` AND delete its\n"
+    "# marker. When `cogpin draft-lint` exits 0, `mv cogpin.toml.draft cogpin.toml`."
 )
 # git's well-known empty tree — HEAD vs this = every committed line as `added` (for --simulate).
 _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
@@ -2135,7 +2135,7 @@ def _render_check(rid, kind, severity, primitive, params, layer=None, comment=Fa
 
 
 def _safe_core_block(branch: str) -> str:
-    paths = ["ratchet.toml", ".ratchet/**", ".github/workflows/**"]
+    paths = ["cogpin.toml", ".cogpin/**", ".github/workflows/**"]
     return "\n\n".join([
         _render_check("no-verify", "fact", "block", "forbid_command",
                       {"pattern": "--no-verify|--no-gpg-sign|HUSKY=0"}, layer="agent"),
@@ -2229,7 +2229,7 @@ def is_bound(hit: HouseRuleHit, checks: list[Check]) -> tuple[bool, Check | None
 
 
 def _marked_ids(text: str) -> set[str]:
-    """Ids of UNCOMMENTED checks carrying a `# TODO(ratchet:review)` marker directly above
+    """Ids of UNCOMMENTED checks carrying a `# TODO(cogpin:review)` marker directly above
     (only blank lines may intervene). An intervening comment — e.g. a commented-out check —
     ENDS the association, so a marker above a commented block never binds to a LATER live
     `[[check]]` (which would mis-flag that check in draft-lint)."""
@@ -2304,7 +2304,7 @@ def draft_lint(text: str, *, existing_cfg: Config | None,
     marked = _marked_ids(text)
     for c in cfg.checks:
         if c.id in marked and c.severity == "block":
-            findings.append(LintFinding("error", c.id, "a # TODO(ratchet:review) check cannot be block — review, then arm"))
+            findings.append(LintFinding("error", c.id, "a # TODO(cogpin:review) check cannot be block — review, then arm"))
     # 7 — additive-only vs the base config (gaps mode)
     if existing_cfg is not None:
         for ec in existing_cfg.checks:
@@ -2332,7 +2332,7 @@ def draft_lint(text: str, *, existing_cfg: Config | None,
     # 11 — one todo per remaining review marker LINE (the human's load-bearing act)
     n_markers = sum(1 for ln in text.splitlines() if ln.lstrip().startswith(_REVIEW_MARKER))
     for _ in range(n_markers):
-        findings.append(LintFinding("todo", None, "unresolved # TODO(ratchet:review) — arm + delete it, or just delete to keep advisory"))
+        findings.append(LintFinding("todo", None, "unresolved # TODO(cogpin:review) — arm + delete it, or just delete to keep advisory"))
     return findings
 
 
@@ -2341,7 +2341,7 @@ def draft_lint(text: str, *, existing_cfg: Config | None,
 # ─────────────────────────────────────────────────────────────────────────────
 
 INIT_TEMPLATE = """\
-# ratchet.toml — Definition-of-Done policy. https://github.com/IvanWng97/ratchet
+# cogpin.toml — Definition-of-Done policy. https://github.com/IvanWng97/cogpin
 # The one rule: severity="block" REQUIRES kind="fact". Only ungameable
 # diff/command/PR facts may block; everything judged stays advisory.
 schema = 1
@@ -2355,7 +2355,7 @@ docs = ["**/*.md"]
 [meta]
 # Read this file + gate-defining files from the pinned base ref (bypass-proof).
 base_pinned = true
-# bypass_env = "RATCHET_BYPASS"          # agent-layer escape hatch (always logged)
+# bypass_env = "COGPIN_BYPASS"          # agent-layer escape hatch (always logged)
 # commit_footer = 'Co-Authored-By:'  # require a footer on every commit
 
 # Deny --no-verify at the moment the agent reaches for it (real-time, agent layer).
@@ -2476,7 +2476,7 @@ def cmd_gate() -> int:
         fp = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
         spblocks = run_self_protect_gate(cfg, tool_name, fp if isinstance(fp, str) else "")
         if has_block(spblocks):
-            print(f"ratchet: blocked — {_reasons(spblocks)}", file=sys.stderr)
+            print(f"cogpin: blocked — {_reasons(spblocks)}", file=sys.stderr)
             return 2
         return 0
     cmd = CommandFacts.from_tool_input(tool_input)
@@ -2485,7 +2485,7 @@ def cmd_gate() -> int:
     cmdblocks = run_command_gate(cfg, cmd)
     cmdblocks += run_branch_gate(cfg, cmd, _current_branch("."))
     if has_block(cmdblocks):
-        print(f"ratchet: blocked — {_reasons(cmdblocks)}", file=sys.stderr)
+        print(f"cogpin: blocked — {_reasons(cmdblocks)}", file=sys.stderr)
         return 2
     # 2) DoD gate on push/merge (bypassable; CI still gates)
     kind = push_or_merge(cmd.command)
@@ -2501,7 +2501,7 @@ def cmd_gate() -> int:
     blocks = [f for f in run_change(cfg, facts, allow_run=False) if f.severity == "block"]
     if blocks:
         hint = f' Override (agent-layer; CI still gates): set {cfg.meta.bypass_env}.' if cfg.meta.bypass_env else ""
-        print(f"ratchet: DoD not met for {kind}:\n{_render(blocks)}{hint}", file=sys.stderr)
+        print(f"cogpin: DoD not met for {kind}:\n{_render(blocks)}{hint}", file=sys.stderr)
         return 2
     return 0
 
@@ -2515,15 +2515,15 @@ def cmd_stop(cwd: str = ".") -> int:
         cfg = _read_working_config(cwd)
     except (OSError, ConfigError):
         # The gate fail-OPENS on an unloadable config — but it must NOT do so SILENTLY (#16).
-        # A PRESENT-but-unloadable ratchet.toml (bad TOML, a primitive a stale engine doesn't
+        # A PRESENT-but-unloadable cogpin.toml (bad TOML, a primitive a stale engine doesn't
         # know, or an unreadable file) means the real-time gate is OFF; say so on stderr, once
         # per turn-end. Keyed on EXISTENCE, not the exception type — a present-but-unreadable
         # file raises OSError too, so branching on ConfigError-vs-OSError would miss it. An
         # absent config is genuinely nothing to gate → stay silent. The decision still rides
         # stdout as "{}" (stderr-only notice keeps the Stop-hook JSON contract intact).
-        if os.path.exists(os.path.join(cwd, "ratchet.toml")):
-            print("ratchet: ratchet.toml present but the agent-layer engine can't load it — "
-                  "real-time gate OFF this turn; run `ratchet doctor`", file=sys.stderr)
+        if os.path.exists(os.path.join(cwd, "cogpin.toml")):
+            print("cogpin: cogpin.toml present but the agent-layer engine can't load it — "
+                  "real-time gate OFF this turn; run `cogpin doctor`", file=sys.stderr)
         print("{}")
         return 0
     facts = _local_facts(cwd, cfg.repo.default_branch)
@@ -2540,7 +2540,7 @@ def cmd_stop(cwd: str = ".") -> int:
         print("{}")
         return 0
     tree = (_git(cwd, ["rev-parse", "HEAD^{tree}"]) or "").strip()
-    state = os.path.join(cwd, ".ratchet", ".state")
+    state = os.path.join(cwd, ".cogpin", ".state")
     try:
         prev = open(state, encoding="utf-8").read().strip()
     except OSError:
@@ -2605,7 +2605,7 @@ def cmd_check(
         # base-pinning bypass (rename it to an unfetched ref → silent HEAD~1 fallback).
         default_branch = default_branch_arg or wcfg.repo.default_branch
         if allow_bypass and _bypass_reason(wcfg, _attestation_text(cwd, wcfg)):
-            print("ratchet: BYPASS (agent-layer, pre-push) — CI still enforces", file=sys.stderr)
+            print("cogpin: BYPASS (agent-layer, pre-push) — CI still enforces", file=sys.stderr)
             return 0
     except (OSError, ConfigError):
         default_branch = default_branch_arg or "main"
@@ -2613,7 +2613,7 @@ def cmd_check(
         base = _resolve_base(cwd, default_branch, authoritative=default_branch_arg is not None)
     except BaseUnreachable:
         print(
-            f"ratchet: base ref origin/{default_branch} is unreachable — refusing to gate a "
+            f"cogpin: base ref origin/{default_branch} is unreachable — refusing to gate a "
             f"narrowed diff (set 'fetch-depth: 0' on actions/checkout)", file=sys.stderr,
         )
         return 1
@@ -2623,9 +2623,9 @@ def cmd_check(
         # stay fail-CLOSED (return 1). When the cause is an unknown-primitive / unsupported-schema
         # ConfigError, the vendored engine running this check is stale relative to the config it
         # gates (#16) — name that, instead of the opaque "cannot load config".
-        hint = (" — the vendored engine looks stale for this config; run `ratchet update`"
+        hint = (" — the vendored engine looks stale for this config; run `cogpin update`"
                 if any(s in str(e) for s in ("unknown primitive", "unsupported schema")) else "")
-        print(f"ratchet: cannot load base-pinned config: {e}{hint}", file=sys.stderr)
+        print(f"cogpin: cannot load base-pinned config: {e}{hint}", file=sys.stderr)
         return 1
     head = "HEAD"
     facts = DiffFacts.from_range(cwd, base or "HEAD~1", head)
@@ -2663,12 +2663,12 @@ def cmd_check(
         # (BaseUnreachable, an unloadable base-pinned config) still return 1, so a shadow run
         # can't go green while the gate never actually evaluated the diff.
         if report_only:
-            print(f"ratchet: report-only — {n} blocking finding(s) WOULD fail "
+            print(f"cogpin: report-only — {n} blocking finding(s) WOULD fail "
                   "(exit 0; remove --report-only / set report-only:false to enforce)")
             return 0
-        print(f"ratchet: definition-of-done NOT met ({n} blocking)", file=sys.stderr)
+        print(f"cogpin: definition-of-done NOT met ({n} blocking)", file=sys.stderr)
         return 1
-    print(f"ratchet: ok ({len(findings)} advisory warning(s))")
+    print(f"cogpin: ok ({len(findings)} advisory warning(s))")
     return 0
 
 
@@ -2710,15 +2710,15 @@ def cmd_backtest(cwd: str = ".", rng: str = "", config: str | None = None,
     if config and not os.path.exists(config):
         # _slurp swallows OSError → "" → a typo'd path would misreport as "schema version 0";
         # name the real cause instead. Still fail-CLOSED (exit 2), never a false-clean.
-        print(f"ratchet: no such config file: {config}", file=sys.stderr)
+        print(f"cogpin: no such config file: {config}", file=sys.stderr)
         return 2
     try:
         cfg = Config.parse(_slurp(config)) if config else _read_working_config(cwd)
     except (OSError, ConfigError) as e:
-        print(f"ratchet: cannot load config: {e}", file=sys.stderr)
+        print(f"cogpin: cannot load config: {e}", file=sys.stderr)
         return 2
     if (_git(cwd, ["rev-parse", "--is-shallow-repository"]) or "").strip() == "true":
-        print("ratchet: shallow clone — backtest can't diff commits against their parents; "
+        print("cogpin: shallow clone — backtest can't diff commits against their parents; "
               "fetch full history first (`git fetch --unshallow`)", file=sys.stderr)
         return 2
     # One enumeration call. %x1e field framing (a subject can contain a tab) + split('\n')
@@ -2727,11 +2727,11 @@ def cmd_backtest(cwd: str = ".", rng: str = "", config: str | None = None,
     # (merge-commit), never a dive into second-parent ancestry.
     raw = _git(cwd, ["log", "--reverse", "--first-parent", "--format=%H%x1e%h%x1e%P%x1e%s", rng])
     if raw is None:   # git error (bad range) — distinct from "" (valid, zero commits)
-        print(f"ratchet: invalid range `{rng}` (git could not resolve it)", file=sys.stderr)
+        print(f"cogpin: invalid range `{rng}` (git could not resolve it)", file=sys.stderr)
         return 2
     rows = [r for r in raw.split("\n") if r]
     if not rows:
-        print(f"ratchet: no commits in range `{rng}`")
+        print(f"cogpin: no commits in range `{rng}`")
         return 0
     sizes_needed = any(c.primitive == "max_added_file_bytes" for c in cfg.checks)
     blind = _backtest_blind(cfg)
@@ -2755,7 +2755,7 @@ def cmd_backtest(cwd: str = ".", rng: str = "", config: str | None = None,
             print(f"  ✗ {short} {subject[:60]} → {', '.join(blocks)}")
         else:
             print(f"  ✓ {short} {subject[:60]}")
-    print(f"\nratchet backtest: {would_block}/{evaluated} commit(s) would block "
+    print(f"\ncogpin backtest: {would_block}/{evaluated} commit(s) would block "
           "(first-parent; per-commit ≈ per-PR on squash/merge-commit workflows)")
     if blind:
         print(f"  note: {len(blind)} check(s) NOT evaluated by backtest — they need a `run` or "
@@ -2834,7 +2834,7 @@ def cmd_fixture(
     commit_msg: str | None = None,
 ) -> int:
     """Config-as-code fixture testing (#18): evaluate the WORKING-tree policy against a crafted
-    unified-diff fixture and assert per-check expectations — turning ratchet.toml into tested
+    unified-diff fixture and assert per-check expectations — turning cogpin.toml into tested
     code. Uses the working config (you test the policy you're EDITING, not a base pin), and
     never runs `run` blocks (allow_run=False). A unified diff carries no commit messages, so
     commit-message checks (commit_footer, commit-scoped require_message_pattern/forbid_in_message)
@@ -2843,27 +2843,27 @@ def cmd_fixture(
     2 = couldn't run the test (no/bad diff, config, or context file; unknown or un-evaluable
     --expect id)."""
     if not diff_file:
-        print("ratchet: --expect-block/--expect-clean require --diff-file (a fixture to assert "
+        print("cogpin: --expect-block/--expect-clean require --diff-file (a fixture to assert "
               "against)", file=sys.stderr)
         return 2
     try:
         cfg = _read_working_config(cwd)
     except (OSError, ConfigError) as e:
-        print(f"ratchet: cannot load ratchet.toml: {e}", file=sys.stderr)
+        print(f"cogpin: cannot load cogpin.toml: {e}", file=sys.stderr)
         return 2
     if not os.path.exists(diff_file):
-        print(f"ratchet: no such diff file: {diff_file}", file=sys.stderr)
+        print(f"cogpin: no such diff file: {diff_file}", file=sys.stderr)
         return 2
     try:
         with open(diff_file, encoding="utf-8", errors="replace") as fh:
             text = fh.read()
     except OSError as e:
-        print(f"ratchet: cannot read diff file: {e}", file=sys.stderr)
+        print(f"cogpin: cannot read diff file: {e}", file=sys.stderr)
         return 2
     try:
         facts = DiffFacts.from_unified_diff(text)
     except ValueError as e:
-        print(f"ratchet: {diff_file}: {e}", file=sys.stderr)
+        print(f"cogpin: {diff_file}: {e}", file=sys.stderr)
         return 2
     # Layer in any supplied context — a fixture CAN carry it (a body/commit message, a reviews/
     # checks JSON), which is what makes the message/approval/checks/pr_body checks testable here.
@@ -2872,7 +2872,7 @@ def cmd_fixture(
     # blind detection and yield a false-clean — the bug this whole feature exists to prevent.
     if pr_body_file is not None:
         if not os.path.exists(pr_body_file):
-            print(f"ratchet: no such --pr-body-file: {pr_body_file}", file=sys.stderr)
+            print(f"cogpin: no such --pr-body-file: {pr_body_file}", file=sys.stderr)
             return 2
         with open(pr_body_file, encoding="utf-8", errors="replace") as fh:
             facts.pr_body = fh.read()
@@ -2882,11 +2882,11 @@ def cmd_fixture(
         facts.approvals = [a.strip() for a in approvals.split(",") if a.strip()]
     if reviews_file is not None:
         if not os.path.exists(reviews_file):
-            print(f"ratchet: no such --reviews-file: {reviews_file}", file=sys.stderr)
+            print(f"cogpin: no such --reviews-file: {reviews_file}", file=sys.stderr)
             return 2
         facts.reviews = _load_reviews(reviews_file)
         if facts.reviews is None:
-            print(f"ratchet: cannot parse --reviews-file (expected a JSON array): {reviews_file}",
+            print(f"cogpin: cannot parse --reviews-file (expected a JSON array): {reviews_file}",
                   file=sys.stderr)
             return 2
     if head_sha:
@@ -2894,11 +2894,11 @@ def cmd_fixture(
     facts.pr_author = pr_author
     if checks_file is not None:
         if not os.path.exists(checks_file):
-            print(f"ratchet: no such --checks-file: {checks_file}", file=sys.stderr)
+            print(f"cogpin: no such --checks-file: {checks_file}", file=sys.stderr)
             return 2
         facts.checks = _load_checks(checks_file)
         if facts.checks is None:
-            print(f"ratchet: cannot parse --checks-file (expected a JSON array): {checks_file}",
+            print(f"cogpin: cannot parse --checks-file (expected a JSON array): {checks_file}",
                   file=sys.stderr)
             return 2
 
@@ -2911,24 +2911,24 @@ def cmd_fixture(
     if not want_block and not want_clean:
         # a fixture with no expectations is a preview ("what would fire?") — exit 0, nothing
         # to assert. The --expect flags are what turn it into a pass/fail regression test.
-        print(f"ratchet: {len(findings)} finding(s) over {diff_file} (no --expect assertions)")
+        print(f"cogpin: {len(findings)} finding(s) over {diff_file} (no --expect assertions)")
         return 0
     # Validate the expectation ids BEFORE asserting — a typo or an un-evaluable check would
     # otherwise read as a silent pass/fail, the exact false-confidence fixtures exist to kill.
     ids = {c.id for c in cfg.checks}
     unknown = sorted({i for i in want_block + want_clean if i not in ids})
     if unknown:
-        print(f"ratchet: --expect names check id(s) not in ratchet.toml: {', '.join(unknown)}",
+        print(f"cogpin: --expect names check id(s) not in cogpin.toml: {', '.join(unknown)}",
               file=sys.stderr)
         return 2
     overlap = sorted(set(want_block) & set(want_clean))
     if overlap:
-        print(f"ratchet: check id(s) in BOTH --expect-block and --expect-clean: "
+        print(f"cogpin: check id(s) in BOTH --expect-block and --expect-clean: "
               f"{', '.join(overlap)}", file=sys.stderr)
         return 2
     blind = sorted((set(want_block) | set(want_clean)) & _fixture_blind(cfg, facts))
     if blind:
-        print(f"ratchet: --expect names check(s) this fixture can't evaluate (a diff alone can't "
+        print(f"cogpin: --expect names check(s) this fixture can't evaluate (a diff alone can't "
               f"decide them): a `run` needs a checkout; max_added_file_bytes needs blob sizes; "
               f"an agent-layer or attest/judge check yields no change-layer finding; and message/"
               f"approval/checks/pr_body checks need --commit-msg / --reviews-file / --checks-file / "
@@ -2947,10 +2947,10 @@ def cmd_fixture(
     if failures:
         for msg in failures:
             print(f"  ✗ {msg}", file=sys.stderr)
-        print(f"ratchet: fixture {diff_file}: {len(failures)} expectation(s) FAILED",
+        print(f"cogpin: fixture {diff_file}: {len(failures)} expectation(s) FAILED",
               file=sys.stderr)
         return 1
-    print(f"ratchet: fixture {diff_file}: all {len(want_block) + len(want_clean)} "
+    print(f"cogpin: fixture {diff_file}: all {len(want_block) + len(want_clean)} "
           "expectation(s) met")
     return 0
 
@@ -2964,8 +2964,8 @@ def _config_advisories(cfg: Config) -> list[str]:
         if c.primitive == "require_checks_green" and not c.need and not c.ignore:
             out.append(
                 f"`{c.id}` (require_checks_green) sets neither `need` nor `ignore`: run inside "
-                "the workflow it gates, ratchet's own still-pending check self-blocks. Set "
-                '`ignore = ["<ratchet job name>"]`, or `need` only the other checks.'
+                "the workflow it gates, cogpin's own still-pending check self-blocks. Set "
+                '`ignore = ["<cogpin job name>"]`, or `need` only the other checks.'
             )
     return out
 
@@ -2975,37 +2975,37 @@ def cmd_validate(path: str) -> int:
         with open(path, encoding="utf-8") as fh:
             cfg = Config.parse(fh.read())
     except (OSError, ConfigError) as e:
-        print(f"ratchet: invalid config: {e}", file=sys.stderr)
+        print(f"cogpin: invalid config: {e}", file=sys.stderr)
         return 1
     print(
-        f"ratchet: {path} valid — {len(cfg.checks)} checks, base_pinned={cfg.meta.base_pinned}"
+        f"cogpin: {path} valid — {len(cfg.checks)} checks, base_pinned={cfg.meta.base_pinned}"
     )
     for note in _config_advisories(cfg):
-        print(f"ratchet: note: {note}", file=sys.stderr)
+        print(f"cogpin: note: {note}", file=sys.stderr)
     return 0
 
 
 def cmd_init(path: str) -> int:
     if os.path.exists(path):
-        print(f"ratchet: {path} already exists — leaving it untouched", file=sys.stderr)
+        print(f"cogpin: {path} already exists — leaving it untouched", file=sys.stderr)
         return 1
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(INIT_TEMPLATE)
-    print(f"ratchet: wrote starter {path} — edit it, then wire the hooks (see README)")
+    print(f"cogpin: wrote starter {path} — edit it, then wire the hooks (see README)")
     return 0
 
 
 def _read_working_config(cwd: str) -> Config:
-    # errors="replace" so a non-UTF-8 ratchet.toml surfaces as a ConfigError (bad TOML),
+    # errors="replace" so a non-UTF-8 cogpin.toml surfaces as a ConfigError (bad TOML),
     # which callers already handle, rather than an uncaught UnicodeDecodeError that would
     # crash the gate hook (the gate must never block/traceback on a malformed config).
-    with open(os.path.join(cwd, "ratchet.toml"), encoding="utf-8", errors="replace") as fh:
+    with open(os.path.join(cwd, "cogpin.toml"), encoding="utf-8", errors="replace") as fh:
         return Config.parse(fh.read())
 
 
 def cmd_suggest(cwd: str = ".", fmt: str = "json") -> int:
     """Extract repo facts → JSON (the contract the host agent consumes) or an all-warn
-    starter draft. Writes NOTHING — the agent authors `ratchet.toml.draft`, never this."""
+    starter draft. Writes NOTHING — the agent authors `cogpin.toml.draft`, never this."""
     scan = scan_repo(cwd)
     print(json.dumps(_scan_to_dict(scan), indent=2) if fmt == "json" else render_suggest_toml(scan))
     return 0
@@ -3017,11 +3017,11 @@ def cmd_gaps(cwd: str = ".", fmt: str = "text") -> int:
     try:
         cfg = _read_working_config(cwd)
     except (OSError, ConfigError):
-        print("ratchet: no ratchet.toml — run /ratchet-init first")
+        print("cogpin: no cogpin.toml — run /cogpin-init first")
         return 0
     scan = scan_repo(cwd)
     if not scan.house_rules:
-        print("ratchet: no CLAUDE.md/AGENTS.md house-rules found")
+        print("cogpin: no CLAUDE.md/AGENTS.md house-rules found")
         return 0
     rows = []
     for h in scan.house_rules:
@@ -3058,11 +3058,11 @@ def cmd_gaps(cwd: str = ".", fmt: str = "text") -> int:
         for h, _b, c, _bk in bound_block:
             print(f"    {h.suggested_id} → {c.id if c else '?'}")
     nb = len(bound_block) + len(bound_warn)
-    print(f"\nratchet: {len(rows)} house-rule(s) · {nb} bound · {len(unbound)} unbound — advisory only")
+    print(f"\ncogpin: {len(rows)} house-rule(s) · {nb} bound · {len(unbound)} unbound — advisory only")
     return 0
 
 
-def cmd_draft_lint(cwd: str = ".", config: str = "ratchet.toml.draft", simulate: bool = False) -> int:
+def cmd_draft_lint(cwd: str = ".", config: str = "cogpin.toml.draft", simulate: bool = False) -> int:
     """Strict-validate the agent-authored draft (superset of validate). Exit 0 iff
     structure is clean AND zero review markers remain; else 1."""
     try:
@@ -3071,7 +3071,7 @@ def cmd_draft_lint(cwd: str = ".", config: str = "ratchet.toml.draft", simulate:
         with open(os.path.join(cwd, config), encoding="utf-8", errors="replace") as fh:
             text = fh.read()
     except OSError:
-        print(f"ratchet: no draft at {config} — run `ratchet suggest` / `/ratchet-init` first", file=sys.stderr)
+        print(f"cogpin: no draft at {config} — run `cogpin suggest` / `/cogpin-init` first", file=sys.stderr)
         return 1
     existing = None
     try:
@@ -3086,9 +3086,9 @@ def cmd_draft_lint(cwd: str = ".", config: str = "ratchet.toml.draft", simulate:
         print(f"  [{tags[f.level]}] {loc}{f.msg}")
     blocking = sum(1 for f in findings if f.level in ("error", "todo"))
     if blocking:
-        print(f"ratchet: draft not ready ({blocking} item(s) to resolve)", file=sys.stderr)
+        print(f"cogpin: draft not ready ({blocking} item(s) to resolve)", file=sys.stderr)
         return 1
-    print("ratchet: draft OK — `mv ratchet.toml.draft ratchet.toml` to arm it")
+    print("cogpin: draft OK — `mv cogpin.toml.draft cogpin.toml` to arm it")
     return 0
 
 
@@ -3096,26 +3096,26 @@ def cmd_draft_lint(cwd: str = ".", config: str = "ratchet.toml.draft", simulate:
 # WIRING  —  install / uninstall / doctor  (the adoption surface)
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# The agent layer keeps `${CLAUDE_PLUGIN_ROOT}/ratchet.py` (the var exists only
+# The agent layer keeps `${CLAUDE_PLUGIN_ROOT}/cogpin.py` (the var exists only
 # in-session). The CHANGE layer must run in CI / a teammate's pre-push / a fresh
 # clone where that var is undefined and base-pinning needs the engine + config in
-# git history — so `install` VENDORS the engine to `.ratchet/ratchet.py`
+# git history — so `install` VENDORS the engine to `.cogpin/cogpin.py`
 # (committed, base-pinnable, offline) and wires a sentinel-delimited managed block
 # into the effective pre-push, coexisting with husky/lefthook/pre-commit/hooksPath.
 
-RATCHET_BEGIN = "# >>> ratchet (managed block) >>>"
-RATCHET_END = "# <<< ratchet <<<"
+COGPIN_BEGIN = "# >>> cogpin (managed block) >>>"
+COGPIN_END = "# <<< cogpin <<<"
 
 PREPUSH_BLOCK = f"""\
-{RATCHET_BEGIN}
-if [ -f .ratchet/ratchet.py ] && command -v python3 >/dev/null 2>&1; then
-    python3 .ratchet/ratchet.py check --cwd . --allow-bypass < /dev/null || exit 1
+{COGPIN_BEGIN}
+if [ -f .cogpin/cogpin.py ] && command -v python3 >/dev/null 2>&1; then
+    python3 .cogpin/cogpin.py check --cwd . --allow-bypass < /dev/null || exit 1
 fi
-{RATCHET_END}
+{COGPIN_END}
 """
 
 CI_WORKFLOW = """\
-name: ratchet
+name: cogpin
 on:
   pull_request: {}
   push:
@@ -3125,21 +3125,21 @@ permissions:
   pull-requests: read
   checks: read
 jobs:
-  ratchet:
+  cogpin:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: IvanWng97/ratchet@v0
+      - uses: IvanWng97/cogpin@v0
 """
 
 LEFTHOOK_SNIPPET = """\
 # lefthook detected — add to lefthook.yml, then `lefthook install`:
 pre-push:
   commands:
-    ratchet:
-      run: python3 .ratchet/ratchet.py check --cwd .
+    cogpin:
+      run: python3 .cogpin/cogpin.py check --cwd .
 """
 
 PRECOMMIT_SNIPPET = """\
@@ -3147,9 +3147,9 @@ PRECOMMIT_SNIPPET = """\
 # (default_install_hook_types: [pre-push]); then `pre-commit install`:
 - repo: local
   hooks:
-    - id: ratchet
-      name: ratchet (Definition-of-Done)
-      entry: python3 .ratchet/ratchet.py check --cwd .
+    - id: cogpin
+      name: cogpin (Definition-of-Done)
+      entry: python3 .cogpin/cogpin.py check --cwd .
       language: system
       stages: [pre-push]
       pass_filenames: false
@@ -3180,7 +3180,7 @@ def _atomic_write(path: str, text: str, *, mode: int = 0o644, confine: str | Non
     target (stow-safe — never replaces the symlink with a regular file): mkstemp in
     the real directory + os.replace onto the real file. `confine` (when set) refuses a
     write whose realpath escapes that root — for committed gate files (engine/config) a
-    repo that ships `.ratchet/ratchet.py` as a symlink to `../../etc/…` must NOT make
+    repo that ships `.cogpin/cogpin.py` as a symlink to `../../etc/…` must NOT make
     `install` clobber an arbitrary path on a victim's clone; the pre-push hook write
     deliberately omits `confine` because a stow-symlinked hook is intended."""
     real = os.path.realpath(path)
@@ -3188,7 +3188,7 @@ def _atomic_write(path: str, text: str, *, mode: int = 0o644, confine: str | Non
         raise OSError(f"refusing to write {path}: resolves outside the repo ({real})")
     d = os.path.dirname(real) or "."
     os.makedirs(d, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=d, prefix=".ratchet-", suffix=".tmp")
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".cogpin-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
@@ -3206,12 +3206,12 @@ def _replace_or_append_block(cur: str, block: str) -> str:
     """Replace the sentinel-delimited managed block in `cur` with `block`, else append.
     Byte-idempotent: a second call with the same block reproduces the input."""
     block = block if block.endswith("\n") else block + "\n"
-    bi = cur.find(RATCHET_BEGIN)
+    bi = cur.find(COGPIN_BEGIN)
     if bi == -1:
         if cur and not cur.endswith("\n"):
             cur += "\n"
         return cur + block
-    ei = cur.find(RATCHET_END, bi)
+    ei = cur.find(COGPIN_END, bi)
     if ei == -1:  # malformed begin-without-end → replace to EOF
         return cur[:bi] + block
     nl = cur.find("\n", ei)
@@ -3221,10 +3221,10 @@ def _replace_or_append_block(cur: str, block: str) -> str:
 
 def _strip_block(cur: str) -> str:
     """Remove exactly the sentinel span (uninstall). No-op when absent."""
-    bi = cur.find(RATCHET_BEGIN)
+    bi = cur.find(COGPIN_BEGIN)
     if bi == -1:
         return cur
-    ei = cur.find(RATCHET_END, bi)
+    ei = cur.find(COGPIN_END, bi)
     if ei == -1:
         return cur[:bi]
     nl = cur.find("\n", ei)
@@ -3233,10 +3233,10 @@ def _strip_block(cur: str) -> str:
 
 
 def _ensure_gitignore(root: str) -> None:
-    """Scoped + idempotent: ignore `.ratchet/.state` (the debounce state) — NEVER the
-    whole `.ratchet/` dir, which would un-commit the vendored engine."""
+    """Scoped + idempotent: ignore `.cogpin/.state` (the debounce state) — NEVER the
+    whole `.cogpin/` dir, which would un-commit the vendored engine."""
     p = os.path.join(root, ".gitignore")
-    line = ".ratchet/.state"
+    line = ".cogpin/.state"
     cur = _slurp(p)
     if line in {ln.strip() for ln in cur.splitlines()}:
         return
@@ -3286,11 +3286,11 @@ def _effective_hook_target(cwd: str, root: str) -> tuple[str, str]:
 
 
 def _vendor_engine(root: str) -> str | None:
-    """Copy this running engine → `.ratchet/ratchet.py`. Returns the dest, or None when
+    """Copy this running engine → `.cogpin/cogpin.py`. Returns the dest, or None when
     it would self-reference (running `install` FROM the already-vendored copy → never
     truncate the file we're executing)."""
     src = os.path.realpath(__file__)
-    dst = os.path.join(root, ".ratchet", "ratchet.py")
+    dst = os.path.join(root, ".cogpin", "cogpin.py")
     if os.path.realpath(dst) == src:
         return None
     _atomic_write(dst, _slurp(src), mode=0o644, confine=root)
@@ -3343,67 +3343,67 @@ def _engine_skew(vendored_src: str, cfg_primitives: set[str], cfg_schema: int,
     """Compare a VENDORED engine source against the config it must serve + the running engine.
     PURE (cmd_doctor does the I/O and passes RAW config values, so detection works even when
     the running engine can't validate the config — the exact skew case). Returns (status,
-    label, fix) rows. The VENDORED .ratchet/ratchet.py drives the CHANGE layer (the pre-push
+    label, fix) rows. The VENDORED .cogpin/cogpin.py drives the CHANGE layer (the pre-push
     hook / CI); too old for its config, that layer fails CLOSED — it rejects a config it can't
     parse and over-blocks the push with a confusing "cannot load config" (#16). These rows name
-    the real cause and point at `ratchet update`. (The agent-layer fail-OPEN half of #16 — the
+    the real cause and point at `cogpin update`. (The agent-layer fail-OPEN half of #16 — the
     PLUGIN engine, not this vendored copy — is surfaced separately by cmd_stop's notice.)"""
     rows: list[tuple[str, str, str]] = []
     vend_prims, vend_schema = _extract_engine_meta(vendored_src)
     if not vend_prims:
         rows.append(("warn", "vendored engine: can't determine its primitive set (very old or unparseable copy)",
-                     "run `ratchet update` to re-vendor the active engine"))
+                     "run `cogpin update` to re-vendor the active engine"))
     else:
         unknown = sorted(p for p in cfg_primitives if p and p not in vend_prims)
         if unknown:
             rows.append(("fail", f"vendored engine is STALE — config uses {', '.join(unknown)} that "
-                                 ".ratchet/ratchet.py doesn't know; the change-layer gate (pre-push/CI) "
+                                 ".cogpin/cogpin.py doesn't know; the change-layer gate (pre-push/CI) "
                                  "will reject this config",
-                         "run `ratchet update` to re-vendor the active engine"))
+                         "run `cogpin update` to re-vendor the active engine"))
     if vend_schema is not None and cfg_schema and vend_schema != cfg_schema:
         rows.append(("fail", f"vendored engine schema v{vend_schema} ≠ config schema v{cfg_schema} "
-                             "(the change layer will reject the config)", "run `ratchet update`"))
+                             "(the change layer will reject the config)", "run `cogpin update`"))
     elif vend_schema is not None and running_schema and vend_schema != running_schema:
         rows.append(("warn", f"vendored engine schema v{vend_schema} differs from the active engine "
-                             f"v{running_schema}", "run `ratchet update` to align"))
+                             f"v{running_schema}", "run `cogpin update` to align"))
     return rows
 
 
 def cmd_update(cwd: str = ".") -> int:
-    """Re-vendor the RUNNING engine → `.ratchet/ratchet.py` — the first-class update path for
+    """Re-vendor the RUNNING engine → `.cogpin/cogpin.py` — the first-class update path for
     #16's stale-engine skew (no more "remember to re-run install"). Copies the running engine
     verbatim (no content injection), exactly like install; a vendored-engine diff is still
     gated by the change layer (protected_path + base-pin) on the PR, so this is not a
     self_protect bypass. Idempotent: a no-op + report when already current."""
     root = _repo_root(cwd)
     if root is None:
-        print("ratchet: not a git repository — run `git init` first", file=sys.stderr)
+        print("cogpin: not a git repository — run `git init` first", file=sys.stderr)
         return 1
-    dst = os.path.join(root, ".ratchet", "ratchet.py")
+    dst = os.path.join(root, ".cogpin", "cogpin.py")
     running = os.path.realpath(__file__)
     if os.path.realpath(dst) == running:
-        print("ratchet: cannot update from the vendored copy itself — run via the plugin engine "
-              "(inside Claude Code, or `python3 <plugin>/ratchet.py update`)", file=sys.stderr)
+        print("cogpin: cannot update from the vendored copy itself — run via the plugin engine "
+              "(inside Claude Code, or `python3 <plugin>/cogpin.py update`)", file=sys.stderr)
         return 1
     new_src = _slurp(running)
     old_src = _slurp(dst) if os.path.exists(dst) else ""
     if old_src == new_src:
-        print(f"ratchet: .ratchet/ratchet.py already current (schema v{SCHEMA_VERSION})")
+        print(f"cogpin: .cogpin/cogpin.py already current (schema v{SCHEMA_VERSION})")
         return 0
     _, old_schema = _extract_engine_meta(old_src) if old_src else (set(), None)
     if _vendor_engine(root) is None:   # self-reference already excluded above; defensive
-        print("ratchet: could not re-vendor the engine", file=sys.stderr)
+        print("cogpin: could not re-vendor the engine", file=sys.stderr)
         return 1
     old_desc = (f"schema v{old_schema}" if old_schema is not None
                 else ("absent" if not old_src else "unknown schema"))
-    print(f"ratchet: re-vendored .ratchet/ratchet.py ({old_desc} → schema v{SCHEMA_VERSION})")
+    print(f"cogpin: re-vendored .cogpin/cogpin.py ({old_desc} → schema v{SCHEMA_VERSION})")
     return 0
 
 
 def _exec_mode(real: str) -> int:
     """The mode for an (atomic re-)write of a hook file: PRESERVE an existing file's perms
     and only ensure +x — appending the managed block must not widen a husky / `.githooks`
-    hook to 0o755. A brand-new hook ratchet authors is 0o755."""
+    hook to 0o755. A brand-new hook cogpin authors is 0o755."""
     if os.path.exists(real):
         return (os.stat(real).st_mode & 0o777) | 0o111
     return 0o755
@@ -3430,7 +3430,7 @@ def _install_prepush(target_path: str) -> None:
 def _write_ci(root: str, branch: str = "main") -> str | None:
     """Scaffold the change-layer CI workflow IF ABSENT (non-clobber), with the push-trigger
     branch set to the repo's real default branch."""
-    p = os.path.join(root, ".github", "workflows", "ratchet.yml")
+    p = os.path.join(root, ".github", "workflows", "cogpin.yml")
     if os.path.exists(p):
         return None
     _atomic_write(p, CI_WORKFLOW.replace("branches: [main]", f"branches: [{branch}]"), mode=0o644, confine=root)
@@ -3438,7 +3438,7 @@ def _write_ci(root: str, branch: str = "main") -> str | None:
 
 
 def _scaffold_config(branch: str) -> str:
-    """The starter `ratchet.toml`, with the detected default branch substituted for the
+    """The starter `cogpin.toml`, with the detected default branch substituted for the
     `main` default (so base-pinning + branch-first are correct on master/trunk repos)."""
     if branch == "main":
         return INIT_TEMPLATE
@@ -3448,15 +3448,15 @@ def _scaffold_config(branch: str) -> str:
 
 
 def _protects_gate_files(cfg: Config) -> bool:
-    """True iff some protected_path/self_protect check's globs cover the engine, `ratchet.toml`,
+    """True iff some protected_path/self_protect check's globs cover the engine, `cogpin.toml`,
     AND the CI workflow (doctor #8 — the engine-neuter defense). The engine is matched at the
-    vendored `.ratchet/ratchet.py` OR a root `ratchet.py` (ratchet's own repo)."""
+    vendored `.cogpin/cogpin.py` OR a root `cogpin.py` (cogpin's own repo)."""
     for c in cfg.checks:
         if c.primitive not in ("protected_path", "self_protect") or not c.paths:
             continue
-        covers_engine = _path_matches(".ratchet/ratchet.py", c.paths) or _path_matches("ratchet.py", c.paths)
-        covers_config = _path_matches("ratchet.toml", c.paths)
-        covers_ci = _path_matches(".github/workflows/ratchet.yml", c.paths)
+        covers_engine = _path_matches(".cogpin/cogpin.py", c.paths) or _path_matches("cogpin.py", c.paths)
+        covers_config = _path_matches("cogpin.toml", c.paths)
+        covers_ci = _path_matches(".github/workflows/cogpin.yml", c.paths)
         if covers_engine and covers_config and covers_ci:
             return True
     return False
@@ -3472,7 +3472,7 @@ def _str_list(v: object) -> list[str]:
 def _emit_claude_code(cap: Capability) -> tuple[list[str], list[str], list[str]]:
     """Render a declared Capability floor to (deny, allow, warnings) for Claude Code
     settings.json permissions. PURE — no I/O. `warnings` flag the postures settings.json
-    cannot actually GUARANTEE (egress, fs confinement) so emit never oversells: ratchet
+    cannot actually GUARANTEE (egress, fs confinement) so emit never oversells: cogpin
     declares the intent, the OS/harness is the boundary (see docs/composition.md)."""
     deny: list[str] = []
     allow: list[str] = []
@@ -3489,7 +3489,7 @@ def _emit_claude_code(cap: Capability) -> tuple[list[str], list[str], list[str]]
         allow.append(f"Bash({v}:*)")
     if cap.allow_commands:
         warns.append("allow_commands: for a TRUE allowlist set permissions.defaultMode to 'ask' "
-                     "or 'deny' in settings.json yourself — ratchet only adds the allow entries")
+                     "or 'deny' in settings.json yourself — cogpin only adds the allow entries")
     if cap.fs_confine:
         warns.append(f"fs_confine {cap.fs_confine}: settings.json cannot confine the filesystem "
                      "to a root — the declaration is recorded, but real confinement is an OS concern")
@@ -3498,20 +3498,20 @@ def _emit_claude_code(cap: Capability) -> tuple[list[str], list[str], list[str]]
 
 def cmd_capability_emit(cwd: str = ".", backend: str | None = None, dry_run: bool = False) -> int:
     """Compile the declared `[capability]` floor to the harness's native enforcement file.
-    GENERATE, never contain: ratchet writes the policy the harness will enforce and exits —
+    GENERATE, never contain: cogpin writes the policy the harness will enforce and exits —
     it is never in the syscall path. Idempotent + non-clobbering: it manages only the entries
-    it itself emitted (recorded in `.ratchet/capability-emitted.json`), never user-authored ones."""
+    it itself emitted (recorded in `.cogpin/capability-emitted.json`), never user-authored ones."""
     root = _repo_root(cwd) or cwd
     try:
         cfg = _read_working_config(root)
     except (OSError, ConfigError) as e:
-        print(f"ratchet: cannot read [capability] from ratchet.toml: {e}", file=sys.stderr)
+        print(f"cogpin: cannot read [capability] from cogpin.toml: {e}", file=sys.stderr)
         return 1
     cap = cfg.capability
     target = backend or cap.backend
     if target != "claude-code":
-        print(f"ratchet: [capability] declared for backend `{target}` — ratchet does not emit for "
-              f"it; wire your sandbox manually (ratchet declares the floor, the OS enforces)",
+        print(f"cogpin: [capability] declared for backend `{target}` — cogpin does not emit for "
+              f"it; wire your sandbox manually (cogpin declares the floor, the OS enforces)",
               file=sys.stderr)
         return 0
     # _emit_claude_code returns ([],[],[]) for an empty floor — reconcile still runs so that
@@ -3519,14 +3519,14 @@ def cmd_capability_emit(cwd: str = ".", backend: str | None = None, dry_run: boo
     # hold for the all-empty transition, not just one key dropped from a non-empty stanza.
     deny, allow, warns = _emit_claude_code(cap)
     settings_path = os.path.join(root, ".claude", "settings.json")
-    sidecar_path = os.path.join(root, ".ratchet", "capability-emitted.json")
+    sidecar_path = os.path.join(root, ".cogpin", "capability-emitted.json")
     raw = _read_json(settings_path)
     # FAIL CLOSED on a present-but-unusable settings.json: _read_json maps both "absent" and
     # "garbled" to None, and a valid-but-non-object (a JSON array/string) parses to a non-dict —
-    # either way, proceeding would replace the user's file with a ratchet-only document and
+    # either way, proceeding would replace the user's file with a cogpin-only document and
     # silently destroy their keys. Only an ABSENT file is a clean slate to write.
     if os.path.exists(settings_path) and not isinstance(raw, dict):
-        print(f"ratchet: refusing to emit — {settings_path} exists but isn't a JSON object "
+        print(f"cogpin: refusing to emit — {settings_path} exists but isn't a JSON object "
               f"(fix or remove it first); not overwriting it", file=sys.stderr)
         return 1
     settings = raw if isinstance(raw, dict) else {}
@@ -3538,26 +3538,26 @@ def cmd_capability_emit(cwd: str = ".", backend: str | None = None, dry_run: boo
     # declared-but-nothing-to-render case below, so a non-enforceable declaration is never silently
     # swallowed (fs_confine renders no deny/allow entries, only a warning).
     for w in warns:
-        print(f"ratchet: warning — {w}", file=sys.stderr)
+        print(f"cogpin: warning — {w}", file=sys.stderr)
     if not deny and not allow and not prior_deny and not prior_allow:
         # nothing emitted before AND nothing to render now. Distinguish a truly empty stanza from
         # one that IS declared but renders no settings.json entries (e.g. fs_confine only), so the
         # user isn't told their floor doesn't exist.
         msg = ("no [capability] floor declared" if cap.is_empty()
                else "[capability] declared but nothing is enforceable via settings.json (see warnings)")
-        print(f"ratchet: {msg} — nothing to emit", file=sys.stderr)
+        print(f"cogpin: {msg} — nothing to emit", file=sys.stderr)
         return 0
     perms = settings.get("permissions")
     perms = perms if isinstance(perms, dict) else {}
     cur_deny, cur_allow = _str_list(perms.get("deny")), _str_list(perms.get("allow"))
-    # Drop ONLY the entries ratchet emitted last time (preserve user-authored ones), then append
+    # Drop ONLY the entries cogpin emitted last time (preserve user-authored ones), then append
     # the freshly-rendered managed set deduped → idempotent (same stanza ⇒ byte-identical) and
     # non-clobbering. deny AND allow are reconciled symmetrically: a key emptied (or the whole
     # stanza removed) deletes its managed entries; a now-empty list deletes the key entirely so
     # the rendered output never carries a vestigial `"allow": []` / `"deny": []` / `permissions`.
     user_deny = [e for e in cur_deny if e not in prior_deny]
     user_allow = [e for e in cur_allow if e not in prior_allow]
-    # The sidecar is ratchet's OWNERSHIP ledger — record only entries ratchet actually added
+    # The sidecar is cogpin's OWNERSHIP ledger — record only entries cogpin actually added
     # (managed MINUS any that already existed as user-authored), NOT the full render. Otherwise a
     # user-authored entry that string-collides with a managed one (e.g. a hand-written
     # `Bash(curl:*)` deny alongside `no_network`) gets claimed as managed → silently deleted on a
@@ -3581,10 +3581,10 @@ def cmd_capability_emit(cwd: str = ".", backend: str | None = None, dry_run: boo
     _atomic_write(settings_path, rendered, confine=root)
     _atomic_write(sidecar_path, json.dumps({"deny": owned_deny, "allow": owned_allow}, indent=2) + "\n", confine=root)
     if deny or allow:
-        print(f"ratchet: emitted {len(deny)} deny + {len(allow)} allow entries to "
-              f".claude/settings.json (backend: claude-code) — the harness enforces, not ratchet")
+        print(f"cogpin: emitted {len(deny)} deny + {len(allow)} allow entries to "
+              f".claude/settings.json (backend: claude-code) — the harness enforces, not cogpin")
     else:
-        print("ratchet: retracted all ratchet-managed capability entries from .claude/settings.json")
+        print("cogpin: retracted all cogpin-managed capability entries from .claude/settings.json")
     return 0
 
 
@@ -3595,23 +3595,23 @@ def cmd_install(cwd: str = ".", vendor: bool = True, config: bool = True,
     check's severity/kind, so the block-requires-fact moat is untouched."""
     root = _repo_root(cwd)
     if root is None:
-        print("ratchet: not a git repository — run `git init` first", file=sys.stderr)
+        print("cogpin: not a git repository — run `git init` first", file=sys.stderr)
         return 1
     branch = _detect_default_branch(cwd)
     did: list[str] = []
     if vendor:
         dst = _vendor_engine(root)
-        did.append("vendored .ratchet/ratchet.py" if dst else "engine already vendored (self) — skipped")
+        did.append("vendored .cogpin/cogpin.py" if dst else "engine already vendored (self) — skipped")
     if config:
-        cfg_path = os.path.join(root, "ratchet.toml")
+        cfg_path = os.path.join(root, "cogpin.toml")
         if os.path.exists(cfg_path):
-            did.append("ratchet.toml exists — left untouched")
+            did.append("cogpin.toml exists — left untouched")
         else:
             _atomic_write(cfg_path, _scaffold_config(branch), confine=root)
-            did.append(f"wrote starter ratchet.toml (default_branch={branch})")
+            did.append(f"wrote starter cogpin.toml (default_branch={branch})")
     if gitignore:
         _ensure_gitignore(root)
-        did.append("ensured .gitignore covers .ratchet/.state")
+        did.append("ensured .gitignore covers .cogpin/.state")
     if hook:
         action, payload = _effective_hook_target(cwd, root)
         if action == "write":
@@ -3622,14 +3622,14 @@ def cmd_install(cwd: str = ".", vendor: bool = True, config: bool = True,
         else:
             did.append(f"pre-push skipped — {payload}")
     if ci:
-        did.append("scaffolded .github/workflows/ratchet.yml" if _write_ci(root, branch)
-                   else ".github/workflows/ratchet.yml exists — left untouched")
-    print("ratchet install:")
+        did.append("scaffolded .github/workflows/cogpin.yml" if _write_ci(root, branch)
+                   else ".github/workflows/cogpin.yml exists — left untouched")
+    print("cogpin install:")
     for d in did:
         print(f"  • {d}")
     if vendor or config or ci:
-        print("\nnext: `git add .ratchet/ratchet.py ratchet.toml .github/workflows/ratchet.yml` "
-              "& commit, then `ratchet doctor`")
+        print("\nnext: `git add .cogpin/cogpin.py cogpin.toml .github/workflows/cogpin.yml` "
+              "& commit, then `cogpin doctor`")
     return 0
 
 
@@ -3638,27 +3638,27 @@ def cmd_uninstall(cwd: str = ".") -> int:
     committed source (engine / config / workflow) — that is an explicit reviewable change."""
     root = _repo_root(cwd)
     if root is None:
-        print("ratchet: not a git repository", file=sys.stderr)
+        print("cogpin: not a git repository", file=sys.stderr)
         return 1
     action, payload = _effective_hook_target(cwd, root)
     if action != "write":
-        msg = (f"hooks managed by {action.split(':', 1)[1]} — remove the ratchet snippet by hand"
+        msg = (f"hooks managed by {action.split(':', 1)[1]} — remove the cogpin snippet by hand"
                if action.startswith("snippet:") else payload)
-        print(f"ratchet uninstall: {msg}")
+        print(f"cogpin uninstall: {msg}")
         return 0
     real = os.path.realpath(payload)
     cur = _slurp(real)
-    if not os.path.exists(real) or RATCHET_BEGIN not in cur:
-        print("ratchet uninstall: no managed block in the pre-push — nothing to strip")
+    if not os.path.exists(real) or COGPIN_BEGIN not in cur:
+        print("cogpin uninstall: no managed block in the pre-push — nothing to strip")
         return 0
     stripped = _strip_block(cur)
     if stripped.strip() in ("", "#!/bin/sh"):  # only our shebang remains → we authored it
         os.remove(real)
-        print(f"ratchet uninstall: removed the ratchet-authored pre-push hook ({real})")
+        print(f"cogpin uninstall: removed the cogpin-authored pre-push hook ({real})")
     else:
         _atomic_write(payload, stripped, mode=_exec_mode(real))
-        print(f"ratchet uninstall: stripped the managed block, kept the rest ({real})")
-    print("note: committed .ratchet/ratchet.py, ratchet.toml and the CI workflow are NOT removed "
+        print(f"cogpin uninstall: stripped the managed block, kept the rest ({real})")
+    print("note: committed .cogpin/cogpin.py, cogpin.toml and the CI workflow are NOT removed "
           "(remove them in a reviewed change)")
     return 0
 
@@ -3680,35 +3680,35 @@ def cmd_doctor(cwd: str = ".", as_json: bool = False) -> int:
 
     hard_fail = False
     engine_compiles = False
-    eng = os.path.join(base_dir, ".ratchet", "ratchet.py")
+    eng = os.path.join(base_dir, ".cogpin", "cogpin.py")
     if os.path.exists(eng):
         try:
             compile(_slurp(eng), eng, "exec")  # syntax-check; writes no __pycache__
-            add("ok", ".ratchet/ratchet.py present and compiles")
+            add("ok", ".cogpin/cogpin.py present and compiles")
             engine_compiles = True
         except SyntaxError as e:
-            add("fail", ".ratchet/ratchet.py does not compile", str(e).splitlines()[0])
+            add("fail", ".cogpin/cogpin.py does not compile", str(e).splitlines()[0])
             hard_fail = True
     else:
-        add("fail", ".ratchet/ratchet.py missing", "run `ratchet install` (or /ratchet-init) to vendor the engine")
+        add("fail", ".cogpin/cogpin.py missing", "run `cogpin install` (or /cogpin-init) to vendor the engine")
         hard_fail = True
 
     cfg: Config | None = None
-    cfg_path = os.path.join(base_dir, "ratchet.toml")
+    cfg_path = os.path.join(base_dir, "cogpin.toml")
     if os.path.exists(cfg_path):
         try:
             cfg = Config.parse(_slurp(cfg_path))
-            add("ok", f"ratchet.toml valid — {len(cfg.checks)} checks, base_pinned={cfg.meta.base_pinned}")
+            add("ok", f"cogpin.toml valid — {len(cfg.checks)} checks, base_pinned={cfg.meta.base_pinned}")
         except (OSError, ConfigError) as e:
-            add("fail", "ratchet.toml invalid", str(e))
+            add("fail", "cogpin.toml invalid", str(e))
             # an unknown-primitive / unsupported-schema ConfigError from the RUNNING engine is
             # the stale-engine signature, not a bad config — name the real cause + remedy (#16).
             if any(s in str(e) for s in ("unknown primitive", "unsupported schema")):
                 add("warn", "↳ the running engine may be stale relative to this config",
-                    "reinstall the plugin, or run `ratchet update` to re-vendor the engine")
+                    "reinstall the plugin, or run `cogpin update` to re-vendor the engine")
             hard_fail = True
     else:
-        add("fail", "ratchet.toml missing", "run `ratchet install` / `/ratchet-init`")
+        add("fail", "cogpin.toml missing", "run `cogpin install` / `/cogpin-init`")
         hard_fail = True
 
     # engine/config SKEW (#16): the vendored engine drives the CHANGE layer (pre-push/CI); too
@@ -3736,21 +3736,21 @@ def cmd_doctor(cwd: str = ".", as_json: bool = False) -> int:
         action, payload = _effective_hook_target(cwd, root)
         if action == "write":
             real = os.path.realpath(payload)
-            if os.path.exists(real) and RATCHET_BEGIN in _slurp(real):
+            if os.path.exists(real) and COGPIN_BEGIN in _slurp(real):
                 add("ok", f"pre-push managed block present ({real})")
             else:
-                add("warn", "pre-push managed block absent", "run `ratchet install` (CI is the authoritative gate)")
+                add("warn", "pre-push managed block absent", "run `cogpin install` (CI is the authoritative gate)")
         elif action.startswith("snippet:"):
             add("warn", f"hooks managed by {action.split(':', 1)[1]} — snippet expected (not auto-written)",
-                "add the ratchet snippet from `ratchet install`")
+                "add the cogpin snippet from `cogpin install`")
         else:
             add("warn", f"pre-push not wired — {payload}", "rely on CI")
 
-    wf = os.path.join(base_dir, ".github", "workflows", "ratchet.yml")
-    if os.path.exists(wf) and "ratchet" in _slurp(wf):
-        add("ok", ".github/workflows/ratchet.yml references ratchet")
+    wf = os.path.join(base_dir, ".github", "workflows", "cogpin.yml")
+    if os.path.exists(wf) and "cogpin" in _slurp(wf):
+        add("ok", ".github/workflows/cogpin.yml references cogpin")
     else:
-        add("warn", "CI workflow absent", "run `ratchet install` to scaffold .github/workflows/ratchet.yml")
+        add("warn", "CI workflow absent", "run `cogpin install` to scaffold .github/workflows/cogpin.yml")
 
     default_branch = cfg.repo.default_branch if cfg else _detect_default_branch(cwd)
     base = _resolve_base(cwd, default_branch)
@@ -3760,7 +3760,7 @@ def cmd_doctor(cwd: str = ".", as_json: bool = False) -> int:
         add("warn", "base ref unreachable", "shallow clone? set `fetch-depth: 0` — base-pinning degrades")
 
     if base and cfg and cfg.meta.base_pinned:
-        bc = _git(cwd, ["show", f"{base}:ratchet.toml"])
+        bc = _git(cwd, ["show", f"{base}:cogpin.toml"])
         add("ok" if bc else "warn",
             "base-pinned config readable" if bc else "base-pinned config not yet in the base ref (first commit?)")
     else:
@@ -3770,13 +3770,13 @@ def cmd_doctor(cwd: str = ".", as_json: bool = False) -> int:
         covered = _protects_gate_files(cfg)
         add("ok" if covered else "warn",
             "gate files covered by protected_path/self_protect" if covered else "gate files not self-protected",
-            "" if covered else "add a protected_path covering .ratchet/** + ratchet.toml + .github/workflows/** "
+            "" if covered else "add a protected_path covering .cogpin/** + cogpin.toml + .github/workflows/** "
                                "(the action's rev-pinned engine already covers GitHub CI)")
 
     if os.environ.get("CLAUDE_PLUGIN_ROOT"):
         add("ok", "agent layer: CLAUDE_PLUGIN_ROOT set (plugin active in-session)")
     else:
-        add("skip", "agent layer: run /ratchet-doctor inside Claude Code to verify the plugin")
+        add("skip", "agent layer: run /cogpin-doctor inside Claude Code to verify the plugin")
 
     if as_json:
         print(json.dumps([{"status": s, "label": lbl, "fix": fx} for s, lbl, fx in rows], indent=2))
@@ -3788,9 +3788,9 @@ def cmd_doctor(cwd: str = ".", as_json: bool = False) -> int:
                 print(f"      → {fx}")
         print()
         if hard_fail:
-            print("ratchet doctor: change layer NOT ready (fix the ✗ above)", file=sys.stderr)
+            print("cogpin doctor: change layer NOT ready (fix the ✗ above)", file=sys.stderr)
         else:
-            print("ratchet doctor: change layer ready")
+            print("cogpin doctor: change layer ready")
     return 1 if hard_fail else 0
 
 
@@ -3804,7 +3804,7 @@ def main(argv: list[str] | None = None) -> int:
         except (AttributeError, ValueError):
             pass
     p = argparse.ArgumentParser(
-        prog="ratchet",
+        prog="cogpin",
         description="Ungameable diff-fact enforcement of the closing-discipline.",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -3824,44 +3824,44 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--head-sha", help="PR head commit SHA (freshness for approval_policy; CI only)")
     c.add_argument("--pr-author", help="PR author login (excludes self-approval; CI only)")
     c.add_argument("--checks-file", help="JSON from `gh pr checks --json name,state` (require_checks_green; CI only)")
-    c.add_argument("--default-branch", help="trusted base branch name (CI passes the repo's real default; overrides ratchet.toml so the base can't be redirected from the PR head)")
+    c.add_argument("--default-branch", help="trusted base branch name (CI passes the repo's real default; overrides cogpin.toml so the base can't be redirected from the PR head)")
     c.add_argument("--allow-bypass", action="store_true", help="honour the agent-layer bypass (pre-push only)")
     c.add_argument("--report-only", action="store_true", help="print findings + a summary but always exit 0 (global rollout switch; infra/config errors still fail)")
-    c.add_argument("--diff-file", help="evaluate a crafted unified-diff FIXTURE instead of the git range (config-as-code testing; uses the working ratchet.toml, never `run`)")
+    c.add_argument("--diff-file", help="evaluate a crafted unified-diff FIXTURE instead of the git range (config-as-code testing; uses the working cogpin.toml, never `run`)")
     c.add_argument("--expect-block", help="comma-separated check ids that MUST block on the fixture — exit 1 if any doesn't (requires --diff-file)")
     c.add_argument("--expect-clean", help="comma-separated check ids that MUST NOT fire on the fixture — exit 1 if any does (requires --diff-file)")
     c.add_argument("--commit-msg", help="synthetic commit message for the fixture (makes commit_footer / commit-scoped message checks evaluable; a diff carries none)")
     bt = sub.add_parser("backtest", help="replay the policy over merged history: which past commits would block? (calibration)")
     bt.add_argument("--cwd", default=".")
     bt.add_argument("--range", required=True, dest="rng", metavar="REV-RANGE", help="git rev-range, e.g. main~50..main")
-    bt.add_argument("--config", default=None, help="config to backtest (default: the working ratchet.toml; e.g. ratchet.toml.draft)")
+    bt.add_argument("--config", default=None, help="config to backtest (default: the working cogpin.toml; e.g. cogpin.toml.draft)")
     bt.add_argument("--fail-on-block", action="store_true", help="exit 1 if any commit would block (default: pure report, exit 0)")
     j = sub.add_parser("judge", help="emit the advisory LLM-judge prompt(s) to stdout (CI)")
     j.add_argument("--cwd", default=".")
-    v = sub.add_parser("validate", help="parse + validate ratchet.toml (the block-requires-fact invariant)")
-    v.add_argument("--config", default="ratchet.toml")
-    i = sub.add_parser("init", help="write a starter ratchet.toml")
-    i.add_argument("--config", default="ratchet.toml")
-    sg = sub.add_parser("suggest", help="extract repo facts → a ranked draft policy (for /ratchet-init; never writes)")
+    v = sub.add_parser("validate", help="parse + validate cogpin.toml (the block-requires-fact invariant)")
+    v.add_argument("--config", default="cogpin.toml")
+    i = sub.add_parser("init", help="write a starter cogpin.toml")
+    i.add_argument("--config", default="cogpin.toml")
+    sg = sub.add_parser("suggest", help="extract repo facts → a ranked draft policy (for /cogpin-init; never writes)")
     sg.add_argument("--cwd", default=".")
     sg.add_argument("--format", choices=["json", "toml"], default="json")
     dl = sub.add_parser("draft-lint", help="strict-validate a drafted policy (superset of validate; gates on TODO markers)")
     dl.add_argument("--cwd", default=".")
-    dl.add_argument("--config", default="ratchet.toml.draft")
+    dl.add_argument("--config", default="cogpin.toml.draft")
     dl.add_argument("--simulate", action="store_true", help="also flag any block that would fire on existing HEAD code")
-    gp = sub.add_parser("gaps", help="advisory: which CLAUDE.md house-rules are NOT bound by a ratchet check")
+    gp = sub.add_parser("gaps", help="advisory: which CLAUDE.md house-rules are NOT bound by a cogpin check")
     gp.add_argument("--cwd", default=".")
     gp.add_argument("--format", choices=["text", "json"], default="text")
     ins = sub.add_parser("install", help="wire the change layer: vendor engine + scaffold config/hook/CI (idempotent)")
     ins.add_argument("--cwd", default=".")
-    ins.add_argument("--no-vendor", action="store_true", help="skip vendoring .ratchet/ratchet.py")
-    ins.add_argument("--no-config", action="store_true", help="skip writing a starter ratchet.toml")
+    ins.add_argument("--no-vendor", action="store_true", help="skip vendoring .cogpin/cogpin.py")
+    ins.add_argument("--no-config", action="store_true", help="skip writing a starter cogpin.toml")
     ins.add_argument("--no-hook", action="store_true", help="skip wiring the pre-push hook")
     ins.add_argument("--no-ci", action="store_true", help="skip scaffolding the CI workflow")
     ins.add_argument("--no-gitignore", action="store_true", help="skip the .gitignore entry")
     un = sub.add_parser("uninstall", help="strip the local pre-push managed block (never removes committed source)")
     un.add_argument("--cwd", default=".")
-    up = sub.add_parser("update", help="re-vendor the active engine → .ratchet/ratchet.py (fix a stale-engine skew)")
+    up = sub.add_parser("update", help="re-vendor the active engine → .cogpin/cogpin.py (fix a stale-engine skew)")
     up.add_argument("--cwd", default=".")
     dr = sub.add_parser("doctor", help="diagnose both layers (read-only; exit 1 only on a hard change-layer failure)")
     dr.add_argument("--cwd", default=".")
@@ -3940,7 +3940,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "capability":
         return cmd_capability_emit(args.cwd, backend=args.backend, dry_run=args.dry_run)
     if args.cmd == "selftest":
-        print("ratchet selftest: ok (run `python3 -m pytest` / `tests/test_ratchet.py` for the full suite)")
+        print("cogpin selftest: ok (run `python3 -m pytest` / `tests/test_cogpin.py` for the full suite)")
         return 0
     return 2
 

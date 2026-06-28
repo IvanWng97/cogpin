@@ -80,10 +80,10 @@ def write(name, content):
 
 def diagram_problem():
     H = 360
-    b = [text(W / 2, 44, "Prose asks. ratchet enforces.", size=25, weight=700),
-         text(W / 2, 69, "A rule in CLAUDE.md or a skill is a suggestion the agent can skip. A ratchet hook is not.", size=12.5, fill=MUT)]
+    b = [text(W / 2, 44, "Prose asks. cogpin enforces.", size=25, weight=700),
+         text(W / 2, 69, "A rule in CLAUDE.md or a skill is a suggestion the agent can skip. A cogpin hook is not.", size=12.5, fill=MUT)]
     # WITHOUT
-    b += [text(36, 112, "WITHOUT ratchet", size=12, fill=RED, weight=700, anchor="start")]
+    b += [text(36, 112, "WITHOUT cogpin", size=12, fill=RED, weight=700, anchor="start")]
     f, _ = flow(124, 58, 36, [
         ("box", 168, dict(lines=["CLAUDE.md / a skill", "“run tests, no --no-verify,", "update docs”"], size=11)),
         ("arrow", 30, dict(color=RED, label="skips it", lcolor=RED)),
@@ -95,13 +95,13 @@ def diagram_problem():
     ])
     b.append(f)
     # WITH
-    b += [text(36, 250, "WITH ratchet", size=12, fill=GRN, weight=700, anchor="start")]
+    b += [text(36, 250, "WITH cogpin", size=12, fill=GRN, weight=700, anchor="start")]
     f2, _ = flow(262, 58, 36, [
-        ("box", 168, dict(lines=["the same rule, now", "declared in ratchet.toml"], size=11)),
+        ("box", 168, dict(lines=["the same rule, now", "declared in cogpin.toml"], size=11)),
         ("arrow", 30, dict(color=BLUE, label="tries to", lcolor=BLUE)),
         ("box", 78, dict(lines=["AI", "agent"])),
         ("arrow", 30, dict(color=BLUE)),
-        ("box", 196, dict(lines=["ratchet hook", "PreToolUse · Stop"], fill=BLUE_BG, stroke=BLUE, tcolor=BLUE, weight=600)),
+        ("box", 196, dict(lines=["cogpin hook", "PreToolUse · Stop"], fill=BLUE_BG, stroke=BLUE, tcolor=BLUE, weight=600)),
         ("arrow", 28, dict(color=GRN)),
         ("box", 270, dict(lines=["✓  BLOCKED until", "tests pass + docs updated"], fill=GRN_BG, stroke=GRN, tcolor=GRN, weight=600)),
     ])
@@ -136,19 +136,19 @@ def diagram_layers():
 def diagram_bypass():
     H = 360
     b = [text(W / 2, 44, "The gate the diff can't loosen", size=23, weight=700),
-         text(W / 2, 69, "One PR that leaks a secret AND edits ratchet.toml to disarm the check.", size=12.5, fill=MUT)]
+         text(W / 2, 69, "One PR that leaks a secret AND edits cogpin.toml to disarm the check.", size=12.5, fill=MUT)]
     # PR card
     b += [f'<rect x="36" y="100" width="300" height="170" rx="10" fill="#f6f8fa" stroke="{LINE}" stroke-width="1.5"/>']
     b += [text(186, 128, "PR #42 — the agent's diff", size=12.5, weight=700)]
     b += [box(54, 146, 264, 42, ["+ leak.py:  AWS_KEY = \"AKIA…\""], fill=RED_BG, stroke=RED, tcolor=RED, size=11, mono=True)]
-    b += [box(54, 200, 264, 52, ["~ ratchet.toml", "secret-scan:  block → warn"], fill=RED_BG, stroke=RED, tcolor=RED, size=11, mono=True)]
+    b += [box(54, 200, 264, 52, ["~ cogpin.toml", "secret-scan:  block → warn"], fill=RED_BG, stroke=RED, tcolor=RED, size=11, mono=True)]
     # naive
     b += [arrow(336, 150, 374, color=MUT)]
     b += [box(374, 116, 462, 36, ["a naive gate reads config from the PR HEAD"], fill=CARD, stroke=LINE, size=12, weight=600)]
     b += [box(374, 158, 462, 36, ["✗  0 blocks left → it merges the leak"], fill=RED_BG, stroke=RED, tcolor=RED, size=12, weight=600)]
-    # ratchet
+    # cogpin
     b += [arrow(336, 226, 374, color=GRN)]
-    b += [box(374, 208, 462, 36, ["ratchet reads config from the BASE ref"], fill=CARD, stroke=GRN, tcolor=GRN, size=12, weight=700)]
+    b += [box(374, 208, 462, 36, ["cogpin reads config from the BASE ref"], fill=CARD, stroke=GRN, tcolor=GRN, size=12, weight=700)]
     b += [box(374, 250, 462, 36, ["✓  secret still blocks → DENIED"], fill=GRN_BG, stroke=GRN, tcolor=GRN, size=12, weight=600)]
     b += [text(W / 2, 326, "base-pinning: every commit is judged against the policy that existed BEFORE it.", size=12.5, fill=INK, weight=600)]
     write("bypass.svg", svg(H, "".join(b)))

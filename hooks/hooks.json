@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/ratchet.py\" gate"
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/cogpin.py\" gate"
           }
         ]
       }
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/ratchet.py\" stop --cwd \"${CLAUDE_PROJECT_DIR:-.}\""
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/cogpin.py\" stop --cwd \"${CLAUDE_PROJECT_DIR:-.}\""
           }
         ]
       }

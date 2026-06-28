@@ -1,9 +1,24 @@
 # Changelog
 
-All notable changes to ratchet. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html). ratchet is on a **0.x** line, so the
+All notable changes to cogpin (renamed from **ratchet** — see [Unreleased]; dated entries below
+shipped under the old name and are kept verbatim as history). Format:
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html). cogpin is on a **0.x** line, so the
 primitive / CLI surface may still change between minors — pin the action to a SHA for full
 reproducibility. The config `schema` version is separate and bumps only on a breaking config change.
+
+## [Unreleased]
+
+### Changed
+- **Renamed the project `ratchet` → `cogpin`.** Engine (`ratchet.py` → `cogpin.py`), config
+  (`ratchet.toml` → `cogpin.toml`), vendored dir (`.ratchet/` → `.cogpin/`), the CLI (`cogpin …`),
+  the slash commands (`/cogpin-init` …), the bypass env (`COGPIN_BYPASS`), and the GitHub identity
+  (`IvanWng97/cogpin`, Action `uses: IvanWng97/cogpin@v0`, Pages `ivanwng97.github.io/cogpin`) all
+  move together. GitHub 301-redirects keep already-deployed consumers (clones, `uses:` refs,
+  raw-engine URLs) resolving. **No behavior change** — the engine, primitives, and the moat
+  (`block` ⇒ `kind="fact"` ∧ `provenance="environment"`) are byte-for-byte identical. The one
+  visible config change: the `suggest`-emitted rule id `coverage-ratchet` is now the descriptive
+  `coverage-floor` (the metaphor no longer fits the name).
 
 ## [0.3.0] — 2026-06-27
 

@@ -1,6 +1,6 @@
-# Coverage map — what ratchet catches, and where each rule came from
+# Coverage map — what cogpin catches, and where each rule came from
 
-ratchet's primitive library isn't a guess about how AI agents cut corners. The
+cogpin's primitive library isn't a guess about how AI agents cut corners. The
 fact-kind primitives were derived two ways: a first-principles pass over the
 closing-discipline, then an empirical mining of **real** AI-authored PR/commit/review
 history for failure classes the engine didn't yet cover. This page maps each
@@ -53,7 +53,7 @@ construction — see "the advisory frontier" below.
 Some of the most damaging cuts are **semantic** — they need a comparison of the
 *meaning* of two code states, which no set/string/count fact can prove. Making them
 `block` would mean blocking on a judgment the gated agent can author, which the
-schema forbids. They ship as the [`examples/advisory/`](../examples/advisory/ratchet.toml)
+schema forbids. They ship as the [`examples/advisory/`](../examples/advisory/cogpin.toml)
 `judge` library (a CI `continue-on-error` LLM substance check):
 
 | weakening class | why it can't be a fact |
@@ -81,11 +81,11 @@ marker is a fact; the excuse is a judge prompt.
 
 ## What this does and doesn't claim
 
-ratchet guarantees the **forcing function**, not omniscience. A `fact` block can't be
+cogpin guarantees the **forcing function**, not omniscience. A `fact` block can't be
 talked past — the strong claim, and it holds. But `forbid_removal`/`forbid_pattern`
 are presence-ungameable yet value-gameable (`assert!(true)` satisfies "has an
 assert"); `secret_scan` is best-effort; and a determined human with repo-admin rights
-can always change the base policy *through review*. The line ratchet draws: anything an
+can always change the base policy *through review*. The line cogpin draws: anything an
 agent can do **mid-task** to cut a corner, it stops; anything that needs **human
 judgment** stays advisory and visible — a boundary the schema itself enforces.
 

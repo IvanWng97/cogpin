@@ -1,15 +1,15 @@
-# ratchet recipe — the ADVISORY library. These catch the *semantic*-weakening cuts a
+# cogpin recipe — the ADVISORY library. These catch the *semantic*-weakening cuts a
 # diff fact can't prove: an assertion loosened, a stub passed off as an implementation,
 # a regex relaxed, a guard quietly dropped. They are gameable by the gated agent by
 # construction, so — per the one rule, severity="block" REQUIRES kind="fact" — they
 # are NEVER blocking. They run two ways:
 #
-#   • severity="judge"  → `ratchet judge` emits the prompt; CI pipes it to a model as a
+#   • severity="judge"  → `cogpin judge` emits the prompt; CI pipes it to a model as a
 #                         continue-on-error substance check (a review signal, not a gate).
 #   • severity="warn" + a fact primitive → the *presence* of a suppression marker is an
 #                         ungameable fact; only whether it's justified is advisory.
 #
-# Lift the ones you want into your repo's ratchet.toml (they compose with the blocking
+# Lift the ones you want into your repo's cogpin.toml (they compose with the blocking
 # facts there). Provenance: the weakening classes below were mined from real AI-authored
 # PR/commit history (assertEqual→assertTrue downgrades, fake-impl-to-match-the-test,
 # regex loosening, guard removal) — see docs/coverage-map.md.
@@ -24,7 +24,7 @@ tests = ["tests/**", "**/*.test.*", "**/*.spec.*", "**/test_*.py"]
 base_pinned = true
 
 # ── advisory LLM-judge prompts (substance over existence) ────────────────────────
-# `ratchet judge` concatenates every `prompt` below; the CI step feeds the diff + these
+# `cogpin judge` concatenates every `prompt` below; the CI step feeds the diff + these
 # to a model and posts the verdict as a comment. continue-on-error — advisory only.
 
 [[check]]

@@ -1,5 +1,5 @@
-# ratchet recipe — a Python repo. Lift it, adjust the globs, validate:
-#   python3 .ratchet/ratchet.py validate
+# cogpin recipe — a Python repo. Lift it, adjust the globs, validate:
+#   python3 .cogpin/cogpin.py validate
 # The one rule: severity="block" REQUIRES kind="fact".
 schema = 1
 
@@ -11,7 +11,7 @@ docs = ["**/*.md", "docs/**"]
 
 [meta]
 base_pinned = true
-bypass_env = "RATCHET_BYPASS"          # agent-layer escape hatch (always logged)
+bypass_env = "COGPIN_BYPASS"          # agent-layer escape hatch (always logged)
 
 # ── agent layer (real-time PreToolUse) ───────────────────────────────────────
 [[check]]
@@ -89,11 +89,11 @@ primitive = "path_requires"
 when = "code"
 need = "docs"
 
-# Coverage ratchet: a lowered `fail_under` (or a shortened timeout / raised retries)
+# Coverage floor: a lowered `fail_under` (or a shortened timeout / raised retries)
 # is byte-identical to a raise to a one-side scanner — numeric_floor pairs the number
 # across the −/+ hunks on the same key and blocks a WEAKENING direction.
 [[check]]
-id = "coverage-ratchet"
+id = "coverage-floor"
 kind = "fact"
 severity = "block"
 primitive = "numeric_floor"

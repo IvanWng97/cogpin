@@ -1,10 +1,10 @@
 ---
 title: Recipes
-description: Ready-to-lift ratchet.toml policies for Python, Node/TypeScript, and a real Rust workspace.
+description: Ready-to-lift cogpin.toml policies for Python, Node/TypeScript, and a real Rust workspace.
 ---
 
-Lift one, adjust the globs, `python3 .ratchet/ratchet.py validate`, commit. Each ships in
-the repo under [`examples/`](https://github.com/IvanWng97/ratchet/tree/main/examples).
+Lift one, adjust the globs, `python3 .cogpin/cogpin.py validate`, commit. Each ships in
+the repo under [`examples/`](https://github.com/IvanWng97/cogpin/tree/main/examples).
 
 ## Python
 
@@ -18,7 +18,7 @@ docs = ["**/*.md", "docs/**"]
 
 [meta]
 base_pinned = true
-bypass_env = "RATCHET_BYPASS"
+bypass_env = "COGPIN_BYPASS"
 
 [[check]]                      # if on main, branch first (agent layer)
 id = "branch-first"
@@ -54,7 +54,7 @@ cmd = "python3 -m pytest -q"
 ```
 
 See the full file (with secret-scan, debugger guard, skip-marker warn, docs-currency) →
-[`examples/python/ratchet.toml`](https://github.com/IvanWng97/ratchet/blob/main/examples/python/ratchet.toml).
+[`examples/python/cogpin.toml`](https://github.com/IvanWng97/cogpin/blob/main/examples/python/cogpin.toml).
 
 ## Node / TypeScript
 
@@ -63,7 +63,7 @@ plus a full **team / PR-review layer** — CODEOWNERS-lite (`require_approval_fr
 supply-chain gate on new dependencies (`pattern_requires_approval`), fresh-human-approval
 depth (`approval_policy`), and `require_checks_green` — and the real
 `npm run lint && npm test` as the change-layer teeth →
-[`examples/node-ts/ratchet.toml`](https://github.com/IvanWng97/ratchet/blob/main/examples/node-ts/ratchet.toml).
+[`examples/node-ts/cogpin.toml`](https://github.com/IvanWng97/cogpin/blob/main/examples/node-ts/cogpin.toml).
 
 ## A real Rust workspace
 
@@ -71,7 +71,7 @@ A faithful port of an 890-line bespoke Definition-of-Done gate (the pixtuoid pro
 22 declarative checks — prod-`println!` guard, settings-write guard, two-lens-review marker,
 docs/ledger coupling, the diff-side guards, real-time `self_protect`, and an advisory
 substance judge →
-[`examples/pixtuoid/ratchet.toml`](https://github.com/IvanWng97/ratchet/blob/main/examples/pixtuoid/ratchet.toml).
+[`examples/pixtuoid/cogpin.toml`](https://github.com/IvanWng97/cogpin/blob/main/examples/pixtuoid/cogpin.toml).
 
 ## The advisory library
 
@@ -79,7 +79,7 @@ The eight **semantic-weakening** classes a fact can’t prove — assertion-loos
 implementation, regex relaxing, guard removal, silent fallback, tautological test, scope
 drift, comment rot — as `judge` prompts a CI step pipes to a model (`continue-on-error`).
 Compose them with the blocking facts above →
-[`examples/advisory/ratchet.toml`](https://github.com/IvanWng97/ratchet/blob/main/examples/advisory/ratchet.toml).
+[`examples/advisory/cogpin.toml`](https://github.com/IvanWng97/cogpin/blob/main/examples/advisory/cogpin.toml).
 
 ## Promoting `warn` → `block`
 

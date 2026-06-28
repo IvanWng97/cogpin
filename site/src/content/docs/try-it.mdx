@@ -1,11 +1,11 @@
 ---
 title: Try it live
-description: The real ratchet engine, running in your browser via Pyodide. Edit a policy and a diff, watch it block.
+description: The real cogpin engine, running in your browser via Pyodide. Edit a policy and a diff, watch it block.
 ---
 
 import Playground from '../../components/Playground.astro';
 
-This is **the actual `ratchet.py` that ships** — no demo reimplementation, no server. It
+This is **the actual `cogpin.py` that ships** — no demo reimplementation, no server. It
 runs in your browser (CPython compiled to WebAssembly), reading the diff you type as the
 same `DiffFacts` the engine reads from `git`. Edit the policy on the left and the change on
 the right, or hit a preset. The verdict splits into two layers: the **agent layer** (what
@@ -16,7 +16,7 @@ Claude Code denies in real time as the agent works — bypassable) and the **cha
 
 ## What you’re looking at
 
-The left pane is a `ratchet.toml` policy. The right pane is a tiny stand-in for a diff —
+The left pane is a `cogpin.toml` policy. The right pane is a tiny stand-in for a diff —
 because the engine reads **facts**, not raw text, you describe the change as facts:
 
 | you type | the fact |
@@ -47,12 +47,12 @@ CI would catch).
 - **`lower coverage`** flips `fail_under` 85→75 → `numeric_floor` blocks. If you only scan
   the added lines that’s byte-identical to a *raise*; pairing the number across the removed
   and added lines is the whole point.
-- **`edit the gate`** is a `write> ratchet.toml` — denied at the *agent* layer by
+- **`edit the gate`** is a `write> cogpin.toml` — denied at the *agent* layer by
   `self_protect`, so the agent can’t loosen its own gate mid-session.
 - **`an un-blockable rule`** loads a policy that tries to hard-block on a `judge` (an
   LLM-judge the agent could sway). The engine **refuses to load it** —
   `severity="block"` requires `kind="fact"`. That error is the moat, enforced at parse
   time. Flip its `severity` to `warn` and it loads.
 
-Everything you can do here, `python3 ratchet.py check` does in CI — the only difference is
+Everything you can do here, `python3 cogpin.py check` does in CI — the only difference is
 CI reads the facts from real `git` instead of your textarea.

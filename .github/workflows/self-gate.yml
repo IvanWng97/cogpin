@@ -1,6 +1,6 @@
 name: self-gate
-# ratchet gates its OWN repo with its own dogfood ratchet.toml — the change layer,
-# authoritative + base-pinned, ignoring RATCHET_BYPASS. This now runs THROUGH the
+# cogpin gates its OWN repo with its own dogfood cogpin.toml — the change layer,
+# authoritative + base-pinned, ignoring COGPIN_BYPASS. This now runs THROUGH the
 # composite action (`uses: ./`), so the action's gh-facts wiring (PR body, reviews
 # via GraphQL, checks, approvals, head-sha, author) is itself dogfooded end-to-end —
 # exercising the reviewer-identity / checks path a hand-rolled `check` never did.
@@ -23,4 +23,4 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # need history for the base..HEAD range + base-pinning
-      - uses: ./ # the composite action at the repo root; engine=pinned → ./ratchet.py
+      - uses: ./ # the composite action at the repo root; engine=pinned → ./cogpin.py

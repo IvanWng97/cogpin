@@ -1,16 +1,16 @@
-# ratchet gates its own repo — the smallest honest dogfood. Every primitive used here
+# cogpin gates its own repo — the smallest honest dogfood. Every primitive used here
 # is one the product ships. The one rule: severity="block" REQUIRES kind="fact".
 schema = 1
 
 [repo]
 default_branch = "main"
-code = ["ratchet.py"]
+code = ["cogpin.py"]
 tests = ["tests/**/*.py"]
 docs = ["README.md", "SCHEMA.md", "docs/**/*.md"]
 
 [meta]
 base_pinned = true
-bypass_env = "RATCHET_BYPASS"
+bypass_env = "COGPIN_BYPASS"
 commit_footer = 'Co-Authored-By: Claude'
 
 # ── agent layer (real-time PreToolUse) ───────────────────────────────────────
@@ -42,7 +42,7 @@ kind = "fact"
 severity = "block"
 layer = "agent"
 primitive = "self_protect"
-paths = ["ratchet.toml", "ratchet.py", "action.yml", "hooks/hooks.json", ".github/workflows/**", ".claude-plugin/**"]
+paths = ["cogpin.toml", "cogpin.py", "action.yml", "hooks/hooks.json", ".github/workflows/**", ".claude-plugin/**"]
 
 # ── change layer (pre-push + CI, authoritative, base-pinned) ─────────────────
 [[check]]
@@ -63,7 +63,7 @@ id = "protected-gate-files"
 kind = "fact"
 severity = "warn"
 primitive = "protected_path"
-paths = ["ratchet.toml", "ratchet.py", "action.yml", "hooks/hooks.json", ".github/workflows/**", ".claude-plugin/**"]
+paths = ["cogpin.toml", "cogpin.py", "action.yml", "hooks/hooks.json", ".github/workflows/**", ".claude-plugin/**"]
 
 # Touch the engine → touch a test (existence-floor; whether the test has teeth is judged).
 [[check]]

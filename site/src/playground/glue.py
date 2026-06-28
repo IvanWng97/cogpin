@@ -1,6 +1,6 @@
-"""Browser glue for the ratchet playground.
+"""Browser glue for the cogpin playground.
 
-Runs the REAL engine (`import ratchet`) against a DiffFacts built from the editor's
+Runs the REAL engine (`import cogpin`) against a DiffFacts built from the editor's
 mini-diff — no git, no subprocess, so the exact same code runs locally (python3)
 AND in Pyodide (CPython in WASM). Entry point for the page: `run_json(toml, scen)`.
 
@@ -23,9 +23,9 @@ from __future__ import annotations
 
 import json
 
-import ratchet
+import cogpin
 
-_STATUS = {"A": ratchet.ADDED, "M": ratchet.MODIFIED, "D": ratchet.DELETED}
+_STATUS = {"A": cogpin.ADDED, "M": cogpin.MODIFIED, "D": cogpin.DELETED}
 
 
 def _parse(scenario_text):
@@ -74,29 +74,29 @@ def _parse(scenario_text):
 def run(toml_text, scenario_text):
     out = {"ok": True, "error": None, "change_findings": [], "agent_denials": [], "summary": ""}
     try:
-        cfg = ratchet.Config.parse(toml_text)
-    except ratchet.ConfigError as e:
+        cfg = cogpin.Config.parse(toml_text)
+    except cogpin.ConfigError as e:
         out["ok"] = False
         out["error"] = str(e)
         out["summary"] = "config invalid — block-requires-fact or a structural rule failed"
         return out
 
     p = _parse(scenario_text)
-    facts = ratchet.DiffFacts(
+    facts = cogpin.DiffFacts(
         added=p["added"], removed=p["removed"], changed=p["changed"],
         pr_body=p["pr_body"], approvals=p["approvals"], commit_msgs=p["commit_msgs"],
     )
     # change layer — skip `run` blocks (no shell in the browser)
-    for f in ratchet.run_change(cfg, facts, allow_run=False):
+    for f in cogpin.run_change(cfg, facts, allow_run=False):
         out["change_findings"].append({"sev": f.severity, "id": f.id, "reason": f.reason})
     # agent layer — command gate + branch gate (if a command was supplied) + the
     # self_protect gate (if a Write/Edit target was supplied).
     if p["command"]:
-        cmd = ratchet.CommandFacts(command=p["command"])
-        for f in ratchet.run_command_gate(cfg, cmd) + ratchet.run_branch_gate(cfg, cmd, p["branch"]):
+        cmd = cogpin.CommandFacts(command=p["command"])
+        for f in cogpin.run_command_gate(cfg, cmd) + cogpin.run_branch_gate(cfg, cmd, p["branch"]):
             out["agent_denials"].append({"sev": f.severity, "id": f.id, "reason": f.reason})
     if p["write_path"]:
-        for f in ratchet.run_self_protect_gate(cfg, "Edit", p["write_path"]):
+        for f in cogpin.run_self_protect_gate(cfg, "Edit", p["write_path"]):
             out["agent_denials"].append({"sev": f.severity, "id": f.id, "reason": f.reason})
 
     nb = sum(1 for f in out["change_findings"] if f["sev"] == "block")

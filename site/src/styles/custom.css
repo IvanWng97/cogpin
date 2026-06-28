@@ -1,4 +1,4 @@
-/* ratchet brand polish over Starlight.
+/* cogpin brand polish over Starlight.
    We override ONLY the accent ramp. We deliberately do NOT touch
    --sl-color-white / --sl-color-black: Starlight flips those per theme
    (light text on dark, near-black on light), and pinning --sl-color-white

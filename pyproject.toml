@@ -1,6 +1,6 @@
-# Dev-tooling config ONLY. ratchet ships as a SINGLE stdlib-only `ratchet.py` with
+# Dev-tooling config ONLY. cogpin ships as a SINGLE stdlib-only `cogpin.py` with
 # ZERO runtime dependencies — this file configures the linters, it is NOT a package
-# manifest and `pip install ratchet` is deliberately not a thing. The product is a
+# manifest and `pip install cogpin` is deliberately not a thing. The product is a
 # Claude Code plugin: the repo IS the install. (See README → "Why one file, no deps".)
 
 [tool.ruff]

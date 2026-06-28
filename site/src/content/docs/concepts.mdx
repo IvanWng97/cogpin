@@ -7,7 +7,7 @@ export const base = import.meta.env.BASE_URL;
 
 ## Fact vs judgment — the moat
 
-ratchet rests on one rule, enforced at parse time:
+cogpin rests on one rule, enforced at parse time:
 
 ```
 severity = "block"   REQUIRES   kind = "fact"
@@ -18,11 +18,11 @@ A/M/D status, the command string, the current branch, PR/commit metadata, review
 approvals. Only facts may hard-block. Anything that needs **judgment** — an LLM-judge, a
 self-attestation the agent ticks — is **advisory**: it warns or nudges, never blocks.
 
-This one rule is the whole guarantee — what we mean by ratchet’s “moat.” A forgetful or over-confident agent can’t pass a block it
+This one rule is the whole guarantee — what we mean by cogpin’s “moat.” A forgetful or over-confident agent can’t pass a block it
 didn’t actually satisfy, because it never wrote the evidence the block reads. And the
 boundary can’t silently erode, because `validate` rejects any `block` that isn’t a `fact`.
 The honest flip side: anything genuinely semantic (did the test *meaningfully* exercise the
-change? is this refactor safe?) stays advisory — ratchet surfaces it, a human decides.
+change? is this refactor safe?) stays advisory — cogpin surfaces it, a human decides.
 
 ## Two layers, one config
 
@@ -56,13 +56,13 @@ being gated on**.
 <details>
 <summary>Text version of the diagram</summary>
 
-ratchet reads `ratchet.toml` from the **base ref**, not the PR head. So a diff that relaxes
+cogpin reads `cogpin.toml` from the **base ref**, not the PR head. So a diff that relaxes
 a check is judged against the *old* policy — the secret it adds is still blocked even if the
 PR’s own config has zero blocks left. The diff can’t loosen the gate that gates it.
 
 </details>
 
-- **Base-pinning** — `ratchet.toml` (and your gate-defining files) are read from the pinned
+- **Base-pinning** — `cogpin.toml` (and your gate-defining files) are read from the pinned
   base ref, never the PR head. A same-PR edit that relaxes a check is evaluated against the
   *old* policy, so it can’t disarm itself.
 - **`protected_path`** — changing those gate-defining files needs an independent approval.
@@ -91,16 +91,16 @@ The eight **semantic-weakening** classes a fact can’t prove — assertion-loos
 implementation, regex relaxing, guard removal, silent fallback, tautological test, scope
 drift, comment rot — can’t hard-block (that would block on a judgment the agent authors), so
 they ship as the advisory `judge` library. The full matrix, with every citation, is in
-[`docs/coverage-map.md`](https://github.com/IvanWng97/ratchet/blob/main/docs/coverage-map.md).
+[`docs/coverage-map.md`](https://github.com/IvanWng97/cogpin/blob/main/docs/coverage-map.md).
 
 ## What it does and doesn’t claim
 
-ratchet guarantees the **forcing function**, not omniscience. A `fact` block can’t be talked
+cogpin guarantees the **forcing function**, not omniscience. A `fact` block can’t be talked
 past — that’s the strong claim, and it holds. But `secret_scan` is best-effort pattern
 matching (pair it with `gitleaks` via a `run` block); `forbid_removal`/`forbid_pattern` are
 presence-ungameable but value-gameable (`assert(true)` satisfies a naive “has an assert”);
 `attest`/`judge` are advisory by construction; and a human with repo-admin rights can always
-change the base policy through review. The line ratchet draws: **anything an agent can do
+change the base policy through review. The line cogpin draws: **anything an agent can do
 mid-task to cut a corner, it stops; anything that needs human judgment stays advisory and
 visible.**
 
@@ -108,5 +108,5 @@ This isn’t hypothetical. Two reports in Claude Code’s own tracker name the g
 [#32198](https://github.com/anthropics/claude-code/issues/32198) (“skips mandatory rules in
 CLAUDE.md — Definition of Done”) and
 [#40117](https://github.com/anthropics/claude-code/issues/40117) (“bypasses git pre-commit
-hooks using `--no-verify` despite explicit deny rules”). A prose rule *asks*; ratchet makes
+hooks using `--no-verify` despite explicit deny rules”). A prose rule *asks*; cogpin makes
 the unwanted outcome a non-event.
