@@ -1710,7 +1710,9 @@ def _load_reviews(path: str) -> list[dict] | None:
 def _load_checks(path: str) -> list[dict] | None:
     """Normalize a `gh pr checks --json name,state` (or hand-rolled) array into
     `[{name, conclusion}]`. `conclusion` falls back to `state`/`status` (gh emits
-    SUCCESS/FAILURE/PENDING under `state`). None on a missing/garbled file (→ skip)."""
+    SUCCESS/FAILURE/PENDING under `state`). Returns None on a missing/garbled file — a
+    REQUESTED-but-unparseable `--checks-file` makes callers FAIL CLOSED (exit 2); a genuinely
+    absent path is the caller's `checks=None` skip (no PR context)."""
     raw = _read_json(path)
     if not isinstance(raw, list):
         return None
@@ -2993,23 +2995,25 @@ def _config_advisories(cfg: Config) -> list[str]:
         if c.primitive != "require_checks_green":
             continue
         if not c.need:
-            # bare OR ignore-only: no allowlist → it bare-iterates whatever checks the PR API
-            # returns, so an EMPTY set (a removed/renamed check, an `ignore` covering them all,
-            # a checks-fetch hiccup) passes vacuously. Only `need` names a check that MUST be
-            # present-and-green, failing closed on a missing one.
-            out.append(
+            # No allowlist (bare OR ignore-only) → it bare-iterates whatever checks the PR API
+            # returns, so an EMPTY set (a removed/renamed check, an `ignore` covering them all, a
+            # checks-fetch hiccup) passes vacuously. Only `need` names a check that MUST be
+            # present-and-green, failing closed on a missing one. ONE coherent note per check:
+            # `need` is the fix; `ignore` alone patches only the self-block and LEAVES this vacuum
+            # (so we don't offer it as a clean remedy — that would loop the user back to this note).
+            msg = (
                 f"`{c.id}` (require_checks_green) has no `need`: an empty/shrunken check set "
                 "passes vacuously (it can't detect a REMOVED or unreported required check). Name "
-                'what must be green — `need = ["<job>"]` — or rely on branch-protection required '
-                "contexts for removal-detection."
+                'what must be green — `need = ["<job>"]` (the only fail-closed form) — or rely on '
+                "branch-protection required contexts for removal-detection."
             )
-        if not c.need and not c.ignore:
-            # bare specifically: cogpin's own still-pending job self-blocks a same-workflow run.
-            out.append(
-                f"`{c.id}` (require_checks_green) also sets no `ignore`: if cogpin runs in the "
-                "workflow it gates, its own still-pending check self-blocks. `ignore` the cogpin "
-                "job, or `need` only the others."
-            )
+            if not c.ignore:
+                msg += (
+                    " Bare additionally self-blocks if cogpin runs in the workflow it gates: "
+                    "`need` the OTHER checks clears both that and the vacuum above; `ignore`-ing "
+                    "the cogpin job alone fixes only the self-block (this note stays)."
+                )
+            out.append(msg)
     return out
 
 
