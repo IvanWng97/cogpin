@@ -134,6 +134,16 @@ agent reaches for it and mirrors what CI will enforce, so you fix it before you
 push. The change layer is the *final word* — a red CI check no env var can turn
 green.
 
+> **The agent-layer deny is a forcing-function, not containment.** `forbid_command`
+> (`--no-verify`), `self_protect`, `scope_lock`, and the secret-path deny are *string
+> matches on the proposed command/write* — they shape the default path and create an
+> audit trail against an honest agent, but they are defeated by indirection (a
+> subprocess, a helper script, an obfuscated verb) and only fire if the harness invokes
+> the hook. **They are not a security/capability boundary.** The boundary is the OS /
+> harness sandbox — which ratchet *declares* (`[capability]`) and *emits* to
+> (`ratchet capability emit`), but never **is**. See
+> [docs/composition.md](docs/composition.md) for the full defense-in-depth map.
+
 ## Install
 
 The plugin runs two tiny Python lifecycle hooks, so `python3` (3.11+) needs to be

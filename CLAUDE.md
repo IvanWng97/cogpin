@@ -93,6 +93,12 @@ Adding/altering a subcommand updates the README CLI list + `SCHEMA.md` (docs-cur
 
 ## Adding a primitive (the checklist)
 
+0. **Delegation over a new primitive (ask first).** Can this requirement be answered by a
+   `ratchet.toml` line that delegates to a tool already doing the work — a `run` shelling an
+   existing linter/test, a `require_checks_green` over an existing CI job, an `approval_policy`
+   over CODEOWNERS? If yes, it's answered by that line, NOT a new primitive. A primitive is
+   justified only for a *fact no existing tool exposes* (and a `block` one must clear the moat:
+   `provenance="environment"`). Scope is a liability budget. See [`docs/composition.md`](docs/composition.md).
 1. Write the failing test(s) in `tests/test_ratchet.py` — block path + pass/skip path.
 2. Add the pure fn `def my_primitive(check, facts, repo) -> str | None`.
 3. Register the name in `PRIMITIVES`; parse any new `Check` fields in `_from_raw`
