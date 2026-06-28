@@ -27,6 +27,13 @@ reproducibility. The config `schema` version is separate and bumps only on a bre
   / `id-token: write` to the deploy job (least privilege); actions are tag-pinned and Dependabot-bumped
   (policy in `.github/zizmor.yml`).
 
+### Fixed
+- **`claude-review.yml` no longer self-cancels.** Its `concurrency` block was at the workflow level,
+  so any PR comment (a GitGuardian-style bot fires `issue_comment`) entered the same group and
+  `cancel-in-progress` killed the in-flight `pull_request` review — a spurious red "cancelled" check
+  on every commented PR. Moved concurrency to the **job** level (matching the pixtuoid reference): a
+  job the `if` gate skips never enters the group, so a non-`/claude-review` comment can't cancel it.
+
 ### Changed
 - **Renamed the project `ratchet` → `cogpin`.** Engine (`ratchet.py` → `cogpin.py`), config
   (`ratchet.toml` → `cogpin.toml`), vendored dir (`.ratchet/` → `.cogpin/`), the CLI (`cogpin …`),
