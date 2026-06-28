@@ -357,6 +357,7 @@ Let `/ratchet-init` draft a policy from your `CLAUDE.md`, or start from a scaffo
 
 ```
 python3 ratchet.py install    # vendor + scaffold + hook + CI (or /ratchet-init in Claude Code)
+python3 ratchet.py update     # re-vendor the active engine → .ratchet/ratchet.py (fix a stale-engine skew)
 python3 ratchet.py suggest    # repo facts → a ranked draft policy (CLAUDE.md house-rules → primitives)
 python3 ratchet.py draft-lint # gate ratchet.toml.draft (the moat + outstanding review markers) before the rename
 python3 ratchet.py gaps       # which CLAUDE.md rules are still prose with no mechanism

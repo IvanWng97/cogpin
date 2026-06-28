@@ -2644,3 +2644,191 @@ class TestCapability(unittest.TestCase):
         self.assertIn("fs_confine", msg)               # the warning is surfaced, not swallowed
         self.assertIn("nothing is enforceable", msg)   # not "no [capability] floor declared"
         self.assertFalse(self._settings_exists())      # nothing written
+
+
+def _cap3(fn, *a, **k):
+    """Run a cmd_* entrypoint, return (rc, stdout, stderr)."""
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = fn(*a, **k)
+    return rc, out.getvalue(), err.getvalue()
+
+
+# ── #16: the agent layer must never SILENTLY fail-open on an unloadable config ──
+_STALE_CFG = ('schema=1\n[repo]\ndefault_branch="main"\ncode=["src/**"]\n'
+              '[[check]]\nid="x"\nkind="fact"\nseverity="warn"\nprimitive="brand_new_primitive_v999"\n')
+
+
+class TestStopFailSafe(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_notices_on_unloadable_present_config(self):
+        # a present-but-invalid config (unknown primitive — the stale-engine signature) must
+        # tell the user the real-time gate is OFF, not vanish
+        with open(os.path.join(self.d, "ratchet.toml"), "w", encoding="utf-8") as fh:
+            fh.write(_STALE_CFG)
+        rc, out, err = _cap3(R.cmd_stop, self.d)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "{}")          # decision contract intact
+        self.assertIn("real-time gate OFF", err)     # notice on stderr
+        self.assertIn("ratchet doctor", err)
+
+    def test_silent_when_no_config(self):
+        # no ratchet.toml → genuinely nothing to gate → no notice (would be noise)
+        rc, out, err = _cap3(R.cmd_stop, self.d)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "{}")
+        self.assertEqual(err, "")
+
+    def test_notice_keyed_on_existence_not_exception_type(self):
+        # a present-but-UNREADABLE config (a directory named ratchet.toml → IsADirectoryError,
+        # an OSError not a ConfigError) must STILL notice — proves the branch keys on
+        # os.path.exists, not on the exception class
+        os.mkdir(os.path.join(self.d, "ratchet.toml"))
+        rc, out, err = _cap3(R.cmd_stop, self.d)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "{}")
+        self.assertIn("real-time gate OFF", err)
+
+    def test_decision_json_uncorrupted(self):
+        # the notice must never leak onto stdout (it carries the Stop-hook JSON decision)
+        with open(os.path.join(self.d, "ratchet.toml"), "w", encoding="utf-8") as fh:
+            fh.write(_STALE_CFG)
+        _, out, err = _cap3(R.cmd_stop, self.d)
+        self.assertEqual(out.strip(), "{}")          # byte-exact decision, no notice text
+        self.assertNotIn("real-time gate", out)
+        self.assertIn("real-time gate", err)
+
+
+# ── #16: static engine-metadata extraction (no exec of a skewed/foreign engine) ──
+class TestExtractEngineMeta(unittest.TestCase):
+    def test_reads_real_engine_annassign(self):
+        # PRIMITIVE_SPECS is an annotated assignment (ast.AnnAssign); the extractor must still
+        # find it (walking only ast.Assign would yield an empty set → every primitive 'stale')
+        src = R._slurp(R.__file__)
+        prims, schema = R._extract_engine_meta(src)
+        self.assertEqual(schema, R.SCHEMA_VERSION)
+        self.assertEqual(prims, set(R.PRIMITIVES))   # all known primitives recovered
+        self.assertIn("run", prims)
+        self.assertIn("numeric_floor", prims)
+
+    def test_old_primitives_set_literal_fallback(self):
+        prims, schema = R._extract_engine_meta(
+            'SCHEMA_VERSION = 1\nPRIMITIVES = frozenset({"run", "attest"})\n')
+        self.assertEqual(prims, {"run", "attest"})
+        self.assertEqual(schema, 1)
+
+    def test_unparseable_degrades_safe(self):
+        prims, schema = R._extract_engine_meta("def (this is not python")
+        self.assertEqual(prims, set())
+        self.assertIsNone(schema)
+
+
+# ── #16: vendored-vs-config/running skew detection (pure) ──
+class TestEngineSkew(unittest.TestCase):
+    def setUp(self):
+        self.real = R._slurp(R.__file__)
+
+    def test_clean_when_in_sync(self):
+        self.assertEqual(R._engine_skew(self.real, {"run", "secret_scan"}, 1, R.SCHEMA_VERSION), [])
+
+    def test_flags_config_primitive_missing_from_vendored(self):
+        rows = R._engine_skew(self.real, {"primitive_from_the_future"}, 1, R.SCHEMA_VERSION)
+        self.assertTrue(any(s == "fail" and "STALE" in lbl and "primitive_from_the_future" in lbl
+                            for s, lbl, _ in rows))
+
+    def test_detects_skew_even_when_running_engine_cannot_validate(self):
+        # the core scenario: detection uses RAW config primitives, so it works even for a
+        # primitive Config.parse would reject — proven here by passing such a name directly
+        rows = R._engine_skew(self.real, {"a_primitive_the_engine_lacks"}, 0, R.SCHEMA_VERSION)
+        self.assertTrue(any(s == "fail" for s, _, _ in rows))
+
+    def test_schema_mismatch_fails(self):
+        old = 'SCHEMA_VERSION = 1\nPRIMITIVE_SPECS: dict = {"run": 1}\n'
+        rows = R._engine_skew(old, {"run"}, 2, 2)   # vendored schema 1, config schema 2
+        self.assertTrue(any(s == "fail" and "schema" in lbl for s, lbl, _ in rows))
+
+    def test_degrades_on_unparseable_vendored(self):
+        rows = R._engine_skew("def (broken", {"run"}, 1, R.SCHEMA_VERSION)
+        self.assertTrue(any(s == "warn" and "can't determine" in lbl for s, lbl, _ in rows))
+        # never raises
+
+    def test_schema_vs_running_warns(self):
+        # config omits schema (cfg_schema=0), vendored schema differs from the active engine →
+        # the advisory drift warn branch (not the config-mismatch fail) fires
+        old = 'SCHEMA_VERSION = 1\nPRIMITIVE_SPECS: dict = {"run": 1}\n'
+        rows = R._engine_skew(old, {"run"}, 0, 2)   # vendored 1, running 2, config unset
+        self.assertTrue(any(s == "warn" and "differs from the active engine" in lbl
+                            for s, lbl, _ in rows))
+        self.assertFalse(any(s == "fail" for s, _, _ in rows))   # not a config mismatch
+
+
+class TestDoctorSkew(_GitRepo):
+    _OLD_ENGINE = 'SCHEMA_VERSION = 1\nPRIMITIVE_SPECS = {"secret_scan": 1, "forbid_command": 1}\n'
+    _CFG = ('schema = 1\n[repo]\ndefault_branch="main"\ncode=["src/**"]\n'
+            '[[check]]\nid="cov"\nkind="fact"\nseverity="block"\nlayer="change"\n'
+            'primitive="numeric_floor"\nkey=\'x=([0-9]+)\'\ndirection="no_decrease"\nscope=["a.txt"]\n')
+
+    def test_reports_stale_vendored_engine(self):
+        # vendored engine knows only secret_scan/forbid_command; config uses numeric_floor →
+        # doctor must surface the stale-engine skew and fail (exit 1)
+        self._w(".ratchet/ratchet.py", self._OLD_ENGINE)
+        self._w("ratchet.toml", self._CFG)
+        rc, out = _quiet(cmd_doctor, self.d)
+        self.assertEqual(rc, 1)
+        self.assertIn("STALE", out)
+        self.assertIn("numeric_floor", out)
+
+    def test_clean_when_engine_matches_config(self):
+        # vendored == running engine knows everything the config uses → no STALE row
+        _quiet(cmd_install, self.d)
+        self._w("ratchet.toml", self._CFG)
+        rc, out = _quiet(cmd_doctor, self.d)
+        self.assertNotIn("STALE", out)
+
+    def test_unsupported_schema_hint(self):
+        _quiet(cmd_install, self.d)
+        self._w("ratchet.toml", 'schema = 999\n[repo]\ndefault_branch="main"\ncode=["src/**"]\n')
+        rc, out = _quiet(cmd_doctor, self.d)
+        self.assertEqual(rc, 1)
+        self.assertIn("running engine may be stale", out)
+
+
+class TestUpdate(_GitRepo):
+    def _eng(self):
+        return os.path.join(self.d, ".ratchet", "ratchet.py")
+
+    def test_revendors_and_reports(self):
+        rc, out, _ = _cap3(R.cmd_update, self.d)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(os.path.exists(self._eng()))
+        self.assertEqual(R._slurp(self._eng()), R._slurp(os.path.realpath(R.__file__)))
+        self.assertIn("re-vendored", out)
+
+    def test_idempotent_when_current(self):
+        _cap3(R.cmd_update, self.d)               # first vendor
+        before = R._slurp(self._eng())
+        rc, out, _ = _cap3(R.cmd_update, self.d)  # second is a no-op
+        self.assertEqual(rc, 0)
+        self.assertIn("already current", out)
+        self.assertEqual(R._slurp(self._eng()), before)
+
+    def test_refuses_self_reference(self):
+        # vendored copy IS the running engine (symlink) → can't update from itself
+        os.makedirs(os.path.dirname(self._eng()), exist_ok=True)
+        os.symlink(os.path.realpath(R.__file__), self._eng())
+        rc, _, err = _cap3(R.cmd_update, self.d)
+        self.assertEqual(rc, 1)
+        self.assertIn("cannot update from the vendored copy", err)
+
+    def test_not_a_git_repo(self):
+        with tempfile.TemporaryDirectory() as nogit:
+            rc, _, err = _cap3(R.cmd_update, nogit)
+            self.assertEqual(rc, 1)
+            self.assertIn("not a git repository", err)
+            self.assertFalse(os.path.exists(os.path.join(nogit, ".ratchet", "ratchet.py")))

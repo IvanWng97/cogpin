@@ -259,6 +259,7 @@ ratchet gaps --cwd . [--format text|json]   # advisory: which house-rules no che
 ratchet install --cwd .         # vendor .ratchet/ratchet.py + scaffold config/hook/CI/gitignore (idempotent)
     [--no-vendor] [--no-config] [--no-hook] [--no-ci] [--no-gitignore]
 ratchet uninstall --cwd .       # strip the local pre-push managed block (never removes committed source)
+ratchet update --cwd .          # re-vendor the active engine → .ratchet/ratchet.py (fixes a stale-engine skew #16)
 ratchet doctor --cwd . [--json] # diagnose both layers; one-line fix per finding
 ```
 
