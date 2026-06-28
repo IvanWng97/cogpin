@@ -413,6 +413,9 @@ guard this very repo with the primitives it ships.
 
 - **Tutorial + live playground** (the real engine in your browser via Pyodide):
   <https://ivanwng97.github.io/ratchet/>
+- **[`docs/adopting.md`](docs/adopting.md)** — the end-to-end adoption path (install →
+  draft → ride at warn → promote → fixtures), what to gate vs. leave to CI, and migrating
+  off an existing gate. **Start here.**
 - **[`SCHEMA.md`](SCHEMA.md)** — every config key and primitive field.
 - **[`docs/coverage-map.md`](docs/coverage-map.md)** — every corner-cut class, the
   primitive that gates it, and the real PR/commit evidence behind it.
