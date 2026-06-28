@@ -275,6 +275,17 @@ class TestConfig(unittest.TestCase):
               '[[check]]\nid="cf"\nkind="fact"\nseverity="warn"\nprimitive="commit_footer"\n')
         self.assertEqual(len(Config.parse(ok).checks), 1)
 
+    def test_validate_cli_friendly_config_path_errors(self):
+        # #47: a bad --config path gives a human message + exit 1, not a raw OSError traceback.
+        from cogpin import cmd_validate
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            self.assertEqual(cmd_validate("/no/such/dir/cogpin.toml"), 1)
+            self.assertEqual(cmd_validate(os.path.dirname(__file__)), 1)  # a directory, not a file
+        out = buf.getvalue()
+        self.assertIn("config file not found", out)
+        self.assertIn("not a directory", out)
+
     def test_str_or_vec_normalizes(self):
         cfg = MIN + '\n[[check]]\nid="p"\nkind="fact"\nseverity="warn"\nprimitive="path_requires"\nwhen="code"\nneed=["a","b"]\n'
         chk = Config.parse(cfg).checks[0]
@@ -1839,6 +1850,17 @@ class TestInstall(_GitRepo):
         pp = self._read(".git/hooks/pre-push")
         self.assertIn("echo custom", pp)
         self.assertLess(pp.index("echo custom"), pp.index(COGPIN_BEGIN))  # runs first
+
+    def test_install_names_how_pre_push_wired(self):
+        # #47: the printout says HOW it integrated. Default repo → directly (no manager).
+        _, out = _quiet(cmd_install, self.d, vendor=False, config=False, ci=False, gitignore=False)
+        self.assertIn("no hook manager detected", out)
+        # A husky repo routes the managed block INTO .husky/ — so it must NAME husky, not claim
+        # "no hook manager detected" (the review catch: husky reaches the same write branch).
+        os.makedirs(os.path.join(self.d, ".husky"), exist_ok=True)
+        _, out2 = _quiet(cmd_install, self.d, vendor=False, config=False, ci=False, gitignore=False)
+        self.assertIn("via husky", out2)
+        self.assertNotIn("no hook manager detected", out2)
 
     def test_replaces_stale_block_in_place(self):
         stale = "#!/bin/sh\necho keep\n" + COGPIN_BEGIN + "\nOLD GARBAGE\n# <<< cogpin <<<\n"
