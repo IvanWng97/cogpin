@@ -73,19 +73,22 @@ TARGETS = [
 
 def load_registry(path: Path = REGISTRY) -> list[dict]:
     text = path.read_text(encoding="utf-8")
-    # pick the ```toml block that holds the registry, not the first one — so a future
-    # TOML *example* added above it can't silently shadow the data.
-    prims: list[dict] = []
+    # Scan every ```toml block and take the one with [[primitive]] entries — so a non-data
+    # TOML *example* (a config snippet) is skipped. If two blocks both define [[primitive]],
+    # fail loudly rather than silently pick one: ambiguity is a bug, not a default.
+    candidates: list[list[dict]] = []
     for block in _TOML_FENCE.findall(text):
         try:
             parsed = tomllib.loads(block)
         except tomllib.TOMLDecodeError:
             continue
         if parsed.get("primitive"):
-            prims = parsed["primitive"]
-            break
-    if not prims:
+            candidates.append(parsed["primitive"])
+    if not candidates:
         raise SystemExit(f"gen_primitives: no ```toml block with [[primitive]] entries in {path}")
+    if len(candidates) > 1:
+        raise SystemExit(f"gen_primitives: {len(candidates)} ```toml blocks define [[primitive]] in {path} — ambiguous")
+    prims = candidates[0]
     ids = [p["id"] for p in prims]
     if len(ids) != len(set(ids)):
         dupes = sorted({i for i in ids if ids.count(i) > 1})
@@ -115,7 +118,9 @@ def _sub_region(text: str, start: str, end: str, body: str, path: Path) -> str:
 
 
 def _sub_count(text: str, open_tok: str, close_tok: str, count: int) -> str:
-    pat = re.compile(re.escape(open_tok) + r"\d+" + re.escape(close_tok))
+    # \d* (not \d+) so a manually-blanked token re-fills on the next run instead of slipping
+    # past --check unchanged; the byte-current test then flags the staleness.
+    pat = re.compile(re.escape(open_tok) + r"\d*" + re.escape(close_tok))
     return pat.sub(f"{open_tok}{count}{close_tok}", text)
 
 

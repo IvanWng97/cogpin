@@ -7,7 +7,9 @@ These tie the docs to the engine and to the registry so a stale surface fails th
 import os
 import re
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
@@ -56,6 +58,50 @@ class TestPrimitiveRegistry(unittest.TestCase):
             self.assertTrue(found, f"no count token in {tgt.path.name}")
             for got in found:
                 self.assertEqual(got, n, f"stale count token in {tgt.path.name}: {got} != {n}")
+
+
+_ONE = '```toml\n[[primitive]]\nid = "a"\nkind = "fact"\nshort = "x"\nlong = "x"\n```\n'
+
+
+class TestGeneratorGuards(unittest.TestCase):
+    """The drift-guard's own fail-loud branches must actually fire (not just degrade)."""
+
+    def _registry(self, body: str) -> Path:
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        p = Path(d.name) / "primitives.md"
+        p.write_text(body, encoding="utf-8")
+        return p
+
+    def test_missing_toml_block_errors(self):
+        with self.assertRaises(SystemExit):
+            G.load_registry(self._registry("# just prose, no fenced toml\n"))
+
+    def test_duplicate_ids_error(self):
+        dupe = _ONE.replace("```\n", "[[primitive]]\nid = \"a\"\nkind = \"fact\"\nshort = \"y\"\nlong = \"y\"\n```\n")
+        with self.assertRaises(SystemExit):
+            G.load_registry(self._registry(dupe))
+
+    def test_multiple_primitive_blocks_are_ambiguous(self):
+        # a second [[primitive]] block must fail loudly, not be silently shadowed
+        with self.assertRaises(SystemExit):
+            G.load_registry(self._registry(_ONE + "\nan example below:\n\n" + _ONE))
+
+    def test_non_data_toml_example_is_skipped(self):
+        # a TOML *config* example (no [[primitive]]) is ignored, the real registry wins
+        example = '```toml\n[meta]\nbypass_env = "X"\n```\n\nthen the registry:\n\n'
+        prims = G.load_registry(self._registry(example + _ONE))
+        self.assertEqual([p["id"] for p in prims], ["a"])
+
+    def test_render_target_requires_marker(self):
+        with self.assertRaises(SystemExit):
+            G.render_target("no markers here at all", G.TARGETS[0], [{"id": "a", "kind": "fact",
+                            "short": "x", "long": "x", "params": []}])
+
+    def test_blanked_count_token_refills(self):
+        # regression for the \\d* fix: an emptied token must re-substitute (not slip past)
+        o, c = G._HTML["count_open"], G._HTML["count_close"]
+        self.assertIn(f"{o}26{c}", G._sub_count(f"the {o}{c} primitives", o, c, 26))
 
 
 if __name__ == "__main__":
