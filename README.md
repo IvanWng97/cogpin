@@ -458,7 +458,7 @@ guard this very repo with the primitives it ships.
 
 ## Status
 
-**v0.1.0 — early stage (0.x; the primitive / CLI surface may still change between
+**v0.1.1 — early stage (0.x; the primitive / CLI surface may still change between
 minors).** Engine (26 primitives) + Claude Code plugin (agent layer) + one-command
 `/cogpin-init` wiring (`install` / `uninstall` / `doctor`) + AI-assisted config
 draft (`suggest` / `draft-lint` / `gaps`) + a rev-pinned composite GitHub Action

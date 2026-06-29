@@ -6,7 +6,14 @@ primitive / CLI surface may still change between minors — pin the action to th
 or a commit SHA for reproducibility. The config `schema` version is separate and bumps only on a
 breaking config change.
 
-## [Unreleased]
+## [0.1.1] — 2026-06-28
+
+A hardening release. It closes the fail-open and silent-no-op classes a third-party adopter audit
+surfaced ([#44](https://github.com/IvanWng97/cogpin/issues/44)–[#48](https://github.com/IvanWng97/cogpin/issues/48))
+and the internal M/L deep-audit — each fix tightens a gate that could previously be evaded or that
+quietly never fired. The moat (`block` ⇒ `kind="fact"` + `provenance="environment"`) and the config
+surface are unchanged; the `@v0` action tag and the plugin manifests advance to 0.1.1, and the
+release workflow now self-verifies that `v0` actually moves onto the shipped commit (the #44 class).
 
 ### Changed
 - **CLI / error-message UX polish** ([#47](https://github.com/IvanWng97/cogpin/issues/47), adopter audit):
@@ -18,6 +25,13 @@ breaking config change.
   `--config` path gives a human message ("config file not found" / "expected a file, not a
   directory") instead of a raw `OSError`; and `install` names *how* it wired the pre-push (`via
   husky → …` when husky is detected, else `directly → .git/hooks/pre-push (no hook manager detected)`).
+- **`forbid_command` is now agent-layer-only** (joins `forbid_commit_on_branch` / `self_protect`
+  as a live-signal primitive). It reads the live command string, so a `change`-layer placement —
+  including the default — could never fire at the authoritative layer; `validate` now rejects it.
+  Declare `layer = "agent"` (every shipped recipe already does). This is what `SCHEMA.md` already
+  documented.
+- **A `run` check at `layer = "agent"` is rejected at any severity** (was: only `block`). No
+  agent-layer runner dispatches a `run`, so an agent-layer `warn` run was a silent no-op.
 
 ### Fixed
 - **Three remaining fail-opens closed** (audit LOW batch):
@@ -69,15 +83,6 @@ breaking config change.
   time instead of making the primitive return `None` (a vacuous PASS). Same discipline the
   `direction` enum already had; the regex compile already existed in `draft-lint` and is now in
   the authoritative `validate` path too.
-
-### Changed
-- **`forbid_command` is now agent-layer-only** (joins `forbid_commit_on_branch` / `self_protect`
-  as a live-signal primitive). It reads the live command string, so a `change`-layer placement —
-  including the default — could never fire at the authoritative layer; `validate` now rejects it.
-  Declare `layer = "agent"` (every shipped recipe already does). This is what `SCHEMA.md` already
-  documented.
-- **A `run` check at `layer = "agent"` is rejected at any severity** (was: only `block`). No
-  agent-layer runner dispatches a `run`, so an agent-layer `warn` run was a silent no-op.
 
 ## [0.1.0] — 2026-06-28
 
@@ -143,4 +148,5 @@ enforced, ungameable Definition-of-Done. (Formerly developed as **`ratchet`**; r
   validate-all-configs, lint (ruff · mypy · actionlint · zizmor), plugin-validate, and the
   self-gate (cogpin gates cogpin).
 
+[0.1.1]: https://github.com/IvanWng97/cogpin/releases/tag/v0.1.1
 [0.1.0]: https://github.com/IvanWng97/cogpin/releases/tag/v0.1.0

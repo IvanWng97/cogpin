@@ -84,3 +84,16 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -f "$major" "$GITHUB_SHA"
           git push -f origin "refs/tags/$major"
+      - name: verify the major tag now resolves to this release (guards #44 — stale @v0)
+        if: ${{ !contains(github.ref_name, '-') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"; major="v${ver%%.*}"
+          git fetch --force origin "refs/tags/$major:refs/tags/$major"
+          got="$(git rev-list -n1 "$major")"
+          if [ "$got" != "$GITHUB_SHA" ]; then
+            echo "::error::$major resolves to $got but this release is $GITHUB_SHA ($GITHUB_REF_NAME) — the floating major tag did not move; consumers pinned to @$major would silently get a stale engine"
+            exit 1
+          fi
+          echo "$major -> $GITHUB_REF_NAME ($got) ok"
