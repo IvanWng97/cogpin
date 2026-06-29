@@ -1,6 +1,15 @@
 # cogpin recipe — a Python repo. Lift it, adjust the globs, validate:
 #   python3 .cogpin/cogpin.py validate
 # The one rule: severity="block" REQUIRES kind="fact".
+#
+# Safe-core vs inferred (the safe-to-arm-on-day-one axis, orthogonal to the layer grouping):
+#   • safe-core — born `block`, universally safe (gate an agent ACTION, not your existing
+#     code): no-verify · branch-first · secret-scan
+#   • inferred — shown at `block` to illustrate a complete policy, but tuned to THIS recipe's
+#     globs; on your repo ride them at `warn` + `backtest` before relying on the block (a
+#     content scanner like no-debugger can red CI on pre-existing code):
+#     no-debugger · no-test-delete · keep-asserts · coverage-floor · deps-need-approval · tests-pass
+# Promotion path: docs/adopting.md.
 schema = 1
 
 [repo]

@@ -59,6 +59,14 @@ unresolved `# TODO(cogpin:review)` markers); `--simulate` additionally replays e
 the tree — i.e. a check that would block your *next* commit for a pre-existing reason. Fix
 the scope or downgrade to `warn` before arming, so day one isn't a wall of false blocks.
 
+`--simulate` is the *pre-arming* test: it reads the **draft** directly and proves no `block`
+would false-fire on your existing code. Its complement — proving a block **does** fire on a
+real violation, so your policy isn't silently inert — needs a live `cogpin.toml` and a check
+that's actually at `block`, so it lands *after* you arm and promote: that's §6's
+`check --diff-file … --expect-block <id>` (which reads the working `cogpin.toml`, not the
+`.draft`). Knowing both tests exist up front lets you arm with evidence on both sides, instead
+of eating a week of noisy real-PR warnings to discover the policy was wrong.
+
 ### 4 · Ride non-failing first
 
 Two independent ways to run the policy without failing anyone:
