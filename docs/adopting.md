@@ -207,12 +207,11 @@ flip-the-switch — **prove parity, then delete**:
   it's **not** a breakage. Run `/cogpin-doctor` *inside* Claude Code to verify the plugin
   is active. The change layer (pre-push + CI) is what `doctor` verifies from a shell, and
   it's the authoritative one.
-- **`doctor` says the pre-push block is `present but UNREACHABLE`.** Your hook ends in a
-  process-replacing `exec cmd …` (husky/lefthook emit `exec "$@"`) or a terminal `exit`, and the
-  managed block sits *after* it — so it never runs. Re-run `cogpin install`: it moves the block
-  *ahead* of the terminator (self-healing, idempotent). An `exec` used only for redirection
-  (`exec >>log 2>&1`, bare `exec`), or one indented inside a conditional, isn't a terminator — those
-  keep running, so the block is left in place.
+- **The cogpin pre-push block runs before my own hook code.** By design. The managed block is
+  placed first (right after the shebang) and gates with `… || exit 1`, so it runs — and can block
+  the push — before any user code, and can never be shadowed by a later process-replacing `exec`/`exit`.
+  Your existing hook content is preserved verbatim, just below the block; re-running `cogpin install`
+  lifts an old block that a prior version appended after an `exec` up to the top.
 - **A check blocks on pre-existing code.** You skipped step 3 — run `draft-lint --simulate`,
   then tighten the `scope` or downgrade to `warn`.
 - **The engine looks stale for the config** (`unknown primitive` / `unsupported schema`).
