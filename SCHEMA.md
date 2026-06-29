@@ -272,7 +272,8 @@ cogpin check --cwd .           # change layer: gate the committed range (authori
     [--head-sha S] [--pr-author L] [--checks-file F]
     # --default-branch BR: (CI only) the TRUSTED base branch name. Overrides cogpin.toml so the
     #   base pin can't be redirected from the PR head; the action passes the repo's real
-    #   default_branch. An unfetchable trusted base fails CLOSED (exit 2), never a narrowed diff.
+    #   default_branch. An unfetchable trusted base fails CLOSED (exit 1, a config/infra error),
+    #   never a narrowed diff.
     # --report-only: print findings + a summary but exit 0 (global, temporary rollout switch;
     #   distinct from per-check severity="warn"). Infra/config errors (unreachable base,
     #   unloadable config) STILL fail closed. The action exposes it as `report-only:`.
