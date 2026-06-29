@@ -183,6 +183,13 @@ target) and must be `agent` or `both`; a `run` check must live at the `change` l
 > `forbid_commit_on_branch`, `require_checks_green`, `approval_policy`, `max_added_file_bytes`,
 > `attest`/`judge`) take no required param.
 
+> **Unknown keys/tables are rejected.** Config is read by name, so a typo on an *optional* key
+> (`exlcude_bot`, `min_aprovals`, `strip_comment`) or a mistyped table (`[reqo]`) used to be
+> silently dropped — the gate looked green and enforced less than the config said. `cogpin
+> validate` / `check` now fail loud (`ConfigError`, naming the key) on any unknown top-level table
+> or any unknown key in `[repo]` / `[meta]` / `[capability]` / `[[check]]`. (The advisory
+> `draft-lint` already did this pre-arm; this lifts the same guard onto the authoritative path.)
+
 ### Command / live-signal (agent layer)
 
 #### `forbid_command`  *(agent / both)*
