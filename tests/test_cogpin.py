@@ -2418,10 +2418,12 @@ class TestHookEntrypoints(unittest.TestCase):
 
     def test_cmd_gate_survives_non_utf8_stdin(self):
         # the never-crash contract extends to BYTES: a binary / foreign-harness payload must
-        # degrade safe, not UnicodeDecodeError into a raw traceback (#68).
+        # degrade to a clean ALLOW (the two-exit gate contract: 0 = allow, 2 = deny), not
+        # UnicodeDecodeError into a raw traceback (#68). surrogateescape decode → JSONDecodeError
+        # → _pretooluse_tool ("", {}) → allow, deterministically exit 0.
         r = subprocess.run([sys.executable, _COGPIN, "gate"], cwd=self.d,
                            input=b"\xff\xfe\x80 not utf-8 \x9c\xed{", capture_output=True)
-        self.assertNotEqual(r.returncode, 2, "garbage stdin must not DENY (fail-open, not deny)")
+        self.assertEqual(r.returncode, 0, "garbage stdin must degrade to a clean allow (exit 0)")
         self.assertNotIn(b"Traceback", r.stderr, "non-UTF-8 stdin must not spew a raw traceback")
 
 
