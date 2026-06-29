@@ -724,6 +724,25 @@ class TestInertPrChecks(unittest.TestCase):
             '[[check]]\nid="ap"\nkind="fact"\nseverity="block"\nlayer="change"\nprimitive="approval_policy"\n')
         self.assertEqual(set(R._inert_pr_checks(cfg, DiffFacts())), {"rcg", "pp", "raf", "pra", "ap"})
 
+    def test_inert_is_complement_of_fixture_evaluable(self):
+        # #73 review: _inert_pr_checks reuses _fixture_evaluable as the single fact-read source. Lock
+        # the coupling — for a block PR-family check, "inert" must be exactly "not fixture-evaluable"
+        # across every fact state, so changing one primitive's fact-read without the other goes red.
+        cases = (("require_checks_green", 'need=["ci"]\n'),
+                 ("protected_path", 'paths=["x"]\n'),
+                 ("require_approval_from", 'paths=["x"]\nrequire_approval_from=["o"]\n'),
+                 ("pattern_requires_approval", 'pattern="x"\n'),
+                 ("approval_policy", ''))
+        states = (DiffFacts(), DiffFacts(reviews=[]), DiffFacts(approvals=["x"]), DiffFacts(checks=[]))
+        for prim, extra in cases:
+            cfg = self._cfg(f'[[check]]\nid="c"\nkind="fact"\nseverity="block"\nlayer="change"\n'
+                            f'primitive="{prim}"\n{extra}')
+            c = cfg.checks[0]
+            for facts in states:
+                inert = "c" in R._inert_pr_checks(cfg, facts)
+                self.assertEqual(inert, not R._fixture_evaluable(c, facts),
+                                 f"{prim} r={facts.reviews} a={facts.approvals} ch={facts.checks}")
+
     def test_warn_severity_is_not_flagged(self):
         # a warn check never had teeth → its inertness is no false confidence (and flagging the
         # common solo-repo protected_path-at-warn would just spam). Block-only by design.

@@ -1507,29 +1507,29 @@ def run_change(cfg: Config, facts: DiffFacts, allow_run: bool = True) -> list[Fi
     return out
 
 
+# The approval/checks family — each reads a PR fact (reviews / approvals / checks) that only a
+# PR-context run supplies. `_fixture_evaluable` is the single source of WHICH fact each one reads;
+# `_inert_pr_checks` filters to this family and reuses it, so the two can't drift (#73 review).
+_PR_FACT_PRIMITIVES = frozenset({
+    "protected_path", "require_approval_from", "pattern_requires_approval",
+    "approval_policy", "require_checks_green",
+})
+
+
 def _inert_pr_checks(cfg: Config, facts: DiffFacts) -> list[str]:
     """Ids of BLOCK-severity approval/checks checks that SILENTLY no-op this run because the PR
     fact they read (`reviews` / `approvals` / `checks`) wasn't supplied — off-platform, a foreign
-    harness, the local pre-push, or a GitHub push event (no PR). A declared-yet-inert BLOCK is a fail-OPEN the operator
-    must SEE: the gate prints `ok` while enforcing nothing (#66). Restricted to block — a warn
-    check was never going to fail, so its inertness is no false confidence (and flagging it would
-    spam the common solo-repo `protected_path`-at-warn). Pure; cmd_check surfaces it loudly.
-    Mirrors run_change's evaluation filter (non-agent) so the count matches what actually ran."""
-    out: list[str] = []
-    for c in cfg.checks:
-        if c.layer == "agent" or c.severity != "block":
-            continue
-        if c.primitive == "require_checks_green":
-            inert = facts.checks is None
-        elif c.primitive == "protected_path":
-            inert = facts.reviews is None and facts.approvals is None
-        elif c.primitive in ("require_approval_from", "pattern_requires_approval", "approval_policy"):
-            inert = facts.reviews is None
-        else:
-            continue
-        if inert:
-            out.append(c.id)
-    return out
+    harness, the local pre-push, or a GitHub push event (no PR). A declared-yet-inert BLOCK is a
+    fail-OPEN the operator must SEE: the gate prints `ok` while enforcing nothing (#66). Restricted
+    to block — a warn check was never going to fail, so its inertness is no false confidence (and
+    flagging it would spam the common solo-repo `protected_path`-at-warn). Skips layer="agent" to
+    mirror run_change's filter (those never ran in the change layer). Reuses `_fixture_evaluable`
+    as the canonical fact-read map (inert ≡ a PR-family check the supplied facts can't decide).
+    Pure; cmd_check surfaces it loudly."""
+    return [c.id for c in cfg.checks
+            if c.primitive in _PR_FACT_PRIMITIVES
+            and c.layer != "agent" and c.severity == "block"
+            and not _fixture_evaluable(c, facts)]
 
 
 def _on_github_actions() -> bool:
