@@ -3630,6 +3630,73 @@ def _strip_block(cur: str) -> str:
     return cur[:bi] + tail
 
 
+# A husky/lefthook pre-push hook ends in a process-replacing `exec cmd …` or a terminal `exit`;
+# a managed block appended AFTER it is dead code that never runs (#62). Match at column 0 only —
+# an `exec`/`exit` indented inside an `if`/loop is conditional, so not a terminal terminator.
+_EXIT_TERMINATOR = re.compile(r"exit\b(?!=)")        # `exit`/`exit 1` ends the script; `exit=…` is a var assign
+_EXEC_TERMINATOR = re.compile(r"exec\s+[^\s<>&\d]")  # `exec cmd` REPLACES the process. `exec >log`/`exec 2>&1`/
+                                                     # `exec 3< f`/bare `exec` only re-point fds and CONTINUE.
+
+
+def _is_hook_terminator(line: str) -> bool:
+    """True iff `line` (anchored at col 0) unconditionally ends the hook: a terminal `exit`, or an
+    `exec` that replaces the process. `exec` used solely for redirection/fd-dup (`exec >>log 2>&1`,
+    `exec 2>&1`, `exec 3< f`) or bare `exec` only mutates file descriptors and falls through — NOT a
+    terminator, so a managed block after it still runs (#62 review: medium false-UNREACHABLE bug)."""
+    return bool(_EXIT_TERMINATOR.match(line) or _EXEC_TERMINATOR.match(line))
+
+
+def _prepush_insert_index(cur: str) -> int:
+    """Char offset at which to insert the managed block so it RUNS: the start of the trailing run
+    of top-level `exec`/`exit` lines (skipping blank/comment lines below it), so the block lands
+    BEFORE the process-replacing `exec` / terminal `exit`; else len(cur) (plain append)."""
+    lines = cur.splitlines(keepends=True)
+    term = None
+    for j in range(len(lines) - 1, -1, -1):
+        s = lines[j].strip()
+        if s == "" or s.startswith("#"):
+            continue
+        if _is_hook_terminator(lines[j]):   # col-0 anchored → unindented/unconditional
+            term = j
+            continue
+        break
+    return len(cur) if term is None else sum(len(x) for x in lines[:term])
+
+
+def _prepush_block_reachable(cur: str) -> bool:
+    """False iff the NEAREST meaningful line before the managed block is a top-level `exec`/`exit`
+    — the block is present but dead (an `exec` replaced the process / a terminal `exit` returned
+    before reaching it). Skips blank/comment lines (mirrors _prepush_insert_index), so a col-0
+    `exec` buried in a heredoc/string ABOVE other code doesn't false-positive. Absent block → True
+    (its absence is a separate doctor signal, not an unreachability one)."""
+    bi = cur.find(COGPIN_BEGIN)
+    if bi == -1:
+        return True
+    for ln in reversed(cur[:bi].splitlines()):
+        s = ln.strip()
+        if s == "" or s.startswith("#"):
+            continue
+        return not _is_hook_terminator(ln)
+    return True
+
+
+def _wire_prepush_block(cur: str, block: str) -> str:
+    """Place/refresh the managed block so it actually runs. A present, REACHABLE block is refreshed
+    in place (preserves any user content around it). An ABSENT block — or one a prior install left
+    stranded after an `exec`/`exit` — is (re)inserted before that terminator (self-healing), else
+    appended. Idempotent: re-wiring reproduces the input byte-for-byte."""
+    block = block if block.endswith("\n") else block + "\n"
+    if COGPIN_BEGIN in cur and _prepush_block_reachable(cur):
+        return _replace_or_append_block(cur, block)
+    base = _strip_block(cur)
+    at = _prepush_insert_index(base)
+    if at == len(base):
+        if base and not base.endswith("\n"):
+            base += "\n"
+        return base + block
+    return base[:at] + block + base[at:]
+
+
 def _ensure_gitignore(root: str) -> None:
     """Scoped + idempotent: ignore `.cogpin/.state` (the debounce state) — NEVER the
     whole `.cogpin/` dir, which would un-commit the vendored engine."""
@@ -3813,7 +3880,7 @@ def _install_prepush(target_path: str) -> None:
     real = os.path.realpath(target_path)
     if os.path.exists(real):
         cur = _slurp(real)
-        new = _replace_or_append_block(cur, PREPUSH_BLOCK)
+        new = _wire_prepush_block(cur, PREPUSH_BLOCK)
     else:
         cur = ""
         new = "#!/bin/sh\n" + PREPUSH_BLOCK
@@ -4137,10 +4204,15 @@ def cmd_doctor(cwd: str = ".", as_json: bool = False) -> int:
         action, payload = _effective_hook_target(cwd, root)
         if action == "write":
             real = os.path.realpath(payload)
-            if os.path.exists(real) and COGPIN_BEGIN in _slurp(real):
+            content = _slurp(real) if os.path.exists(real) else ""
+            if COGPIN_BEGIN not in content:
+                add("warn", "pre-push managed block absent", "run `cogpin install` (CI is the authoritative gate)")
+            elif _prepush_block_reachable(content):
                 add("ok", f"pre-push managed block present ({real})")
             else:
-                add("warn", "pre-push managed block absent", "run `cogpin install` (CI is the authoritative gate)")
+                add("warn", f"pre-push managed block present but UNREACHABLE — it sits after a top-level "
+                            f"exec/exit, so it never runs ({real})",
+                    "re-run `cogpin install` to move it ahead of the exec")
         elif action.startswith("snippet:"):
             add("warn", f"hooks managed by {action.split(':', 1)[1]} — snippet expected (not auto-written)",
                 "add the cogpin snippet from `cogpin install`")

@@ -2075,6 +2075,79 @@ class TestBlockHelpers(unittest.TestCase):
         self.assertEqual(_strip_block(cur), cur)
 
 
+class TestPrepushWiring(unittest.TestCase):
+    """#62: the managed pre-push block must land where it RUNS — before a trailing top-level
+    `exec`/`exit` (a husky/lefthook hook ends in `exec "$@"`), never as dead code after it."""
+
+    def _wire(self, cur):
+        return R._wire_prepush_block(cur, PREPUSH_BLOCK)
+
+    def test_inserted_before_trailing_exec(self):
+        out = self._wire('#!/bin/sh\n. "$(dirname "$0")/h.sh"\nexec husky "$@"\n')
+        self.assertIn(COGPIN_BEGIN, out)
+        self.assertLess(out.index(COGPIN_BEGIN), out.index("exec husky"), "block must precede the exec")
+        self.assertTrue(R._prepush_block_reachable(out))
+
+    def test_inserted_before_trailing_exit(self):
+        out = self._wire("#!/bin/sh\nrun_stuff\nexit 0\n")
+        self.assertLess(out.index(COGPIN_BEGIN), out.index("exit 0"))
+
+    def test_appends_when_no_terminator(self):
+        out = self._wire("#!/bin/sh\necho hi\n")
+        self.assertLess(out.index("echo hi"), out.index(COGPIN_BEGIN))
+        self.assertTrue(out.rstrip().endswith(R.COGPIN_END))  # at the end, nothing after
+
+    def test_indented_exec_is_not_a_terminator(self):
+        # an exec inside a conditional is NOT unconditional → append at end, don't wedge before it
+        out = self._wire('#!/bin/sh\nif [ "$X" ]; then\n  exec foo\nfi\n')
+        self.assertGreater(out.index(COGPIN_BEGIN), out.index("exec foo"))
+
+    def test_col0_exec_inside_heredoc_is_not_a_terminator(self):
+        # a col-0 `exec` buried in a heredoc body is text, not an unconditional terminator: the
+        # block appended after it still RUNS, so reachability must not false-positive on it.
+        out = self._wire("#!/bin/sh\ncat <<EOF\nexec foo\nEOF\n")
+        self.assertGreater(out.index(COGPIN_BEGIN), out.index("exec foo"))  # appended at end
+        self.assertTrue(R._prepush_block_reachable(out))
+
+    def test_exec_for_redirection_only_is_not_a_terminator(self):
+        # `exec >>log 2>&1` / `exec 2>&1` / `exec 3< f` / bare `exec` only re-point fds and CONTINUE
+        # (POSIX) — a block after them runs. Misclassifying them relocates a live block + false
+        # UNREACHABLE (#62 review, medium). A reachable block must be refreshed in place, never moved.
+        for redirect in ('exec >>"$LOG" 2>&1', "exec 2>&1", "exec 3< file", "exec"):
+            hook = f"#!/bin/sh\n{redirect}\n" + PREPUSH_BLOCK + "echo real work\n"
+            self.assertTrue(R._prepush_block_reachable(hook), redirect)
+            self.assertEqual(self._wire(hook), hook, f"{redirect}: must not relocate a live block")
+
+    def test_exec_with_real_command_still_terminates(self):
+        # the genuine process-replace forms stay terminal: `exec -a argv0 cmd` included.
+        for cmd in ('exec husky "$@"', "exec foo", "exec -a name cmd"):
+            dead = f"#!/bin/sh\n{cmd}\n" + PREPUSH_BLOCK
+            self.assertFalse(R._prepush_block_reachable(dead), cmd)
+            fixed = self._wire(dead)
+            self.assertLess(fixed.index(COGPIN_BEGIN), fixed.index(cmd), cmd)  # block before the exec
+
+    def test_idempotent_reinstall_before_exec(self):
+        once = self._wire('#!/bin/sh\nexec husky "$@"\n')
+        twice = self._wire(once)
+        self.assertEqual(once, twice)               # byte-idempotent
+        self.assertEqual(once.count(COGPIN_BEGIN), 1)
+
+    def test_self_heals_block_stranded_after_exec(self):
+        dead = '#!/bin/sh\nexec husky "$@"\n' + PREPUSH_BLOCK   # a prior buggy install left it dead
+        self.assertFalse(R._prepush_block_reachable(dead))
+        fixed = self._wire(dead)
+        self.assertTrue(R._prepush_block_reachable(fixed))
+        self.assertLess(fixed.index(COGPIN_BEGIN), fixed.index("exec husky"))
+        self.assertEqual(fixed.count(COGPIN_BEGIN), 1)
+
+    def test_reachable_block_refreshed_in_place_preserving_tail(self):
+        cur = "#!/bin/sh\nA\n" + PREPUSH_BLOCK + "B\n"   # present, reachable, user content after it
+        out = self._wire(cur)
+        self.assertEqual(out.count(COGPIN_BEGIN), 1)
+        self.assertIn("A\n", out)
+        self.assertIn("B\n", out)                    # in-place refresh keeps trailing user content
+
+
 class TestAtomicWrite(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -2236,6 +2309,15 @@ class TestInstall(_GitRepo):
         self.assertIn("echo custom", pp)
         self.assertLess(pp.index("echo custom"), pp.index(COGPIN_BEGIN))  # runs first
 
+    def test_install_inserts_before_trailing_exec(self):
+        # #62: a husky-style hook ends in a process-replacing `exec` — the managed block must land
+        # BEFORE it (so it runs), not be appended as dead code after the exec.
+        self._w(".git/hooks/pre-push", '#!/bin/sh\nexec husky "$@"\n')
+        _quiet(cmd_install, self.d)
+        pp = self._read(".git/hooks/pre-push")
+        self.assertLess(pp.index(COGPIN_BEGIN), pp.index("exec husky"))
+        self.assertEqual(pp.count(COGPIN_BEGIN), 1)
+
     def test_install_names_how_pre_push_wired(self):
         # #47: the printout says HOW it integrated. Default repo → directly (no manager).
         _, out = _quiet(cmd_install, self.d, vendor=False, config=False, ci=False, gitignore=False)
@@ -2367,6 +2449,24 @@ class TestDoctor(_GitRepo):
         _quiet(cmd_install, self.d, hook=False)
         rc, out = _quiet(cmd_doctor, self.d)
         self.assertEqual(rc, 0, out)  # missing pre-push is ~ , not ✗
+
+    def test_flags_unreachable_block(self):
+        # #62: a managed block stranded after a top-level exec/exit is present-but-dead — doctor
+        # must say UNREACHABLE (advisory, rc still 0), not the misleading "present" ok.
+        _quiet(cmd_install, self.d)
+        self._w(".git/hooks/pre-push", '#!/bin/sh\nexec husky "$@"\n' + PREPUSH_BLOCK)
+        rc, out = _quiet(cmd_doctor, self.d)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("UNREACHABLE", out)
+
+    def test_redirect_exec_block_is_not_flagged_unreachable(self):
+        # #62 review: `exec >>log 2>&1` re-points fds and CONTINUES — a block after it runs, so
+        # doctor must NOT cry UNREACHABLE (false positive that also triggered an unsolicited rewrite).
+        _quiet(cmd_install, self.d)
+        self._w(".git/hooks/pre-push", '#!/bin/sh\nexec >>"$LOG" 2>&1\n' + PREPUSH_BLOCK + "echo work\n")
+        rc, out = _quiet(cmd_doctor, self.d)
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("UNREACHABLE", out)
 
     def test_json_shape(self):
         _quiet(cmd_install, self.d)
