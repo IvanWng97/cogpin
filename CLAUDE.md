@@ -87,9 +87,11 @@ Adding/altering a subcommand updates the README CLI list + `SCHEMA.md` (docs-cur
   (`_pretooluse_tool` returns `("", {})`); a missing/garbled PR-facts file makes the
   check *skip*, never false-fire.
 - **Keep docs current.** A new primitive/field/flag updates: the `PRIMITIVES` set,
-  `_eval_diff` (if diff-evaluated), `_from_raw` parsing, the `Check` fields, **plus**
-  the README table, `SCHEMA.md`, and (if mined) `docs/coverage-map.md` — in the same
-  change. The `docs-currency` check warns otherwise.
+  `_eval_diff` (if diff-evaluated), `_from_raw` parsing, the `Check` fields, **plus** the
+  [`docs/primitives.md`](docs/primitives.md) registry (the README + site primitive tables are
+  *generated* from it — run `python3 scripts/gen_primitives.py`; `tests/test_gen_primitives.py`
+  locks the registry's id set to `PRIMITIVES`), the `SCHEMA.md` field reference, and (if mined)
+  `docs/coverage-map.md` — in the same change. The `docs-currency` check warns otherwise.
 
 ## Adding a primitive (the checklist)
 
@@ -108,7 +110,10 @@ Adding/altering a subcommand updates the README CLI list + `SCHEMA.md` (docs-cur
 4. If it needs a new fact, extend `DiffFacts` + its acquisition (`from_range` / a CLI
    `--…-file` flag + a `_load_*` helper) — keep acquisition out of the pure fn.
 5. Add a `validate` guard if it has a layer/placement constraint.
-6. Add a row to the README table + `SCHEMA.md`; cite provenance in `docs/coverage-map.md`.
+6. Add an entry to the [`docs/primitives.md`](docs/primitives.md) registry and run
+   `python3 scripts/gen_primitives.py` (regenerates the README + site tables; the suite then
+   asserts the registry id set == `PRIMITIVES`); add the field reference to `SCHEMA.md`; cite
+   provenance in `docs/coverage-map.md`.
 7. Run the gates (below). All green, then commit.
 
 ## The gates (run before you call it done)
@@ -119,6 +124,7 @@ python3 -m unittest discover -s tests -p 'test_*.py'        # the suite
 python3 cogpin.py validate                                 # the dogfood config
 for f in examples/*/cogpin.toml; do python3 cogpin.py validate --config "$f"; done
 python3 scripts/validate_plugin.py                          # plugin packaging
+python3 scripts/gen_primitives.py --check                  # README/site primitive tables current
 ruff check cogpin.py tests && mypy cogpin.py              # lint (config in pyproject.toml)
 python3 cogpin.py check --cwd .                            # the self-gate (DoD on itself)
 ```

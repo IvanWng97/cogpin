@@ -320,11 +320,14 @@ reds a gate it can't edit.
 
 Every check reads only facts — never your code.
 
-26 primitives — full reference in [`SCHEMA.md`](SCHEMA.md); the provenance of each
+<!-- gen:count -->26<!-- /gen:count --> primitives — full reference in [`SCHEMA.md`](SCHEMA.md); the provenance of each
 (first-principles vs mined from real AI-authored failures) is in
-[`docs/coverage-map.md`](docs/coverage-map.md).
+[`docs/coverage-map.md`](docs/coverage-map.md). The table below is generated from the registry in
+[`docs/primitives.md`](docs/primitives.md) — edit there, then run `python3 scripts/gen_primitives.py`.
 
-<details><summary><b>All 26 primitives</b> — full field reference in <a href="SCHEMA.md"><code>SCHEMA.md</code></a></summary>
+<details><summary><b>All <!-- gen:count -->26<!-- /gen:count --> primitives</b> — full field reference in <a href="SCHEMA.md"><code>SCHEMA.md</code></a></summary>
+
+<!-- gen:primitives:table — generated from docs/primitives.md (run scripts/gen_primitives.py); edit the registry, not here -->
 
 | primitive | kind | decides over |
 |---|---|---|
@@ -336,11 +339,11 @@ Every check reads only facts — never your code.
 | `forbid_removal{pattern,scope,exempt,strip_comments}` | fact | **removed** lines under a path scope |
 | `forbid_delete{scope,unless_paired_add,exempt}` | fact | per-file D-status (a deletion under scope) |
 | `scope_lock{allow}` | fact | every A/M/D path must be inside the allowlist (scope creep) |
-| `numeric_floor{key,direction,floor}` | fact | a numeric value's **direction** across the diff (lower coverage / raised retries / shortened timeout) |
+| `numeric_floor{key,direction,floor,scope}` | fact | a numeric value's **direction** across the diff (lower coverage / raised retries / shortened timeout) |
 | `change_budget{max_added,max_removed,max_files,max_file_added,scope}` | fact | count ceilings over the diff (blast radius) |
 | `file_must_contain{scope,pattern,status}` | fact | every added/changed file in scope must add a matching line (e.g. an SPDX header) |
 | `max_added_file_bytes{maxkb,allow_binary,scope}` | fact | per-file byte ceiling on added/modified files (vendored bundles, stray binaries) |
-| `path_requires{when,need}` | fact | name-status: if `when` changed, `need` must too |
+| `path_requires{when,need,when_marker}` | fact | name-status: if `when` changed, `need` must too |
 | `cooccur{trigger,require}` | fact | if `trigger` appears (diff/PR), `require` must too |
 | `marker_present{marker,when}` | fact · agent | a self-typed marker in the PR body — **`warn` only** (agent-provenance: the gated agent can type the marker without the event it claims; to *gate* review, require a real non-author approval) |
 | `forbid_in_message{tokens,msg_scope}` | fact | forbidden tokens in a commit/PR message (e.g. `[skip ci]`) |
@@ -354,6 +357,8 @@ Every check reads only facts — never your code.
 | `run{cmd}` | fact\* | shell-out; the exit code is the fact (**change layer only — any agent placement is rejected**) |
 | `attest{box,class}` | advisory | a class-gated `Stop`-hook checklist box — blocks turn-end until ticked (forcing function; the change layer is the ungameable gate) |
 | `judge{prompt}` | advisory | an advisory LLM-judge prompt (CI `continue-on-error` substance check) |
+
+<!-- /gen:primitives:table -->
 
 </details>
 
@@ -459,7 +464,7 @@ guard this very repo with the primitives it ships.
 ## Status
 
 **v0.1.1 — early stage (0.x; the primitive / CLI surface may still change between
-minors).** Engine (26 primitives) + Claude Code plugin (agent layer) + one-command
+minors).** Engine (<!-- gen:count -->26<!-- /gen:count --> primitives) + Claude Code plugin (agent layer) + one-command
 `/cogpin-init` wiring (`install` / `uninstall` / `doctor`) + AI-assisted config
 draft (`suggest` / `draft-lint` / `gaps`) + a rev-pinned composite GitHub Action
 (`@v0`, change layer) + tutorial site. Stdlib Python (3.11+), no third-party deps,

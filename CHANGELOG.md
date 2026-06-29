@@ -6,6 +6,19 @@ primitive / CLI surface may still change between minors — pin the action to th
 or a commit SHA for reproducibility. The config `schema` version is separate and bumps only on a
 breaking config change.
 
+## [Unreleased]
+
+### Changed
+- **The primitive-library tables are now generated from one registry, killing doc drift.**
+  [`docs/primitives.md`](docs/primitives.md) is the single source of truth; `scripts/gen_primitives.py`
+  renders README's verbose table (param signatures + full prose) and the tutorial site's condensed
+  table (bare name + short prose) from it, and derives the primitive count everywhere it appears.
+  `tests/test_gen_primitives.py` locks the registry's id set to the engine's `PRIMITIVES` and asserts
+  the committed tables are byte-current — so the docs can no longer drift from the code. This closes
+  the stale site count (it claimed *"23"* against the engine's 26), a `kind` that differed by surface
+  (`marker_present` now reads `fact · agent` on the site too), and the lossy `forbid_command` /
+  `numeric_floor` descriptions the two surfaces had diverged into.
+
 ## [0.1.1] — 2026-06-28
 
 A hardening release. It closes the fail-open and silent-no-op classes a third-party adopter audit
