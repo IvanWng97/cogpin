@@ -376,11 +376,13 @@ class Config:
     capability: Capability = field(default_factory=Capability)
 
     @staticmethod
-    def parse(text: str) -> "Config":
+    def parse(text: str, *, reject_unknown: bool = True) -> "Config":
         try:
             raw = tomllib.loads(text)
         except tomllib.TOMLDecodeError as e:
             raise ConfigError(f"invalid TOML: {e}") from e
+        if reject_unknown:
+            _reject_unknown_keys(raw)  # #69: a typo'd table/key is a silent fail-open otherwise
         cfg = Config._from_raw(raw)
         cfg.validate()
         return cfg
@@ -2269,6 +2271,35 @@ _FIELD_ALIASES = {"approvers": "require_approval_from", "cls": "class"}
 # new field is auto-allowlisted and a removed one auto-drops: the parse/known-key/dataclass trio
 # can't drift (the dead-`where` class). draft-lint rejects any key not in here.
 _KNOWN_CHECK_KEYS = frozenset(_FIELD_ALIASES.get(f.name, f.name) for f in fields(Check))
+_KNOWN_TOP_KEYS = frozenset({"schema", "repo", "meta", "capability", "check"})
+_KNOWN_REPO_KEYS = frozenset(f.name for f in fields(RepoCfg))
+_KNOWN_META_KEYS = frozenset(f.name for f in fields(Meta))
+_KNOWN_CAPABILITY_KEYS = frozenset(f.name for f in fields(Capability))
+
+
+def _reject_unknown_keys(raw: dict) -> None:
+    """#69: _from_raw reads keys by name and DROPS the rest, so a typo on an optional key
+    (a security knob like exclude_bot / min_approvals, or a whole mistyped table) loads clean
+    and silently enforces nothing — a fail-open the authoritative gate never reported. Reject it
+    loud here (draft-lint already did pre-arm; this lifts the same check into validate/check)."""
+    bad_top = sorted(k for k in raw if k not in _KNOWN_TOP_KEYS)
+    if bad_top:
+        raise ConfigError(f"unknown top-level table(s) {bad_top} "
+                          f"(known: {', '.join(sorted(_KNOWN_TOP_KEYS))})")
+    for table, known in (("repo", _KNOWN_REPO_KEYS), ("meta", _KNOWN_META_KEYS),
+                         ("capability", _KNOWN_CAPABILITY_KEYS)):
+        section = raw.get(table)
+        if isinstance(section, dict):
+            bad = sorted(k for k in section if k not in known)
+            if bad:
+                raise ConfigError(f"[{table}] unknown key(s) {bad} "
+                                  f"(known: {', '.join(sorted(known))})")
+    for ct in raw.get("check", []):
+        if isinstance(ct, dict):
+            bad = sorted(k for k in ct if k not in _KNOWN_CHECK_KEYS)
+            if bad:
+                raise ConfigError(f"check `{ct.get('id', '?')}`: unknown key(s) {bad} "
+                                  f"— typo? (the per-primitive field reference is in SCHEMA.md)")
 
 
 def _toml_str(s: str) -> str:
@@ -2425,7 +2456,9 @@ def draft_lint(text: str, *, existing_cfg: Config | None,
     agent must fix; todo = the human's review marker; warn = informational. (See the
     module-level design notes + docs/coverage-map.md.)"""
     try:
-        cfg = Config.parse(text)
+        # reject_unknown=False so draft-lint's own per-key check (below) reports each unknown key
+        # granularly AND still runs the rest of the lint, instead of short-circuiting here.
+        cfg = Config.parse(text, reject_unknown=False)
     except ConfigError as e:
         return [LintFinding("error", None, f"config invalid: {e}")]
     findings: list[LintFinding] = []

@@ -9,6 +9,13 @@ breaking config change.
 ## [Unreleased]
 
 ### Fixed
+- **`validate` now rejects unknown config keys/tables** ([#69](https://github.com/IvanWng97/cogpin/issues/69)):
+  config is read by name, so a typo on an *optional* security knob (`exlcude_bot`, `min_aprovals`,
+  `strip_comment`) or a whole mistyped table (`[reqo]`) loaded clean and silently enforced nothing —
+  a fail-open the authoritative gate never reported (only the advisory `draft-lint` caught it). The
+  unknown-key check is now lifted into `Config.parse`, so `validate` / `check` fail loud
+  (`ConfigError`, naming the key) on any unknown top-level table or any unknown key in `[repo]` /
+  `[meta]` / `[capability]` / `[[check]]`. `draft-lint` keeps its granular per-key reporting.
 - **Engine hardening for the bare-`python3` hook path** ([#68](https://github.com/IvanWng97/cogpin/issues/68)):
   `_glob_to_re` is now `lru_cache`-memoized — a big-monorepo diff whose distinct-glob count
   overflows `re`'s own 512-entry compile cache no longer recompiles the same glob thousands of

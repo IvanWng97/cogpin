@@ -137,6 +137,41 @@ class TestConfig(unittest.TestCase):
             Config.parse(bad)
         self.assertIn("change layer", str(e.exception))
 
+    def test_unknown_check_key_rejected(self):
+        # #69: a typo'd OPTIONAL security knob used to be silently dropped by the authoritative
+        # parse (only draft-lint caught it). Now `validate`/`check` reject it loud.
+        bad = MIN + ('\n[[check]]\nid="a"\nkind="fact"\nseverity="warn"\nlayer="change"\n'
+                     'primitive="approval_policy"\nexlcude_bot=true\n')  # typo of exclude_bot
+        with self.assertRaises(ConfigError) as e:
+            Config.parse(bad)
+        self.assertIn("exlcude_bot", str(e.exception))
+
+    def test_correctly_spelled_optional_knobs_accepted(self):
+        ok = MIN + ('\n[[check]]\nid="a"\nkind="fact"\nseverity="warn"\nlayer="change"\n'
+                    'primitive="approval_policy"\nexclude_bot=true\nmin_approvals=2\n')
+        self.assertEqual(len(Config.parse(ok).checks), 1)
+
+    def test_unknown_top_level_table_rejected(self):
+        with self.assertRaises(ConfigError) as e:
+            Config.parse(MIN + '\n[reqo]\nx = 1\n')  # typo of [repo]
+        self.assertIn("reqo", str(e.exception))
+
+    def test_unknown_meta_key_rejected(self):
+        with self.assertRaises(ConfigError) as e:
+            Config.parse(MIN + '\n[meta]\nbypass_emv = "X"\n')  # typo of bypass_env
+        self.assertIn("bypass_emv", str(e.exception))
+
+    def test_shipped_configs_have_no_unknown_keys(self):
+        # guards the shipped configs AND the completeness of the known-key sets
+        root = os.path.dirname(os.path.abspath(R.__file__))
+        cfgs = [os.path.join(root, "cogpin.toml")]
+        exd = os.path.join(root, "examples")
+        cfgs += [os.path.join(exd, d, "cogpin.toml") for d in sorted(os.listdir(exd))
+                 if os.path.exists(os.path.join(exd, d, "cogpin.toml"))]
+        for p in cfgs:
+            with open(p, encoding="utf-8") as fh:
+                Config.parse(fh.read())  # must not raise
+
     def test_invalid_regex_in_field_rejected(self):
         # M1: an uncompilable regex makes its primitive return None (PASS), silently disabling a
         # gate on an author typo. validate must fail LOUD over every populated regex field.
