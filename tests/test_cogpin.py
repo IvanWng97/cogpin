@@ -2416,6 +2416,27 @@ class TestHookEntrypoints(unittest.TestCase):
         self.assertEqual(r.returncode, 2)  # deny (exit 2, reason on stderr)
         self.assertIn("nv", r.stderr)
 
+    def test_cmd_gate_survives_non_utf8_stdin(self):
+        # the never-crash contract extends to BYTES: a binary / foreign-harness payload must
+        # degrade to a clean ALLOW (the two-exit gate contract: 0 = allow, 2 = deny), not
+        # UnicodeDecodeError into a raw traceback (#68). surrogateescape decode → JSONDecodeError
+        # → _pretooluse_tool ("", {}) → allow, deterministically exit 0.
+        r = subprocess.run([sys.executable, _COGPIN, "gate"], cwd=self.d,
+                           input=b"\xff\xfe\x80 not utf-8 \x9c\xed{", capture_output=True)
+        self.assertEqual(r.returncode, 0, "garbage stdin must degrade to a clean allow (exit 0)")
+        self.assertNotIn(b"Traceback", r.stderr, "non-UTF-8 stdin must not spew a raw traceback")
+
+
+class TestGlobCache(unittest.TestCase):
+    def test_glob_to_re_is_memoized(self):
+        # _path_matches calls _glob_to_re per (path, glob) in hot primitive loops; memoize the
+        # translate+compile so a big monorepo diff (600+ distinct globs > re._cache's 512 cap)
+        # doesn't thrash. cache_info() proves the lru_cache, not re's own per-pattern cache.
+        R._glob_to_re.cache_clear()
+        R._glob_to_re("src/**/*.py")
+        R._glob_to_re("src/**/*.py")
+        self.assertGreaterEqual(R._glob_to_re.cache_info().hits, 1)
+
 
 class TestBasePinning(unittest.TestCase):
     """Invariant #5: the base ref is read from the PINNED base, its NAME from a trusted flag
