@@ -227,6 +227,15 @@ flip-the-switch — **prove parity, then delete**:
   for that run. (The stderr line always prints; the Actions annotation is skipped on `push` events to
   avoid non-actionable noise on green main builds. `warn`-severity checks are never flagged — they
   had no teeth to lose.)
+- **A check fails with `evaluation exceeded the … budget … possible ReDoS`.** One of your author
+  regexes (`forbid_pattern` / `secret_scan` / `numeric_floor` / …) hit the per-check wall-clock cap
+  evaluating an added line — almost always a *catastrophic-backtracking* pattern: a quantified group
+  whose body is itself quantified (`(a+)+`, `(a*)*`, `(\d+){2,}`). On a public repo the added line is
+  attacker-controlled, so the cap is a security property, not just a footgun — it fails the check
+  loud instead of hanging the gate. Fix the **pattern**, not the input: rewrite it to be linear (e.g.
+  `a+` instead of `(a+)+`, an explicit character class instead of nested quantifiers). `draft-lint`
+  flags these shapes before you arm. (The cap is enforced on POSIX/CI; on Windows it degrades to the
+  authoring-time `draft-lint` warning — see [`SCHEMA.md`](../SCHEMA.md).)
 - **`cogpin requires Python 3.11+`.** The engine uses the stdlib `tomllib` (Python 3.11). The
   GitHub Action pins a modern Python, but the local PreToolUse/pre-push hooks run your *system*
   `python3` — and Ubuntu/Debian's is still 3.10. If you hit this line, point the hook at a 3.11+

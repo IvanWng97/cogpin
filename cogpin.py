@@ -32,9 +32,11 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 
 if sys.version_info < (3, 11):  # tomllib floor — a friendly line, not a raw ModuleNotFoundError
     sys.stderr.write("cogpin requires Python 3.11+ (the stdlib `tomllib` is unavailable here)\n")
@@ -1488,11 +1490,61 @@ def _eval_diff(c: Check, cfg: Config, facts: DiffFacts) -> str | None:
     return None
 
 
-def run_change(cfg: Config, facts: DiffFacts, allow_run: bool = True) -> list[Finding]:
+# #67: an author regex (forbid_pattern / secret_scan / …) is evaluated over diff content a PUBLIC
+# PR author controls. A catastrophic-backtracking pattern would hang the AUTHORITATIVE gate (a
+# denial-of-the-gate). Bound each diff check with a per-check wall-clock budget.
+_EVAL_BUDGET_S = 5.0
+
+
+class _GateTimeout(Exception):
+    """Raised by the SIGALRM handler when a single diff check blows its evaluation budget."""
+
+
+class _eval_budget:
+    """Per-check wall-clock budget for diff evaluation: bounds a catastrophic-backtracking (ReDoS)
+    author regex over attacker-controllable PR content so it can't hang the gate. Armed via
+    signal.setitimer(ITIMER_REAL) on POSIX's MAIN thread (CPython's regex engine checks signals
+    mid-match, so the alarm aborts the hang); elsewhere — Windows, or a worker thread — it degrades
+    to a no-op, where draft-lint's nested-quantifier warning is the authoring-time backstop."""
+
+    def __init__(self, seconds: float):
+        self.seconds = seconds
+        self.armed = (hasattr(signal, "setitimer")
+                      and threading.current_thread() is threading.main_thread())
+
+    @staticmethod
+    def _fire(_signum: int, _frame: object) -> None:
+        raise _GateTimeout()
+
+    def __enter__(self) -> "_eval_budget":
+        if self.armed:
+            try:
+                self._prev = signal.signal(signal.SIGALRM, self._fire)
+                signal.setitimer(signal.ITIMER_REAL, self.seconds)
+            except (OSError, ValueError, RuntimeError):
+                # arming failed (a syscall-filtering sandbox, an exotic host) → degrade to a no-op
+                # rather than crash the gate ("errors degrade safe"); restore if we already swapped.
+                if hasattr(self, "_prev"):
+                    signal.signal(signal.SIGALRM, self._prev if self._prev is not None else signal.SIG_DFL)
+                self.armed = False
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self.armed:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            # a prior C-installed handler reads back as None, which signal.signal rejects → SIG_DFL.
+            signal.signal(signal.SIGALRM, self._prev if self._prev is not None else signal.SIG_DFL)
+
+
+def run_change(cfg: Config, facts: DiffFacts, allow_run: bool = True,
+               budget_s: float = _EVAL_BUDGET_S) -> list[Finding]:
     """CHANGE layer: every non-agent block/warn check over the committed diff.
 
     `allow_run=False` skips `run` blocks (test suites etc.) so the agent-layer Stop
-    hook stays cheap — the expensive teeth fire only at pre-push/CI."""
+    hook stays cheap — the expensive teeth fire only at pre-push/CI. Each non-`run` check
+    is evaluated under a `budget_s` wall-clock cap (#67): a ReDoS author regex over PR
+    content times out LOUD at the check's own severity instead of hanging the gate; a `run`
+    block is exempt (a test suite legitimately takes minutes)."""
     out: list[Finding] = []
     for c in cfg.checks:
         if c.layer == "agent":
@@ -1501,7 +1553,15 @@ def run_change(cfg: Config, facts: DiffFacts, allow_run: bool = True) -> list[Fi
             continue  # attest/judge handled by Stop hook / advisory judge
         if c.primitive == "run" and not allow_run:
             continue
-        reason = _eval_diff(c, cfg, facts)
+        if c.primitive == "run":
+            reason = _eval_diff(c, cfg, facts)        # exempt: a run block legitimately takes minutes
+        else:
+            try:
+                with _eval_budget(budget_s):
+                    reason = _eval_diff(c, cfg, facts)
+            except _GateTimeout:
+                reason = (f"evaluation exceeded the {budget_s:g}s budget — a catastrophic-backtracking "
+                          f"(ReDoS) author regex over the diff; narrow the pattern (see SCHEMA.md)")
         if reason:
             out.append(Finding(c.id, c.severity, reason))
     return out
@@ -2300,6 +2360,20 @@ _DRAFT_BANNER = (
 # git's well-known empty tree — HEAD vs this = every committed line as `added` (for --simulate).
 _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 _MATCH_EVERYTHING = frozenset({"", ".*", ".+", ".*?", "(.*)", "^.*$", ".*$", "^.*"})
+# #67 authoring-time heuristic: a quantified group whose body itself carries an unbounded
+# quantifier — `(a+)+`, `(a*)*`, `(\d+){2,}` — the classic catastrophic-backtracking shape.
+_NESTED_QUANTIFIER = re.compile(r"\([^()]*[*+][^()]*\)\s*[*+{]")
+
+
+def _nested_quantifier_checks(cfg: "Config") -> list[str]:
+    """Check ids whose author regex has a nested-quantifier shape (`(a+)+`) — a likely ReDoS the
+    per-check budget bounds on POSIX but NOT on Windows (no setitimer). cmd_check surfaces these as
+    an advisory so a Windows-only-CI repo still gets the authoring nudge the runtime can't (#67).
+    Heuristic + advisory: it misses alternation ReDoS, so the POSIX budget stays the real teeth."""
+    return [c.id for c in cfg.checks
+            if any(_NESTED_QUANTIFIER.search(v) for v in _regex_field_values(c))]
+
+
 _SAFE_CMD_CORPUS = ("git push origin feat", "git commit -m x", "git status", "npm test", "cargo test")
 # The two `Check` fields whose TOML key differs from the attribute name.
 _FIELD_ALIASES = {"approvers": "require_approval_from", "cls": "class"}
@@ -2516,6 +2590,11 @@ def draft_lint(text: str, *, existing_cfg: Config | None,
                 re.compile(val)
             except (re.error, TypeError):
                 findings.append(LintFinding("error", c.id, f"invalid regex: {val!r}"))
+                continue
+            if _NESTED_QUANTIFIER.search(val):
+                findings.append(LintFinding("warn", c.id,
+                    f"regex {val!r} has a nested quantifier — possible catastrophic backtracking "
+                    f"(ReDoS); the change layer bounds it per-check, but narrow the pattern"))
         if c.pattern is not None and c.pattern in _MATCH_EVERYTHING:
             findings.append(LintFinding("error", c.id, "pattern matches everything → enforces nothing"))
     # 3 — no unknown/typo'd keys (closes the _from_raw silent-drop hole). reject_unknown=False
@@ -2938,6 +3017,17 @@ def cmd_check(
         # build is just alarm-fatigue. The honest stderr line above still records it.
         if _on_github_actions() and os.environ.get("GITHUB_EVENT_NAME") != "push":
             print(f"::warning title=cogpin inert-checks::{_gha_escape(msg)}")
+    risky = _nested_quantifier_checks(cfg)
+    if risky:
+        # #67: the runtime ReDoS budget is POSIX-only; on a Windows-only-CI repo a nested-quantifier
+        # pattern is unbounded. Surface the authoring warning on EVERY gate run (every OS) — not just
+        # the opt-in draft-lint — so that gap is visible. Advisory only; never fails the gate.
+        rmsg = (f"{len(risky)} check(s) carry a nested-quantifier regex (possible ReDoS): "
+                f"{', '.join(risky)} — the per-check budget bounds it on POSIX but degrades off it; "
+                f"narrow the pattern (`a+`, not `(a+)+`). See SCHEMA.md.")
+        print(f"cogpin: {rmsg}", file=sys.stderr)
+        if _on_github_actions() and os.environ.get("GITHUB_EVENT_NAME") != "push":
+            print(f"::warning title=cogpin redos-risk::{_gha_escape(rmsg)}")
     if has_block(findings):
         n = sum(1 for f in findings if f.severity == "block")
         # report-only is the global ROLLOUT switch (distinct from per-check severity="warn"):
