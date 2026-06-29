@@ -52,12 +52,15 @@ real, ungameable facts. The full evidence (with issue/commit citations) is the
 
 ## The full primitive library
 
-Every check reads only facts — never your code. The 23 below; full field reference in
-[`SCHEMA.md`](https://github.com/IvanWng97/cogpin/blob/main/SCHEMA.md).
+Every check reads only facts — never your code. The {/* gen:count */}26{/* /gen:count */} below; full field reference in
+[`SCHEMA.md`](https://github.com/IvanWng97/cogpin/blob/main/SCHEMA.md). This table is generated from the
+registry in [`docs/primitives.md`](https://github.com/IvanWng97/cogpin/blob/main/docs/primitives.md).
+
+{/* gen:primitives:table — generated from docs/primitives.md (run scripts/gen_primitives.py); edit the registry, not here */}
 
 | primitive | kind | decides over |
 |---|---|---|
-| `forbid_command` | fact | the agent’s command string — `deny` matches the **normalized** verb (agent layer) |
+| `forbid_command` | fact | the agent's command string — `deny` matches the **normalized** verb (agent layer) |
 | `forbid_commit_on_branch` | fact | the live current branch (agent layer) |
 | `self_protect` | fact | a live Write/Edit to a gate-defining file (agent layer) |
 | `secret_scan` | fact | added lines vs token shapes + forbidden file globs |
@@ -65,24 +68,26 @@ Every check reads only facts — never your code. The 23 below; full field refer
 | `forbid_removal` | fact | **removed** lines under a path scope |
 | `forbid_delete` | fact | per-file D-status (a deletion under scope) |
 | `scope_lock` | fact | every A/M/D path must be inside the allowlist (scope creep) |
-| `numeric_floor` | fact | a value’s **direction** across the diff (lower coverage / raised retries) |
+| `numeric_floor` | fact | a value's **direction** across the diff (lower coverage / raised retries) |
 | `change_budget` | fact | count ceilings over the diff (blast radius) |
 | `file_must_contain` | fact | an added/changed file in scope must add a matching line |
 | `max_added_file_bytes` | fact | a per-file byte ceiling (vendored bundles, stray binaries) |
 | `path_requires` | fact | name-status: if `when` changed, `need` must too |
 | `cooccur` | fact | if `trigger` appears, `require` must too |
-| `marker_present` | fact | a marker block exists in the PR body |
+| `marker_present` | fact · agent | a marker block exists in the PR body |
 | `forbid_in_message` | fact | forbidden tokens in a commit/PR message (e.g. `[skip ci]`) |
 | `require_message_pattern` | fact | every commit/PR message matches a shape (e.g. Conventional Commits) |
 | `commit_footer` | fact | every commit ends with the required footer |
 | `protected_path` | fact | gate-defining files changed → need an independent approval |
-| `require_approval_from` | fact | a change under `paths` needs an owner’s APPROVED review (CI) |
+| `require_approval_from` | fact | a change under `paths` needs an owner's APPROVED review (CI) |
 | `pattern_requires_approval` | fact | an added line matching `pattern` needs an approval (CI) |
 | `approval_policy` | fact | the approval is fresh, human, non-author, no changes-requested (CI) |
 | `require_checks_green` | fact | every required status check concluded `success` (CI) |
 | `run` | fact\* | shell-out; the exit code is the fact (**`block` only at the change layer**) |
 | `attest` | advisory | a class-gated `Stop`-hook checklist box (forcing function) |
 | `judge` | advisory | an advisory LLM-judge prompt for a CI substance check |
+
+{/* /gen:primitives:table */}
 
 The eight **semantic-weakening** classes a fact *can’t* prove (assertion-loosening,
 fake-impl, guard-removal, …) ship as the advisory `judge` library — see the coverage map.

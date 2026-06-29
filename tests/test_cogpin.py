@@ -2647,7 +2647,10 @@ class TestNoDrift(unittest.TestCase):
             self.assertIn(f"`{p}", cov, f"{p} missing from docs/coverage-map.md (provenance)")
 
     def test_primitive_count_matches_readme(self):
-        counts = {int(m) for m in re.findall(r"(\d+) primitives", self._doc("README.md"))}
+        # tolerate both the bare "N primitives" phrasing and the gen:count-tokenized form
+        # (the count is generated from docs/primitives.md by scripts/gen_primitives.py)
+        counts = {int(m) for m in re.findall(
+            r"(\d+)(?:<!-- /gen:count -->)? primitives", self._doc("README.md"))}
         self.assertEqual(counts, {len(R.PRIMITIVES)},
                          f"README 'N primitives' count drifted from {len(R.PRIMITIVES)}")
 
