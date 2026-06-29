@@ -215,6 +215,18 @@ flip-the-switch — **prove parity, then delete**:
 - **CI's `require_checks_green` self-blocks.** If cogpin runs as a job in the *same*
   workflow it gates, its own check is still pending at query time — exclude it with
   `ignore = ["<cogpin job name>"]`, or `need` only the other checks.
+- **`check` prints `N block approval/checks check(s) INERT … enforced NOTHING`.** The
+  approval/checks family (`protected_path`, `require_approval_from`, `pattern_requires_approval`,
+  `approval_policy`, `require_checks_green`) reads a PR fact supplied only by a PR-context run via
+  `--reviews-file` / `--approvals` / `--checks-file` (the [Action](../action.yml) passes them on its
+  `pull_request` path). Whenever those facts are absent — another platform, a foreign harness, the
+  local pre-push, or a GitHub `push`-event run (no PR exists) — the check **silently no-ops**; cogpin
+  now says so loudly rather than print a bare `ok` that reads as enforced. It stays exit 0. To make
+  the check actually enforce, run it where the PR facts exist (CI on the `pull_request` path) or pass
+  the equivalent files; otherwise the advisory is the honest statement that this lens is unenforced
+  for that run. (The stderr line always prints; the Actions annotation is skipped on `push` events to
+  avoid non-actionable noise on green main builds. `warn`-severity checks are never flagged — they
+  had no teeth to lose.)
 - **`cogpin requires Python 3.11+`.** The engine uses the stdlib `tomllib` (Python 3.11). The
   GitHub Action pins a modern Python, but the local PreToolUse/pre-push hooks run your *system*
   `python3` — and Ubuntu/Debian's is still 3.10. If you hit this line, point the hook at a 3.11+

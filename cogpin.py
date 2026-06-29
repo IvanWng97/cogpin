@@ -1507,6 +1507,42 @@ def run_change(cfg: Config, facts: DiffFacts, allow_run: bool = True) -> list[Fi
     return out
 
 
+def _inert_pr_checks(cfg: Config, facts: DiffFacts) -> list[str]:
+    """Ids of BLOCK-severity approval/checks checks that SILENTLY no-op this run because the PR
+    fact they read (`reviews` / `approvals` / `checks`) wasn't supplied — off-platform, a foreign
+    harness, the local pre-push, or a GitHub push event (no PR). A declared-yet-inert BLOCK is a fail-OPEN the operator
+    must SEE: the gate prints `ok` while enforcing nothing (#66). Restricted to block — a warn
+    check was never going to fail, so its inertness is no false confidence (and flagging it would
+    spam the common solo-repo `protected_path`-at-warn). Pure; cmd_check surfaces it loudly.
+    Mirrors run_change's evaluation filter (non-agent) so the count matches what actually ran."""
+    out: list[str] = []
+    for c in cfg.checks:
+        if c.layer == "agent" or c.severity != "block":
+            continue
+        if c.primitive == "require_checks_green":
+            inert = facts.checks is None
+        elif c.primitive == "protected_path":
+            inert = facts.reviews is None and facts.approvals is None
+        elif c.primitive in ("require_approval_from", "pattern_requires_approval", "approval_policy"):
+            inert = facts.reviews is None
+        else:
+            continue
+        if inert:
+            out.append(c.id)
+    return out
+
+
+def _on_github_actions() -> bool:
+    return (os.environ.get("GITHUB_ACTIONS") or "").lower() == "true"
+
+
+def _gha_escape(s: str) -> str:
+    """Escape a GitHub Actions workflow-command DATA segment (the message after `::`): a `%` or a
+    newline must be percent-encoded or the runner truncates/mangles the annotation. Belt-and-braces
+    for an odd check id — the authoritative advisory is the unconditional stderr line, not this."""
+    return s.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
 def run_command_gate(cfg: Config, cmd: CommandFacts) -> list[Finding]:
     """AGENT layer: only forbid_command checks decide over the command string."""
     out: list[Finding] = []
@@ -2885,6 +2921,23 @@ def cmd_check(
     for f in findings:
         tag = "BLOCK" if f.severity == "block" else "warn "
         print(f"  [{tag}] {f.id}: {f.reason}")
+    inert = _inert_pr_checks(cfg, facts)
+    if inert:
+        # #66: a base-pinned BLOCK approval/checks check whose PR fact wasn't supplied silently
+        # no-ops — the gate would print `ok` while enforcing nothing. Surface it LOUD (stderr
+        # always; a ::warning:: annotation on Actions) WITHOUT failing: a run with no PR facts
+        # (off-platform, a foreign harness, the local pre-push, or a GitHub push event) can't judge
+        # them, and a forced block would be an unclearable wall in a plain shell.
+        msg = (f"{len(inert)} block approval/checks check(s) INERT this run — no PR facts supplied, "
+               f"so they enforced NOTHING: {', '.join(inert)}. They enforce only where the PR facts "
+               f"exist (CI on the GitHub pull_request path, or --reviews-file / --checks-file); "
+               f"here they are unenforced.")
+        print(f"cogpin: {msg}", file=sys.stderr)
+        # The ::warning:: is the actionable-context nicety; skip it on a push event — no PR exists to
+        # supply facts for, so the family is inert by design and an annotation on every green main
+        # build is just alarm-fatigue. The honest stderr line above still records it.
+        if _on_github_actions() and os.environ.get("GITHUB_EVENT_NAME") != "push":
+            print(f"::warning title=cogpin inert-checks::{_gha_escape(msg)}")
     if has_block(findings):
         n = sum(1 for f in findings if f.severity == "block")
         # report-only is the global ROLLOUT switch (distinct from per-check severity="warn"):
