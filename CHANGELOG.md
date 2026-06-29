@@ -71,7 +71,8 @@ breaking config change.
 ## [0.1.0] — 2026-06-28
 
 The first public release: one stdlib-only engine that turns an AI coding agent's "done" into an
-enforced, ungameable Definition-of-Done.
+enforced, ungameable Definition-of-Done. (Formerly developed as **`ratchet`**; renamed to
+**cogpin** at this inaugural release, which also reset the version line to 0.1.0.)
 
 ### The engine
 - **One file, zero runtime dependencies.** `cogpin.py` is stdlib-only (Python 3.11+, `tomllib`).

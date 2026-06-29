@@ -433,6 +433,10 @@ Ready-to-lift policies:
   **judge** library: the eight semantic-weakening prompts (assertion-loosening,
   fake-impl, regex-relaxing, guard-removal, …) a diff fact can't prove, mined from
   real AI-authored PR history. Compose them with the blocking facts above.
+- [`examples/capability-sandbox/cogpin.toml`](examples/capability-sandbox/cogpin.toml) — a
+  **sandboxed posture**: the `[capability]` floor (no-network, command allow/deny, denied
+  secret paths) compiled to the harness via `cogpin capability emit` (policy, not enforcement —
+  the OS is the boundary), plus a worked `scope_lock` positive path-allowlist for scope-creep.
 
 cogpin dogfoods itself — see [`cogpin.toml`](cogpin.toml): its own change layer
 re-runs its own test suite from the base-pinned policy; `self-protect` denies an
@@ -460,3 +464,7 @@ minors).** Engine (26 primitives) + Claude Code plugin (agent layer) + one-comma
 draft (`suggest` / `draft-lint` / `gaps`) + a rev-pinned composite GitHub Action
 (`@v0`, change layer) + tutorial site. Stdlib Python (3.11+), no third-party deps,
 no package manager. MIT.
+
+> **Formerly `ratchet`.** This project was renamed to **cogpin** at its inaugural public
+> release (0.1.0); if you arrived looking for `ratchet`, this is the successor — same engine,
+> new name. Pin the action to `@v0`.

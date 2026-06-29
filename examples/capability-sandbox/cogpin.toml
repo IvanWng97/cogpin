@@ -1,0 +1,74 @@
+# cogpin recipe — a SANDBOXED agent posture. Lift it, adjust the globs, validate:
+#   python3 .cogpin/cogpin.py validate --config cogpin.toml
+# The one rule: severity="block" REQUIRES kind="fact".
+#
+# This recipe works two constraint surfaces an adopter often wants but rarely sees demoed:
+#   • [capability] — a DECLARED capability floor. cogpin records it and can compile it to the
+#     harness (`cogpin capability emit` → .claude/settings.json), but it NEVER reads it during
+#     gate evaluation and NEVER confines a syscall itself: policy, not enforcement. The OS /
+#     harness is the boundary (docs/composition.md). [capability] is never a [[check]].
+#   • scope_lock — a POSITIVE allowlist: every changed path must fall inside `allow`, so an
+#     out-of-scope edit blocks. The structural inverse of the denylist `scope` family.
+schema = 1
+
+[repo]
+default_branch = "main"
+code = ["src/**/*.py", "*.py"]
+tests = ["tests/**/*.py"]
+docs = ["**/*.md", "docs/**"]
+
+[meta]
+base_pinned = true
+bypass_env = "COGPIN_BYPASS"          # agent-layer escape hatch → COGPIN-BYPASS: <reason> in the attestation
+
+# ── declared capability floor (policy, not enforcement) ──────────────────────
+# `cogpin capability emit` compiles this to .claude/settings.json (idempotent, non-clobbering);
+# the OS / harness is what actually enforces it. Honest caveats are inlined per field.
+[capability]
+no_network     = true     # → deny WebFetch/WebSearch/Bash(curl|wget|nc:*); emit WARNS it cannot GUARANTEE no egress
+fs_confine     = ["."]    # confine to repo root — RECORDED, but settings.json can't enforce an FS root (emit warns)
+deny_paths     = ["~/.ssh/**", "~/.aws/**", "**/.env", "**/.env.*", "**/*.pem"]   # → Read/Edit/Write(<p>) deny
+deny_commands  = ["curl", "wget", "nc", "ssh", "scp"]            # verbs to compile out → Bash(<verb>:*) deny
+allow_commands = ["git", "python3", "pytest", "ruff", "mypy"]    # → Bash(<verb>:*) ALLOW (adds-only; for a TRUE
+                                                                 # allowlist set permissions.defaultMode yourself)
+backend        = "claude-code"   # the only backend rendered today; bubblewrap/docker/seccomp are documented-not-emitted
+
+# ── agent layer (real-time PreToolUse) ───────────────────────────────────────
+[[check]]
+id = "no-verify"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "forbid_command"
+pattern = "--no-verify|--no-gpg-sign"
+
+[[check]]
+id = "branch-first"
+kind = "fact"
+severity = "block"
+layer = "agent"
+primitive = "forbid_commit_on_branch"
+branch = ["main", "master"]
+ops = ["commit", "push"]
+
+# scope_lock — the agent may ONLY touch paths inside `allow`; anything else blocks.
+# `allow` accepts NAMED scopes (code/tests/docs → the [repo] globs) AND literal globs, mixed.
+# Globs are full-path anchored, so a SUBTREE needs `**` (src/feature/**, not feature/**); a bare
+# `*.py` would match only top-level files. An EMPTY allow is inert (and validate-rejected), so the
+# real footgun is leaving the `suggest` placeholder `allow = ["TODO"]` — it matches nothing, so it
+# blocks EVERYTHING. Fill it with the real surface, and ride at `warn` before promoting to `block`:
+[[check]]
+id = "stay-in-scope"
+kind = "fact"
+severity = "warn"
+layer = "change"
+primitive = "scope_lock"
+allow = ["code", "tests", "docs", "cogpin.toml", "CHANGELOG.md"]   # named scopes + two literal globs
+
+# ── change layer (pre-push + CI, authoritative, base-pinned) ─────────────────
+[[check]]
+id = "secret-scan"
+kind = "fact"
+severity = "block"
+primitive = "secret_scan"
+forbid_paths = [".env", ".env.*", "*.pem", "*.key", "id_rsa", "*.p12"]
