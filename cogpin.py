@@ -990,7 +990,9 @@ def _msg_targets(facts: DiffFacts, scopes: set[str]) -> list[str]:
             out.append(lines[0])
         if "commit_body" in scopes and len(lines) > 1:
             out.append("\n".join(lines[1:]))
-    if "pr_body" in scopes and facts.pr_body:
+    if "pr_body" in scopes and facts.pr_body is not None:
+        # `is not None`, not truthiness: an empty pr_body ("") is real-but-empty, so a required
+        # pr_body pattern must evaluate against it (and fail), not be silently dropped (L12).
         out.append(facts.pr_body)
     return out
 
@@ -1364,20 +1366,34 @@ def require_checks_green(check: Check, facts: DiffFacts) -> str | None:
         return None
     want = set(check.need)
     skip = set(check.ignore)
-    present = {(ck.get("name") or ""): (ck.get("conclusion") or "").lower()
-               for ck in facts.checks if (ck.get("name") or "") not in skip}
+    present: dict[str, list[str]] = {}
+    for ck in facts.checks:
+        name = ck.get("name") or ""
+        if name in skip:
+            continue
+        present.setdefault(name, []).append((ck.get("conclusion") or "").lower())
+
+    def _first_bad(concls: list[str]) -> str | None:
+        # a name is green only if EVERY occurrence concluded success — a duplicate name (a
+        # re-run, a cross-workflow collision) must not let a later `success` mask an earlier
+        # `failure` (the old name-keyed dict collapsed last-write-wins → a fail-open).
+        return next((c for c in concls if c != "success"), None)
     if want:
         # allowlist: every NAMED-required check must be present AND success. A required check
         # that never reported (workflow removed in the PR head, not yet registered) is
         # `missing`, not green — it must NOT pass vacuously (a fail-open on the named case).
         for name in sorted(want):
-            concl = present.get(name)
-            if concl != "success":
-                return f"required check `{name}` is `{concl or 'missing'}`, not success"
+            concls = present.get(name)
+            if not concls:
+                return f"required check `{name}` is `missing`, not success"
+            bad = _first_bad(concls)
+            if bad is not None:
+                return f"required check `{name}` is `{bad or 'pending'}`, not success"
         return None
-    for name, concl in present.items():
-        if concl != "success":
-            return f"check `{name}` is `{concl or 'pending'}`, not success"
+    for name, concls in present.items():
+        bad = _first_bad(concls)
+        if bad is not None:
+            return f"check `{name}` is `{bad or 'pending'}`, not success"
     return None
 
 
@@ -2779,7 +2795,12 @@ def cmd_check(
             with open(pr_body_file, encoding="utf-8") as fh:
                 facts.pr_body = fh.read()
         except OSError:
-            pass  # no body file → stays None (no PR context)
+            # Present-but-UNREADABLE fails CLOSED (exit 2, "could not evaluate") — conflating
+            # "unreadable" with "absent" would silently skip pr_body-scoped checks (L11). A
+            # genuinely ABSENT path leaves pr_body=None → skip (the documented no-PR degrade).
+            if os.path.exists(pr_body_file):
+                print(f"cogpin: cannot read --pr-body-file: {pr_body_file}", file=sys.stderr)
+                return 2
     if approvals is not None:
         facts.approvals = [a.strip() for a in approvals.split(",") if a.strip()]
     if reviews_file:

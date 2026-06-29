@@ -1072,6 +1072,15 @@ class TestFullCoverage(unittest.TestCase):
         self.assertIsNotNone(require_message_pattern(c, DiffFacts(commit_msgs=["random subject"])))
         self.assertIsNone(require_message_pattern(c, DiffFacts()))  # no commits → skip
 
+    def test_require_message_pattern_empty_pr_body_fails_closed(self):
+        # L12: an empty pr_body ("") is real-but-empty, not absent — a required pr_body pattern
+        # must FAIL (block), not pass vacuously (the DiffFacts contract marker_present honors).
+        c = one_check('[[check]]\nid="m"\nkind="fact"\nseverity="block"\nprimitive="require_message_pattern"\n'
+                      'pattern="^Fixes #"\nmsg_scope=["pr_body"]')
+        self.assertIsNotNone(require_message_pattern(c, DiffFacts(pr_body="")))         # real-but-empty → block
+        self.assertIsNone(require_message_pattern(c, DiffFacts(pr_body=None)))          # no PR context → skip
+        self.assertIsNone(require_message_pattern(c, DiffFacts(pr_body="Fixes #12")))   # matches → pass
+
     def test_max_added_file_bytes(self):
         c = one_check(
             '[[check]]\nid="big"\nkind="fact"\nseverity="block"\nprimitive="max_added_file_bytes"\n'
@@ -1170,6 +1179,20 @@ class TestFullCoverage(unittest.TestCase):
         self.assertIsNone(require_checks_green(c, DiffFacts(checks=[{"name": "ci", "conclusion": "success"}])))
         self.assertIsNotNone(require_checks_green(c, DiffFacts(checks=[{"name": "ci", "conclusion": "failure"}])))
         self.assertIsNotNone(require_checks_green(c, DiffFacts(checks=[{"name": "ci", "conclusion": None}])))  # pending
+
+    def test_require_checks_green_duplicate_names_no_failopen(self):
+        # L8: a name-keyed dict collapsed duplicate check names last-write-wins, so a `success`
+        # row AFTER a `failure` of the same name (a re-run / cross-workflow collision) hid the
+        # failure → fail-open. A name is green only if EVERY occurrence concluded success.
+        c = one_check('[[check]]\nid="rcg"\nkind="fact"\nseverity="block"\nprimitive="require_checks_green"')
+        needed = one_check('[[check]]\nid="rcg"\nkind="fact"\nseverity="block"\n'
+                           'primitive="require_checks_green"\nneed=["test"]')
+        dup = [{"name": "test", "conclusion": "failure"}, {"name": "test", "conclusion": "success"}]
+        self.assertIsNotNone(require_checks_green(c, DiffFacts(checks=dup)))       # bare: must still block
+        self.assertIsNotNone(require_checks_green(needed, DiffFacts(checks=dup)))  # need: must still block
+        ok = [{"name": "test", "conclusion": "success"}, {"name": "test", "conclusion": "success"}]
+        self.assertIsNone(require_checks_green(c, DiffFacts(checks=ok)))           # all-success → green
+        self.assertIsNone(require_checks_green(needed, DiffFacts(checks=ok)))
 
     def test_require_checks_green_ignore_excludes_self(self):
         """#5: cogpin's own job is pending while it gates the same run; `ignore` drops it
@@ -2514,6 +2537,28 @@ class TestBasePinning(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             rc = cmd_check(self.d, allow_run=False, default_branch_arg="main", checks_file=bad)
         self.assertEqual(rc, 2, "a corrupt --checks-file must fail closed, not pass vacuously")
+
+    def test_unreadable_pr_body_file_fails_closed(self):
+        # L11: a present-but-UNREADABLE --pr-body-file must FAIL CLOSED, not conflate "unreadable"
+        # with "absent" (which silently skips pr_body-scoped checks). A directory path is
+        # present-but-unreadable on every OS (open() → OSError). An absent path still degrades.
+        from cogpin import cmd_check
+        self._w("cogpin.toml", self.STRICT)
+        self._git("add", "-A")
+        self._git("commit", "-qm", "base")
+        self._git("update-ref", "refs/remotes/origin/main", self._sha())
+        self._w("clean.txt", "ok")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "head")
+        unreadable = os.path.join(self.d, "a_dir")
+        os.makedirs(unreadable)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            rc = cmd_check(self.d, allow_run=False, default_branch_arg="main", pr_body_file=unreadable)
+        self.assertEqual(rc, 2, "an unreadable --pr-body-file must fail closed (could not evaluate)")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            rc2 = cmd_check(self.d, allow_run=False, default_branch_arg="main",
+                            pr_body_file=os.path.join(self.d, "nope.txt"))
+        self.assertNotEqual(rc2, 2, "a genuinely ABSENT --pr-body-file degrades to skip, not fail-closed")
 
     def test_authoritative_unreachable_base_fails_closed_e2e(self):
         from cogpin import cmd_check
