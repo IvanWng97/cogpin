@@ -2792,8 +2792,9 @@ def cmd_check(
     facts = DiffFacts.from_range(cwd, base or "HEAD~1", head)
     if pr_body_file:
         try:
-            with open(pr_body_file, encoding="utf-8") as fh:
-                facts.pr_body = fh.read()
+            with open(pr_body_file, encoding="utf-8", errors="surrogateescape") as fh:
+                facts.pr_body = fh.read()  # lossless decode (matches _gh_pr_body / the diff path):
+                                           # a non-UTF-8 byte round-trips, never crashes the scan
         except OSError:
             # Present-but-UNREADABLE fails CLOSED (exit 2, "could not evaluate") — conflating
             # "unreadable" with "absent" would silently skip pr_body-scoped checks (L11). A

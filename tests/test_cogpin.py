@@ -2560,6 +2560,24 @@ class TestBasePinning(unittest.TestCase):
                             pr_body_file=os.path.join(self.d, "nope.txt"))
         self.assertNotEqual(rc2, 2, "a genuinely ABSENT --pr-body-file degrades to skip, not fail-closed")
 
+    def test_non_utf8_pr_body_file_decodes_lossless(self):
+        # a present, readable --pr-body-file with a non-UTF-8 byte must decode losslessly (like
+        # _gh_pr_body / the diff path), never traceback or fail-closed — content, not "unreadable".
+        from cogpin import cmd_check
+        self._w("cogpin.toml", self.STRICT)
+        self._git("add", "-A")
+        self._git("commit", "-qm", "base")
+        self._git("update-ref", "refs/remotes/origin/main", self._sha())
+        self._w("clean.txt", "ok")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "head")
+        body = os.path.join(self.d, "body.txt")
+        with open(body, "wb") as fh:
+            fh.write(b"Fixes #12 \xff\xfe done")  # invalid UTF-8 bytes
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            rc = cmd_check(self.d, allow_run=False, default_branch_arg="main", pr_body_file=body)
+        self.assertNotEqual(rc, 2, "a readable non-UTF-8 --pr-body-file must decode, not fail-closed")
+
     def test_authoritative_unreachable_base_fails_closed_e2e(self):
         from cogpin import cmd_check
         self._w("cogpin.toml", self.STRICT)
