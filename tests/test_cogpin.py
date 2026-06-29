@@ -714,9 +714,11 @@ class TestAgentLayer(unittest.TestCase):
         # `DOD-BYPASS: …` line at column 0 would disable the gate for any adopter who lifts it.
         root = os.path.dirname(os.path.abspath(R.__file__))
         tmpl = os.path.join(root, "examples", "pixtuoid", ".dod", "attestation.md")
-        if not os.path.exists(tmpl):
-            self.skipTest("pixtuoid attestation template not present")
-        cfg = Config.parse(open(os.path.join(root, "examples", "pixtuoid", "cogpin.toml"), encoding="utf-8").read())
+        cfg_path = os.path.join(root, "examples", "pixtuoid", "cogpin.toml")
+        if not (os.path.exists(tmpl) and os.path.exists(cfg_path)):
+            self.skipTest("pixtuoid attestation template/config not present")
+        with open(cfg_path, encoding="utf-8") as fh:
+            cfg = Config.parse(fh.read())
         with open(tmpl, encoding="utf-8") as fh:
             md = fh.read()
         self.assertIsNone(R._bypass_reason(cfg, md), "the shipped template activates a bypass")
