@@ -220,6 +220,18 @@ like `forbid_commit_on_branch` / `self_protect` — it is agent-layer-only; `val
 | `file_must_contain` | `scope`, `pattern`, `status` (default `A`) | a changed file of `status` in scope adds **no** line matching `pattern` |
 | `max_added_file_bytes` | `maxkb`, `allow_binary`, `scope` | an added/modified file exceeds `maxkb`, or is binary while `allow_binary=false` |
 
+> **Author regexes are evaluated under a per-check wall-clock budget (ReDoS bound).** Your
+> `pattern` / `key` / `custom` regexes run over diff content a (public-repo) PR author controls, so a
+> catastrophic-backtracking pattern would hang the gate. The change layer caps each non-`run` check
+> at 5 s: on POSIX (the CI default) a runaway match is aborted and the check fails **loud** at its own
+> severity rather than hanging; off POSIX / off the main thread (e.g. Windows) the cap degrades to a
+> no-op — there, lean on the authoring-time warning (`draft-lint`, and on every `check` run) that flags
+> a nested-quantifier shape (`(a+)+`, `(a*)*`, `(\d+){2,}`). That heuristic is partial: it does **not**
+> catch *alternation* backtracking (`(a|aa)+`, `(foo|foo)*`), so on a Windows-only-CI repo those stay
+> unbounded **and** unwarned. Keep patterns linear — no quantified group whose body is itself quantified,
+> and no overlapping alternation under a `*`/`+` — and they never approach the budget. If your authoritative
+> gate can run even one POSIX job, the wall-clock budget covers both shapes there.
+
 ### Cross-file & message facts
 
 | primitive | params | blocks when |

@@ -7,9 +7,12 @@ import io
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -761,6 +764,124 @@ class TestInertPrChecks(unittest.TestCase):
     def test_non_pr_primitive_never_flagged(self):
         cfg = self._cfg('[[check]]\nid="sek"\nkind="fact"\nseverity="block"\nprimitive="secret_scan"\n')
         self.assertEqual(R._inert_pr_checks(cfg, DiffFacts()), [])
+
+
+class TestRedosBudget(unittest.TestCase):
+    """#67: an author regex (forbid_pattern / secret_scan / …) runs over attacker-controllable PR
+    content. A catastrophic-backtracking pattern would hang the authoritative gate; run_change
+    bounds each non-`run` diff check with a per-check wall-clock budget (POSIX main-thread)."""
+
+    REDOS = (MIN + '[[check]]\nid="rx"\nkind="fact"\nseverity="block"\nlayer="change"\n'
+                   'primitive="forbid_pattern"\npattern="(a+)+$"\n')
+
+    @unittest.skipUnless(hasattr(signal, "setitimer"), "needs POSIX setitimer")
+    def test_catastrophic_pattern_times_out_loud_at_check_severity(self):
+        cfg = Config.parse(self.REDOS)
+        # 28 a's: ~2^28 backtracks (seconds) if the abort FAILS — bounded so a broken build fails
+        # clean in seconds, not the ~hours that "a"*40 would hang (the elapsed guard is checked only
+        # AFTER run_change returns, so the input itself must be finite). Still >> the 0.5s budget.
+        facts = DiffFacts(added=[("a.py", "a" * 28 + "!")], changed=[("M", "a.py")])
+        t0 = time.monotonic()
+        findings = run_change(cfg, facts, budget_s=0.5)
+        elapsed = time.monotonic() - t0
+        self.assertLess(elapsed, 2.0, "the budget must ABORT the hang at ~0.5s, not wait it out")
+        self.assertEqual(len(findings), 1)
+        self.assertTrue(has_block(findings))                 # block check → fail closed, loud
+        self.assertIn("ReDoS", findings[0].reason)
+
+    def test_benign_pattern_evaluates_normally_under_budget(self):
+        cfg = Config.parse(MIN + '[[check]]\nid="rx"\nkind="fact"\nseverity="block"\nlayer="change"\n'
+                                 'primitive="forbid_pattern"\npattern="TODO"\n')
+        hit = run_change(cfg, DiffFacts(added=[("a.py", "x = 1  # TODO")], changed=[("M", "a.py")]), budget_s=0.5)
+        self.assertTrue(has_block(hit))                       # a real match, not a timeout
+        miss = run_change(cfg, DiffFacts(added=[("a.py", "x = 1")], changed=[("M", "a.py")]), budget_s=0.5)
+        self.assertEqual(miss, [])
+
+    @unittest.skipUnless(hasattr(signal, "setitimer"), "needs POSIX setitimer")
+    def test_run_block_is_exempt_from_the_budget(self):
+        # a `run` block legitimately takes seconds/minutes (a test suite) — it must NOT be killed by
+        # the per-check regex budget. A 0.3s sleep under a 0.05s budget still completes (exit 0).
+        cfg = Config.parse(MIN + '[[check]]\nid="t"\nkind="fact"\nseverity="block"\nlayer="change"\n'
+                                 'primitive="run"\ncmd="sleep 0.3"\n')
+        self.assertEqual(run_change(cfg, DiffFacts(), allow_run=True, budget_s=0.05), [])
+
+    @unittest.skipUnless(hasattr(signal, "setitimer"), "needs POSIX setitimer")
+    def test_check_after_a_timeout_still_evaluates(self):
+        # the per-check budget must disarm + restore the prior SIGALRM handler so a timeout in one
+        # check doesn't poison the next — the second (benign) check must still produce its finding.
+        cfg = Config.parse(
+            MIN + '[[check]]\nid="redos"\nkind="fact"\nseverity="block"\nlayer="change"\n'
+                  'primitive="forbid_pattern"\npattern="(a+)+$"\n'
+                  '[[check]]\nid="benign"\nkind="fact"\nseverity="block"\nlayer="change"\n'
+                  'primitive="forbid_pattern"\npattern="SECRET"\n')
+        facts = DiffFacts(added=[("a.py", "a" * 28 + "!"), ("b.py", "x = SECRET")],  # 28: bounded clean-fail, see above
+                          changed=[("M", "a.py"), ("M", "b.py")])
+        before = signal.getsignal(signal.SIGALRM)
+        ids = {f.id for f in run_change(cfg, facts, budget_s=0.5)}
+        self.assertEqual(ids, {"redos", "benign"})  # timeout + the subsequent real match both fire
+        self.assertIs(signal.getsignal(signal.SIGALRM), before, "the prior SIGALRM handler must be restored")
+
+    def test_eval_budget_degrades_off_main_thread(self):
+        seen = {}
+
+        def probe():
+            seen["armed"] = R._eval_budget(0.5).armed
+
+        t = threading.Thread(target=probe)
+        t.start()
+        t.join()
+        self.assertFalse(seen["armed"], "setitimer is main-thread-only → must degrade in a worker thread")
+
+    @unittest.skipUnless(hasattr(signal, "setitimer"), "needs POSIX setitimer")
+    def test_eval_budget_degrades_when_arming_raises(self):
+        # a syscall-filtering sandbox can make setitimer raise — the gate must DEGRADE (no-op),
+        # not crash, and must not leak the _fire handler. "errors degrade safe".
+        cfg = Config.parse(MIN + '[[check]]\nid="rx"\nkind="fact"\nseverity="block"\nlayer="change"\n'
+                                 'primitive="forbid_pattern"\npattern="TODO"\n')
+        facts = DiffFacts(added=[("a.py", "x = 1  # TODO")], changed=[("M", "a.py")])
+        before = signal.getsignal(signal.SIGALRM)
+        orig = signal.setitimer
+
+        def boom(*a):
+            raise OSError("sandboxed")
+
+        signal.setitimer = boom
+        try:
+            findings = run_change(cfg, facts, budget_s=0.5)  # must not raise
+        finally:
+            signal.setitimer = orig
+        self.assertTrue(has_block(findings), "evaluation still runs unbounded when the budget can't arm")
+        self.assertIs(signal.getsignal(signal.SIGALRM), before, "no leaked _fire handler after a failed arm")
+
+    @unittest.skipUnless(hasattr(signal, "setitimer"), "needs POSIX setitimer")
+    def test_exit_restores_none_prev_as_sig_dfl(self):
+        # a C-installed prior handler reads back as None; signal.signal(SIGALRM, None) raises — so
+        # __exit__ must coerce None → SIG_DFL instead of crashing on the restore.
+        before = signal.getsignal(signal.SIGALRM)
+        try:
+            b = R._eval_budget(0.5)
+            b.armed = True
+            b._prev = None
+            b.__exit__()  # must not raise
+            self.assertEqual(signal.getsignal(signal.SIGALRM), signal.SIG_DFL)
+        finally:
+            signal.signal(signal.SIGALRM, before)
+
+    def test_nested_quantifier_checks_flags_risky_regex(self):
+        cfg = Config.parse(MIN + '[[check]]\nid="rx"\nkind="fact"\nseverity="warn"\nlayer="change"\n'
+                                 'primitive="forbid_pattern"\npattern="(a+)+$"\n')
+        self.assertEqual(R._nested_quantifier_checks(cfg), ["rx"])
+        safe = Config.parse(MIN + '[[check]]\nid="ok"\nkind="fact"\nseverity="warn"\nlayer="change"\n'
+                                  'primitive="forbid_pattern"\npattern="TODO"\n')
+        self.assertEqual(R._nested_quantifier_checks(safe), [])
+
+    def test_draft_lint_warns_on_nested_quantifier(self):
+        draft = render_suggest_toml(_reposcan("")) + (
+            '\n[[check]]\nid="rx"\nkind="fact"\nseverity="warn"\nprimitive="forbid_pattern"\n'
+            'pattern="(a+)+$"\nscope="src/**/*.py"\n')
+        findings = draft_lint(draft, existing_cfg=None, head_facts=None)
+        self.assertTrue(any(f.level == "warn" and "backtrack" in f.msg.lower() for f in findings),
+                        "a nested-quantifier author regex should draw a ReDoS authoring warning")
 
 
 class TestAgentLayer(unittest.TestCase):
@@ -2684,6 +2805,26 @@ class TestBasePinning(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             rc = cmd_check(self.d, allow_run=False, default_branch_arg="main")
         self.assertEqual(rc, 1, "the .env added across the full base..HEAD range must be caught")
+
+    def test_check_advises_on_nested_quantifier_regex(self):
+        # #67/#74: cmd_check surfaces a redos-risk advisory (stderr) for a config carrying a
+        # nested-quantifier pattern — on Windows (the budget degrades) it's the only ReDoS signal.
+        from cogpin import cmd_check
+        cfg = ('schema=1\n[repo]\ndefault_branch="main"\n[meta]\nbase_pinned=true\n[[check]]\nid="rx"\n'
+               'kind="fact"\nseverity="warn"\nprimitive="forbid_pattern"\npattern="(a+)+$"\n')
+        self._w("cogpin.toml", cfg)
+        self._git("add", "-A")
+        self._git("commit", "-qm", "base")
+        self._git("update-ref", "refs/remotes/origin/main", self._sha())
+        self._w("clean.txt", "ok")  # "ok" has no 'a' → the pattern fails fast, no timeout this run
+        self._git("add", "-A")
+        self._git("commit", "-qm", "head")
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = cmd_check(self.d, allow_run=False, default_branch_arg="main")
+        self.assertEqual(rc, 0)
+        self.assertIn("nested-quantifier", err.getvalue())
+        self.assertIn("rx", err.getvalue())
 
     def test_corrupt_checks_file_fails_closed(self):
         # M3: a requested --checks-file that won't parse must FAIL CLOSED (exit 2), never

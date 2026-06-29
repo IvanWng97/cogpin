@@ -9,6 +9,16 @@ breaking config change.
 ## [Unreleased]
 
 ### Fixed
+- **Author-regex evaluation is now wall-clock bounded (ReDoS hardening)** ([#67](https://github.com/IvanWng97/cogpin/issues/67)):
+  `forbid_pattern` / `secret_scan` / `forbid_removal` / `numeric_floor` author regexes run over diff
+  content a (public-repo) PR author controls. A catastrophic-backtracking pattern could hang the
+  **authoritative** change-layer gate — a denial-of-the-gate / CI timeout. `run_change` now evaluates
+  each non-`run` diff check under a per-check wall-clock budget (5 s): on POSIX's main thread a
+  `signal.setitimer(ITIMER_REAL)` alarm aborts a runaway match and the check fails **loud** at its own
+  severity (`evaluation exceeded the budget … possible ReDoS`) instead of hanging; a `run` block is
+  exempt (a test suite legitimately takes minutes). Off POSIX / off the main thread the budget degrades
+  to a no-op — there, `draft-lint`'s new authoring-time warning is the backstop: it flags a
+  nested-quantifier pattern (`(a+)+`, `(a*)*`, `(\d+){2,}`) as a likely ReDoS shape before you arm.
 - **Inert `block` approval/checks checks now fail LOUD** ([#66](https://github.com/IvanWng97/cogpin/issues/66)):
   a `block` `protected_path` / `require_approval_from` / `pattern_requires_approval` / `approval_policy` /
   `require_checks_green` check reads a PR fact (`reviews` / `approvals` / `checks`) that only a PR-context
