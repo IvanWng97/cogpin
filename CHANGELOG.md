@@ -9,6 +9,20 @@ breaking config change.
 ## [Unreleased]
 
 ### Fixed
+- **Inert `block` approval/checks checks now fail LOUD** ([#66](https://github.com/IvanWng97/cogpin/issues/66)):
+  a `block` `protected_path` / `require_approval_from` / `pattern_requires_approval` / `approval_policy` /
+  `require_checks_green` check reads a PR fact (`reviews` / `approvals` / `checks`) that only a PR-context
+  run supplies. Whenever those facts are absent — a GitLab/Bitbucket/Jenkins adopter, a foreign harness,
+  the local pre-push, **or a GitHub `push`-event run** — the check silently no-ops and `cogpin check`
+  printed a bare `ok`: *false confidence*, the gate-file moat enforcing nothing while looking enforced.
+  `check` now emits a prominent advisory naming every inert `block` check, e.g. `N block approval/checks
+  check(s) INERT this run … they enforced NOTHING: …`. It stays **exit 0** — a run with no PR facts can't
+  judge them and a forced block would be an unclearable wall in a plain shell, so this converts
+  fail-*silent* into fail-*loud* without false-blocking. The honest line always goes to stderr; the
+  `::warning::` Actions annotation is suppressed on `push` events (no PR exists to supply facts for, so
+  annotating every green main build would be non-actionable noise). Scoped to `block` by design: a
+  `warn` check never had teeth, so its inertness is no false confidence (and flagging it would spam the
+  common solo-repo `protected_path`-at-`warn`).
 - **`validate` now rejects unknown config keys/tables** ([#69](https://github.com/IvanWng97/cogpin/issues/69)):
   config is read by name, so a typo on an *optional* security knob (`exlcude_bot`, `min_aprovals`,
   `strip_comment`) or a whole mistyped table (`[reqo]`) loaded clean and silently enforced nothing —

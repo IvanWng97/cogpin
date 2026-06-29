@@ -1507,6 +1507,42 @@ def run_change(cfg: Config, facts: DiffFacts, allow_run: bool = True) -> list[Fi
     return out
 
 
+# The approval/checks family — each reads a PR fact (reviews / approvals / checks) that only a
+# PR-context run supplies. `_fixture_evaluable` is the single source of WHICH fact each one reads;
+# `_inert_pr_checks` filters to this family and reuses it, so the two can't drift (#73 review).
+_PR_FACT_PRIMITIVES = frozenset({
+    "protected_path", "require_approval_from", "pattern_requires_approval",
+    "approval_policy", "require_checks_green",
+})
+
+
+def _inert_pr_checks(cfg: Config, facts: DiffFacts) -> list[str]:
+    """Ids of BLOCK-severity approval/checks checks that SILENTLY no-op this run because the PR
+    fact they read (`reviews` / `approvals` / `checks`) wasn't supplied — off-platform, a foreign
+    harness, the local pre-push, or a GitHub push event (no PR). A declared-yet-inert BLOCK is a
+    fail-OPEN the operator must SEE: the gate prints `ok` while enforcing nothing (#66). Restricted
+    to block — a warn check was never going to fail, so its inertness is no false confidence (and
+    flagging it would spam the common solo-repo `protected_path`-at-warn). Skips layer="agent" to
+    mirror run_change's filter (those never ran in the change layer). Reuses `_fixture_evaluable`
+    as the canonical fact-read map (inert ≡ a PR-family check the supplied facts can't decide).
+    Pure; cmd_check surfaces it loudly."""
+    return [c.id for c in cfg.checks
+            if c.primitive in _PR_FACT_PRIMITIVES
+            and c.layer != "agent" and c.severity == "block"
+            and not _fixture_evaluable(c, facts)]
+
+
+def _on_github_actions() -> bool:
+    return (os.environ.get("GITHUB_ACTIONS") or "").lower() == "true"
+
+
+def _gha_escape(s: str) -> str:
+    """Escape a GitHub Actions workflow-command DATA segment (the message after `::`): a `%` or a
+    newline must be percent-encoded or the runner truncates/mangles the annotation. Belt-and-braces
+    for an odd check id — the authoritative advisory is the unconditional stderr line, not this."""
+    return s.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
 def run_command_gate(cfg: Config, cmd: CommandFacts) -> list[Finding]:
     """AGENT layer: only forbid_command checks decide over the command string."""
     out: list[Finding] = []
@@ -2885,6 +2921,23 @@ def cmd_check(
     for f in findings:
         tag = "BLOCK" if f.severity == "block" else "warn "
         print(f"  [{tag}] {f.id}: {f.reason}")
+    inert = _inert_pr_checks(cfg, facts)
+    if inert:
+        # #66: a base-pinned BLOCK approval/checks check whose PR fact wasn't supplied silently
+        # no-ops — the gate would print `ok` while enforcing nothing. Surface it LOUD (stderr
+        # always; a ::warning:: annotation on Actions) WITHOUT failing: a run with no PR facts
+        # (off-platform, a foreign harness, the local pre-push, or a GitHub push event) can't judge
+        # them, and a forced block would be an unclearable wall in a plain shell.
+        msg = (f"{len(inert)} block approval/checks check(s) INERT this run — no PR facts supplied, "
+               f"so they enforced NOTHING: {', '.join(inert)}. They enforce only where the PR facts "
+               f"exist (CI on the GitHub pull_request path, or --reviews-file / --checks-file); "
+               f"here they are unenforced.")
+        print(f"cogpin: {msg}", file=sys.stderr)
+        # The ::warning:: is the actionable-context nicety; skip it on a push event — no PR exists to
+        # supply facts for, so the family is inert by design and an annotation on every green main
+        # build is just alarm-fatigue. The honest stderr line above still records it.
+        if _on_github_actions() and os.environ.get("GITHUB_EVENT_NAME") != "push":
+            print(f"::warning title=cogpin inert-checks::{_gha_escape(msg)}")
     if has_block(findings):
         n = sum(1 for f in findings if f.severity == "block")
         # report-only is the global ROLLOUT switch (distinct from per-check severity="warn"):

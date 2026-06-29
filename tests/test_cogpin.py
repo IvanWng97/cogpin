@@ -684,6 +684,85 @@ class TestEngine(unittest.TestCase):
         self.assertEqual(run_command_gate(self.cfg(), CommandFacts("git status")), [])
 
 
+class TestInertPrChecks(unittest.TestCase):
+    """#66: a BLOCK-level approval/checks check silently no-ops off GitHub (its PR fact is
+    absent) — `_inert_pr_checks` names those so cmd_check can fail LOUD instead of printing
+    `ok` while enforcing nothing."""
+
+    def _cfg(self, body):
+        return Config.parse(MIN + body)
+
+    def test_block_require_checks_green_inert_when_checks_absent(self):
+        cfg = self._cfg('[[check]]\nid="cg"\nkind="fact"\nseverity="block"\nlayer="change"\n'
+                        'primitive="require_checks_green"\nneed=["build"]\n')
+        self.assertEqual(R._inert_pr_checks(cfg, DiffFacts()), ["cg"])  # checks=None → inert
+        self.assertEqual(R._inert_pr_checks(cfg, DiffFacts(checks=[])), [])  # supplied (real-but-empty)
+
+    def test_block_protected_path_inert_only_when_both_facts_absent(self):
+        cfg = self._cfg('[[check]]\nid="pp"\nkind="fact"\nseverity="block"\nlayer="change"\n'
+                        'primitive="protected_path"\npaths=["cogpin.toml"]\n')
+        self.assertEqual(R._inert_pr_checks(cfg, DiffFacts()), ["pp"])  # reviews+approvals None
+        self.assertEqual(R._inert_pr_checks(cfg, DiffFacts(approvals=["x"])), [])  # degraded flat list
+        self.assertEqual(R._inert_pr_checks(cfg, DiffFacts(reviews=[])), [])       # rich reviews supplied
+
+    def test_block_approval_policy_inert_when_reviews_absent(self):
+        cfg = self._cfg('[[check]]\nid="ap"\nkind="fact"\nseverity="block"\nlayer="change"\n'
+                        'primitive="approval_policy"\nmin_approvals=2\n')
+        self.assertEqual(R._inert_pr_checks(cfg, DiffFacts()), ["ap"])
+        self.assertEqual(R._inert_pr_checks(cfg, DiffFacts(reviews=[])), [])
+
+    def test_all_pr_family_primitives_are_detected(self):
+        # drift guard: EVERY PR-fact primitive at block must be flagged inert when its fact is
+        # absent. Dropping one from _inert_pr_checks's set silently reintroduces the #66 fail-open
+        # (an off-GitHub block moat that no-ops with no advisory) — so adding a future PR primitive
+        # without wiring it here goes CI-red.
+        cfg = self._cfg(
+            '[[check]]\nid="rcg"\nkind="fact"\nseverity="block"\nlayer="change"\nprimitive="require_checks_green"\nneed=["ci"]\n'
+            '[[check]]\nid="pp"\nkind="fact"\nseverity="block"\nlayer="change"\nprimitive="protected_path"\npaths=["x"]\n'
+            '[[check]]\nid="raf"\nkind="fact"\nseverity="block"\nlayer="change"\nprimitive="require_approval_from"\npaths=["x"]\nrequire_approval_from=["o"]\n'
+            '[[check]]\nid="pra"\nkind="fact"\nseverity="block"\nlayer="change"\nprimitive="pattern_requires_approval"\npattern="x"\n'
+            '[[check]]\nid="ap"\nkind="fact"\nseverity="block"\nlayer="change"\nprimitive="approval_policy"\n')
+        self.assertEqual(set(R._inert_pr_checks(cfg, DiffFacts())), {"rcg", "pp", "raf", "pra", "ap"})
+
+    def test_inert_is_complement_of_fixture_evaluable(self):
+        # #73 review: _inert_pr_checks reuses _fixture_evaluable as the single fact-read source. Lock
+        # the coupling — for a block PR-family check, "inert" must be exactly "not fixture-evaluable"
+        # across every fact state, so changing one primitive's fact-read without the other goes red.
+        cases = (("require_checks_green", 'need=["ci"]\n'),
+                 ("protected_path", 'paths=["x"]\n'),
+                 ("require_approval_from", 'paths=["x"]\nrequire_approval_from=["o"]\n'),
+                 ("pattern_requires_approval", 'pattern="x"\n'),
+                 ("approval_policy", ''))
+        states = (DiffFacts(), DiffFacts(reviews=[]), DiffFacts(approvals=["x"]), DiffFacts(checks=[]))
+        for prim, extra in cases:
+            cfg = self._cfg(f'[[check]]\nid="c"\nkind="fact"\nseverity="block"\nlayer="change"\n'
+                            f'primitive="{prim}"\n{extra}')
+            c = cfg.checks[0]
+            for facts in states:
+                inert = "c" in R._inert_pr_checks(cfg, facts)
+                self.assertEqual(inert, not R._fixture_evaluable(c, facts),
+                                 f"{prim} r={facts.reviews} a={facts.approvals} ch={facts.checks}")
+
+    def test_warn_severity_is_not_flagged(self):
+        # a warn check never had teeth → its inertness is no false confidence (and flagging the
+        # common solo-repo protected_path-at-warn would just spam). Block-only by design.
+        cfg = self._cfg('[[check]]\nid="pp"\nkind="fact"\nseverity="warn"\nlayer="change"\n'
+                        'primitive="protected_path"\npaths=["cogpin.toml"]\n')
+        self.assertEqual(R._inert_pr_checks(cfg, DiffFacts()), [])
+
+    def test_agent_layer_pr_check_not_flagged(self):
+        # mirrors run_change (which skips layer="agent"): a block protected_path at the agent layer
+        # never ran in the change layer, so it isn't "inert this run" — flagging it would mis-advise
+        # "pass --reviews-file" for a check PR facts can't make run.
+        cfg = self._cfg('[[check]]\nid="pp"\nkind="fact"\nseverity="block"\nlayer="agent"\n'
+                        'primitive="protected_path"\npaths=["cogpin.toml"]\n')
+        self.assertEqual(R._inert_pr_checks(cfg, DiffFacts()), [])
+
+    def test_non_pr_primitive_never_flagged(self):
+        cfg = self._cfg('[[check]]\nid="sek"\nkind="fact"\nseverity="block"\nprimitive="secret_scan"\n')
+        self.assertEqual(R._inert_pr_checks(cfg, DiffFacts()), [])
+
+
 class TestAgentLayer(unittest.TestCase):
     """The check_dod.py-parity pieces: push/merge detection, change-class gating,
     and the attestation Stop-gaps."""
@@ -2529,6 +2608,11 @@ class TestBasePinning(unittest.TestCase):
     STRICT = ('schema=1\n[repo]\ndefault_branch="main"\n[meta]\nbase_pinned=true\n[[check]]\nid="sek"\n'
               'kind="fact"\nseverity="block"\nprimitive="secret_scan"\nforbid_paths=[".env","**/.env"]\n')
     LOOSE = 'schema=1\n[repo]\ndefault_branch="main"\n[meta]\nbase_pinned=true\n'
+    # a block protected_path on the gate file: BLOCKS on the GitHub path (reviews supplied) but
+    # silently no-ops off GitHub (no facts) — the #66 keystone.
+    PROTECT = ('schema=1\n[repo]\ndefault_branch="main"\n[meta]\nbase_pinned=true\n[[check]]\nid="pgf"\n'
+               'kind="fact"\nseverity="block"\nlayer="change"\nprimitive="protected_path"\n'
+               'paths=["cogpin.toml"]\n')
 
     def test_load_config_reads_base_not_working_tree(self):
         from cogpin import load_config
@@ -2670,6 +2754,101 @@ class TestBasePinning(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             # clean diff would be rc 0, but the trusted base is unfetched → refuse (rc 1)
             self.assertEqual(cmd_check(self.d, allow_run=False, default_branch_arg="ghost"), 1)
+
+    def _protect_repo_touching_gate(self):
+        # base = PROTECT config; HEAD edits the gate file cogpin.toml under base..HEAD range
+        self._w("cogpin.toml", self.PROTECT)
+        self._git("add", "-A")
+        self._git("commit", "-qm", "base")
+        self._git("update-ref", "refs/remotes/origin/main", self._sha())
+        self._w("cogpin.toml", self.PROTECT + "# touched\n")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "touch gate")
+
+    def test_inert_block_pr_check_is_loud_off_github(self):
+        # #66 keystone: off GitHub (no --reviews-file) the block protected_path silently no-ops —
+        # the gate must still exit 0 (inertness is legitimate off-platform) BUT print a prominent
+        # advisory naming the unenforced check, instead of a bare `ok` that reads as enforced.
+        from cogpin import cmd_check
+        self._protect_repo_touching_gate()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = cmd_check(self.d, allow_run=False, default_branch_arg="main")
+        self.assertEqual(rc, 0, "off-GitHub the inert block check must not fail (no facts to judge)")
+        self.assertIn("INERT", err.getvalue())
+        self.assertIn("pgf", err.getvalue())
+
+    def test_supplied_pr_facts_silence_the_inert_advisory(self):
+        # the SAME check WITH --reviews-file is enforced (here it BLOCKS the gate-file edit) — so
+        # no inert advisory: the check ran, it just wasn't inert.
+        from cogpin import cmd_check
+        self._protect_repo_touching_gate()
+        rv = os.path.join(self.d, "reviews.json")
+        with open(rv, "w", encoding="utf-8") as fh:
+            fh.write("[]")  # real-but-empty reviews → protected_path evaluates (no approver)
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = cmd_check(self.d, allow_run=False, default_branch_arg="main", reviews_file=rv)
+        self.assertEqual(rc, 1, "reviews supplied → protected_path enforces → the gate-file edit blocks")
+        self.assertNotIn("INERT", err.getvalue())
+
+    def _run_check_env(self, **env):
+        # run cmd_check with GITHUB_* patched, returning (stdout, stderr); restores env after.
+        from cogpin import cmd_check
+        prev = {k: os.environ.get(k) for k in env}
+        try:
+            for k, v in env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                cmd_check(self.d, allow_run=False, default_branch_arg="main")
+            return out.getvalue(), err.getvalue()
+        finally:
+            for k, v in prev.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def test_inert_advisory_annotation_only_on_actions_pr_context(self):
+        # the human advisory always goes to stderr; the ::warning:: workflow command (stdout, where
+        # Actions renders it) fires only on Actions AND not on a push event — on push no PR exists to
+        # supply facts for, so an annotation on every green main build would be non-actionable noise.
+        self._protect_repo_touching_gate()
+        out_pr, err_pr = self._run_check_env(GITHUB_ACTIONS="true", GITHUB_EVENT_NAME="pull_request")
+        self.assertIn("::warning", out_pr)        # PR context → annotate
+        self.assertIn("INERT", err_pr)            # stderr advisory always
+        out_push, err_push = self._run_check_env(GITHUB_ACTIONS="true", GITHUB_EVENT_NAME="push")
+        self.assertNotIn("::warning", out_push)   # push → no annotation
+        self.assertIn("INERT", err_push)          # but stderr still records it
+        out_local, _ = self._run_check_env(GITHUB_ACTIONS="", GITHUB_EVENT_NAME=None)
+        self.assertNotIn("::warning", out_local)  # off-Actions → no annotation
+
+    def test_inert_advisory_counts_and_joins_every_inert_check(self):
+        # N>1: the count and the comma-join must name EVERY inert moat, not just the first — a
+        # `, '.join(inert)` → `inert[0]` regression would be invisible with a single-check fixture.
+        from cogpin import cmd_check
+        cfg = (self.PROTECT +
+               '[[check]]\nid="cg"\nkind="fact"\nseverity="block"\nlayer="change"\n'
+               'primitive="require_checks_green"\nneed=["ci"]\n')
+        self._w("cogpin.toml", cfg)
+        self._git("add", "-A")
+        self._git("commit", "-qm", "base")
+        self._git("update-ref", "refs/remotes/origin/main", self._sha())
+        self._w("clean.txt", "ok")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "head")
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = cmd_check(self.d, allow_run=False, default_branch_arg="main")
+        out = err.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("2 block", out)
+        self.assertIn("pgf", out)
+        self.assertIn("cg", out)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2937,9 +3116,13 @@ class TestReview5Robustness(unittest.TestCase):
         self._write("clean.txt", "ok")
         self._commit("head")
         missing = os.path.join(self.d, "does-not-exist.json")
-        with contextlib.redirect_stdout(io.StringIO()):
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
             rc = R.cmd_check(self.d, allow_run=False, default_branch_arg="main", checks_file=missing)
         self.assertEqual(rc, 0, "an absent checks file → skip (no PR context), never a false-block")
+        # #66: skipping is right, but the block `green` check enforced NOTHING → say so LOUD
+        self.assertIn("INERT", err.getvalue())
+        self.assertIn("green", err.getvalue())
 
     # C2 — a non-UTF-8 CLAUDE.md must not crash the introspection sweep
     def test_scan_repo_tolerates_non_utf8_claude_md(self):
