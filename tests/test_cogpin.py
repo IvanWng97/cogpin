@@ -161,6 +161,18 @@ class TestConfig(unittest.TestCase):
             Config.parse(MIN + '\n[meta]\nbypass_emv = "X"\n')  # typo of bypass_env
         self.assertIn("bypass_emv", str(e.exception))
 
+    def test_unknown_repo_key_rejected(self):
+        # bare key appended after MIN lands under its [repo] table (no new header → no TOML dup)
+        with self.assertRaises(ConfigError) as e:
+            Config.parse(MIN + 'default_brunch = "main"\n')  # typo of default_branch
+        self.assertIn("default_brunch", str(e.exception))
+
+    def test_unknown_capability_key_rejected(self):
+        # the unknown-key check runs in parse() before any capability-backend validation
+        with self.assertRaises(ConfigError) as e:
+            Config.parse(MIN + '\n[capability]\nno_netwrok = true\n')  # typo of no_network
+        self.assertIn("no_netwrok", str(e.exception))
+
     def test_shipped_configs_have_no_unknown_keys(self):
         # guards the shipped configs AND the completeness of the known-key sets
         root = os.path.dirname(os.path.abspath(R.__file__))
@@ -1601,6 +1613,19 @@ class TestDraftLint(unittest.TestCase):
     def test_unknown_key_rejected(self):
         bad = self._clean() + '\n[[check]]\nid = "x"\nkind = "fact"\nseverity = "warn"\nprimitive = "secret_scan"\nforbid_path = "x"\n'
         self.assertIn("error", self._levels(bad))
+
+    def test_unknown_structural_table_or_key_rejected(self):
+        # #72: draft-lint runs with reject_unknown=False, so its OWN key check (not parse's) must
+        # cover the same surface validate/check reject — structural typos, not just per-check keys.
+        # Else a draft with [reqo] / a [meta] typo lints green but fails the authoritative validate.
+        def _msgs(text):  # the error-level messages only
+            return " ".join(f.msg for f in draft_lint(text, existing_cfg=None, head_facts=None)
+                            if f.level == "error")
+        # unknown top-level table (appended cleanly — no collision with the rendered tables)
+        self.assertIn("reqo", _msgs(self._clean() + '\n[reqo]\nx = 1\n'))
+        # unknown key INSIDE the existing [meta] (injected, not re-declared, so it's not a TOML dup)
+        meta_typo = self._clean().replace("base_pinned = true\n", 'base_pinned = true\nbypass_emv = "X"\n')
+        self.assertIn("bypass_emv", _msgs(meta_typo))
 
     def test_marker_skips_blanks_not_comments(self):
         """#6: only blank lines may sit between a marker and its [[check]]. A marker above a

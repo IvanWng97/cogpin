@@ -15,7 +15,10 @@ breaking config change.
   a fail-open the authoritative gate never reported (only the advisory `draft-lint` caught it). The
   unknown-key check is now lifted into `Config.parse`, so `validate` / `check` fail loud
   (`ConfigError`, naming the key) on any unknown top-level table or any unknown key in `[repo]` /
-  `[meta]` / `[capability]` / `[[check]]`. `draft-lint` keeps its granular per-key reporting.
+  `[meta]` / `[capability]` / `[[check]]`. The structural detection is shared with `draft-lint`, so
+  its pre-arm advisory now flags the same surface (a `[reqo]` / typo'd `[meta]` key — not just
+  per-`[[check]]` keys), keeping its granular per-key reporting while it can no longer lint green on
+  a structural typo the authoritative `validate` rejects.
 - **Engine hardening for the bare-`python3` hook path** ([#68](https://github.com/IvanWng97/cogpin/issues/68)):
   `_glob_to_re` is now `lru_cache`-memoized — a big-monorepo diff whose distinct-glob count
   overflows `re`'s own 512-entry compile cache no longer recompiles the same glob thousands of

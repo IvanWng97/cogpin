@@ -2277,23 +2277,34 @@ _KNOWN_META_KEYS = frozenset(f.name for f in fields(Meta))
 _KNOWN_CAPABILITY_KEYS = frozenset(f.name for f in fields(Capability))
 
 
-def _reject_unknown_keys(raw: dict) -> None:
-    """#69: _from_raw reads keys by name and DROPS the rest, so a typo on an optional key
-    (a security knob like exclude_bot / min_approvals, or a whole mistyped table) loads clean
-    and silently enforces nothing — a fail-open the authoritative gate never reported. Reject it
-    loud here (draft-lint already did pre-arm; this lifts the same check into validate/check)."""
+def _unknown_table_messages(raw: dict) -> list[str]:
+    """Unknown top-level tables + unknown [repo]/[meta]/[capability] keys, as messages. Shared
+    by _reject_unknown_keys (raises on the first) and draft_lint (reports each as an advisory) so
+    the authoritative and pre-arm paths cover the SAME structural surface — #72."""
+    msgs: list[str] = []
     bad_top = sorted(k for k in raw if k not in _KNOWN_TOP_KEYS)
     if bad_top:
-        raise ConfigError(f"unknown top-level table(s) {bad_top} "
-                          f"(known: {', '.join(sorted(_KNOWN_TOP_KEYS))})")
+        msgs.append(f"unknown top-level table(s) {bad_top} "
+                    f"(known: {', '.join(sorted(_KNOWN_TOP_KEYS))})")
     for table, known in (("repo", _KNOWN_REPO_KEYS), ("meta", _KNOWN_META_KEYS),
                          ("capability", _KNOWN_CAPABILITY_KEYS)):
         section = raw.get(table)
         if isinstance(section, dict):
             bad = sorted(k for k in section if k not in known)
             if bad:
-                raise ConfigError(f"[{table}] unknown key(s) {bad} "
-                                  f"(known: {', '.join(sorted(known))})")
+                msgs.append(f"[{table}] unknown key(s) {bad} "
+                            f"(known: {', '.join(sorted(known))})")
+    return msgs
+
+
+def _reject_unknown_keys(raw: dict) -> None:
+    """#69: _from_raw reads keys by name and DROPS the rest, so a typo on an optional key
+    (a security knob like exclude_bot / min_approvals, or a whole mistyped table) loads clean
+    and silently enforces nothing — a fail-open the authoritative gate never reported. Reject it
+    loud here (draft-lint already did pre-arm; this lifts the same check into validate/check)."""
+    structural = _unknown_table_messages(raw)
+    if structural:
+        raise ConfigError(structural[0])
     for ct in raw.get("check", []):
         if isinstance(ct, dict):
             bad = sorted(k for k in ct if k not in _KNOWN_CHECK_KEYS)
@@ -2471,15 +2482,21 @@ def draft_lint(text: str, *, existing_cfg: Config | None,
                 findings.append(LintFinding("error", c.id, f"invalid regex: {val!r}"))
         if c.pattern is not None and c.pattern in _MATCH_EVERYTHING:
             findings.append(LintFinding("error", c.id, "pattern matches everything → enforces nothing"))
-    # 3 — no unknown/typo'd keys (closes the _from_raw silent-drop hole)
+    # 3 — no unknown/typo'd keys (closes the _from_raw silent-drop hole). reject_unknown=False
+    # above defers ALL key checks here so the rest of the lint still runs; cover the SAME surface
+    # validate/check reject — structural tables AND per-check keys, not just the latter (#72).
     try:
-        for ct in tomllib.loads(text).get("check", []):
+        raw = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        raw = {}
+    for msg in _unknown_table_messages(raw):
+        findings.append(LintFinding("error", None, msg))
+    for ct in raw.get("check", []):
+        if isinstance(ct, dict):
             cid = ct.get("id", "?")
             for k in ct:
                 if k not in _KNOWN_CHECK_KEYS:
                     findings.append(LintFinding("error", cid, f"unknown check key `{k}`"))
-    except tomllib.TOMLDecodeError:
-        pass
     # 4 — base_pinned must be true
     if not cfg.meta.base_pinned:
         findings.append(LintFinding("error", None, "base_pinned must be true"))
