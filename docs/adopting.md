@@ -233,9 +233,12 @@ flip-the-switch — **prove parity, then delete**:
   whose body is itself quantified (`(a+)+`, `(a*)*`, `(\d+){2,}`). On a public repo the added line is
   attacker-controlled, so the cap is a security property, not just a footgun — it fails the check
   loud instead of hanging the gate. Fix the **pattern**, not the input: rewrite it to be linear (e.g.
-  `a+` instead of `(a+)+`, an explicit character class instead of nested quantifiers). `draft-lint`
-  flags these shapes before you arm. (The cap is enforced on POSIX/CI; on Windows it degrades to the
-  authoring-time `draft-lint` warning — see [`SCHEMA.md`](../SCHEMA.md).)
+  `a+` instead of `(a+)+`, an explicit character class instead of nested quantifiers). The
+  authoring-time warning (`draft-lint`, and every `check` run) flags these shapes before you arm — but
+  it's a *partial* heuristic: it catches nested quantifiers, **not** alternation overlap (`(a|aa)+`),
+  so on a Windows-only-CI repo (where the runtime cap degrades to a no-op) those stay unbounded and
+  unwarned. The robust posture is to keep at least one POSIX job in the authoritative gate — the
+  wall-clock budget covers both shapes there. See [`SCHEMA.md`](../SCHEMA.md).
 - **`cogpin requires Python 3.11+`.** The engine uses the stdlib `tomllib` (Python 3.11). The
   GitHub Action pins a modern Python, but the local PreToolUse/pre-push hooks run your *system*
   `python3` — and Ubuntu/Debian's is still 3.10. If you hit this line, point the hook at a 3.11+

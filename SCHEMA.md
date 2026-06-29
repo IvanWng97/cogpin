@@ -225,9 +225,12 @@ like `forbid_commit_on_branch` / `self_protect` — it is agent-layer-only; `val
 > catastrophic-backtracking pattern would hang the gate. The change layer caps each non-`run` check
 > at 5 s: on POSIX (the CI default) a runaway match is aborted and the check fails **loud** at its own
 > severity rather than hanging; off POSIX / off the main thread (e.g. Windows) the cap degrades to a
-> no-op — there, lean on `draft-lint`, which warns at authoring time on a nested-quantifier shape
-> (`(a+)+`, `(a*)*`, `(\d+){2,}`). Keep patterns linear (avoid a quantified group whose body is itself
-> quantified) and they never approach the budget.
+> no-op — there, lean on the authoring-time warning (`draft-lint`, and on every `check` run) that flags
+> a nested-quantifier shape (`(a+)+`, `(a*)*`, `(\d+){2,}`). That heuristic is partial: it does **not**
+> catch *alternation* backtracking (`(a|aa)+`, `(foo|foo)*`), so on a Windows-only-CI repo those stay
+> unbounded **and** unwarned. Keep patterns linear — no quantified group whose body is itself quantified,
+> and no overlapping alternation under a `*`/`+` — and they never approach the budget. If your authoritative
+> gate can run even one POSIX job, the wall-clock budget covers both shapes there.
 
 ### Cross-file & message facts
 

@@ -814,7 +814,7 @@ class TestRedosBudget(unittest.TestCase):
                   'primitive="forbid_pattern"\npattern="(a+)+$"\n'
                   '[[check]]\nid="benign"\nkind="fact"\nseverity="block"\nlayer="change"\n'
                   'primitive="forbid_pattern"\npattern="SECRET"\n')
-        facts = DiffFacts(added=[("a.py", "a" * 40 + "!"), ("b.py", "x = SECRET")],
+        facts = DiffFacts(added=[("a.py", "a" * 28 + "!"), ("b.py", "x = SECRET")],  # 28: bounded clean-fail, see above
                           changed=[("M", "a.py"), ("M", "b.py")])
         before = signal.getsignal(signal.SIGALRM)
         ids = {f.id for f in run_change(cfg, facts, budget_s=0.5)}
@@ -2805,6 +2805,26 @@ class TestBasePinning(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             rc = cmd_check(self.d, allow_run=False, default_branch_arg="main")
         self.assertEqual(rc, 1, "the .env added across the full base..HEAD range must be caught")
+
+    def test_check_advises_on_nested_quantifier_regex(self):
+        # #67/#74: cmd_check surfaces a redos-risk advisory (stderr) for a config carrying a
+        # nested-quantifier pattern — on Windows (the budget degrades) it's the only ReDoS signal.
+        from cogpin import cmd_check
+        cfg = ('schema=1\n[repo]\ndefault_branch="main"\n[meta]\nbase_pinned=true\n[[check]]\nid="rx"\n'
+               'kind="fact"\nseverity="warn"\nprimitive="forbid_pattern"\npattern="(a+)+$"\n')
+        self._w("cogpin.toml", cfg)
+        self._git("add", "-A")
+        self._git("commit", "-qm", "base")
+        self._git("update-ref", "refs/remotes/origin/main", self._sha())
+        self._w("clean.txt", "ok")  # "ok" has no 'a' → the pattern fails fast, no timeout this run
+        self._git("add", "-A")
+        self._git("commit", "-qm", "head")
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = cmd_check(self.d, allow_run=False, default_branch_arg="main")
+        self.assertEqual(rc, 0)
+        self.assertIn("nested-quantifier", err.getvalue())
+        self.assertIn("rx", err.getvalue())
 
     def test_corrupt_checks_file_fails_closed(self):
         # M3: a requested --checks-file that won't parse must FAIL CLOSED (exit 2), never
