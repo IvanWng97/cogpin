@@ -54,6 +54,12 @@ Named scopes a check can reference by name instead of repeating globs.
 A check's `scope` / `when` / `need` / `allow` may name `code` / `tests` / `docs`
 to expand to these globs, or give a literal glob directly.
 
+> **A named scope can be broader than you expect.** When `init` / `suggest` auto-detect
+> `[repo]`, `code` / `tests` are the **flat union across *every* detected language** above a
+> small file-count floor — deliberate (under-coverage is the worse failure), but it means
+> `scope = "code"` in a polyglot repo also matches your secondary languages. To pin a check to
+> one subtree or language, give a literal glob (`scope = ["src/**/*.py"]`) instead of the name.
+
 ### `[meta]`
 
 | key | type | default | meaning |
@@ -220,6 +226,15 @@ like `forbid_commit_on_branch` / `self_protect` — it is agent-layer-only; `val
 
 `msg_scope` ⊆ `{commit_subject, commit_body, pr_body}`.
 
+> **`path_requires` vs `cooccur`** — both co-require, on different axes. `path_requires` is a
+> **file-status** co-requirement: *a path changed (or `when_marker` matched the PR body) ⇒ a
+> `need` path must change* ("touched `code/` ⇒ touch `tests/`") — the *requirement* side always
+> reasons over which paths are in the diff. `cooccur` is a
+> **content-token** co-requirement: *a token appears ⇒ another token must appear* ("a
+> migration string ⇒ a rollback string") — it reasons over regex matches in the **added
+> lines** (and, at `warn`, the message / PR body). Pick by whether the rule is about *files
+> touched* or *text present*.
+
 ### PR-metadata facts *(skip with no PR context; CI supplies them)*
 
 | primitive | params | blocks when |
@@ -242,6 +257,15 @@ like `forbid_commit_on_branch` / `self_protect` — it is agent-layer-only; `val
 > vacuous pass). Name the must-be-green checks in `need`, or lean on branch-protection required
 > contexts for that axis.
 
+**Choosing an approval primitive** — the four differ by *what triggers the requirement*:
+
+| require approval… | use | trigger |
+|---|---|---|
+| when specific **gate / config files** change — anyone may approve, but it must be a fresh, human, non-author review | `protected_path` | by path (the change-layer twin of `self_protect`) |
+| from a **named owner / team** when a path changes (CODEOWNERS-lite) | `require_approval_from` | by path + approver identity |
+| when **risky content** appears in the diff (a new dependency, `unsafe {`, a new suppression), regardless of file | `pattern_requires_approval` | by content |
+| as a **standing bar** on every PR (≥ N fresh approvals, no unresolved `CHANGES_REQUESTED`) | `approval_policy` | none — a repo-wide floor |
+
 These read CI-supplied facts via `cogpin check` flags: `--pr-body-file`,
 `--approvals`, `--reviews-file` (a `gh pr view --json reviews` dump), `--head-sha`,
 `--pr-author`, `--checks-file` (a `gh pr checks --json name,state` dump). Omitted →
@@ -257,6 +281,37 @@ the check skips rather than false-fires.
 
 `attest` classes: `always` (any code change) · `feature` (≥ `feature_files` or a new
 module) · `public_surface` · `claude_md`. `box` defaults to the check `id`.
+
+**The attestation file.** The boxes are ticked in `[meta].attestation_file` (default
+`.cogpin/attestation.md`) — a markdown checklist, one line per box, the label matching each
+check's `box` (or its `id`):
+
+```markdown
+- [ ] TDD            # unticked → a "block" gap that holds turn-end open
+- [x] Self-review    # ticked  → satisfied
+- [ ] Design         # only required when the change triggers this box's class (feature-shaped)
+```
+
+A box counts as ticked by the local `- [x] <label>` shape **anywhere** in the file (the
+search is unanchored, so surrounding prose is fine; `- [X]` also counts, a space `- [ ]` does
+not; trailing text — `- [x] TDD: a failing test came first` — is allowed). A missing file
+reads as *all unticked*. Only the boxes whose **class** the change triggers are required, so a
+docs-only change needn't tick a `feature` box. See `examples/pixtuoid/.dod/attestation.md` for
+a worked template.
+
+**Bypassing the agent layer, with a reason.** Set `[meta].bypass_env` (e.g. `COGPIN_BYPASS`)
+and either export that env var or add a reason line to the attestation file — the env name
+with underscores turned to dashes:
+
+```
+COGPIN-BYPASS: hotfix — CI is down, paging on-call (ticket OPS-123)
+```
+
+The reason must be non-empty. It skips the **agent** layer *and* the local pre-push hook (which
+runs `check --allow-bypass`); the reason rides in the committed attestation marker and the hook
+invocation the harness records. The **authoritative CI** run does **not** pass `--allow-bypass`,
+so it ignores the bypass entirely — a bypass can wave through a *local* push, but never the CI
+gate.
 
 ---
 

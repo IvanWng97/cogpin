@@ -142,6 +142,16 @@ reference: it ports an 890-line bespoke gate yet has **no `run` block — "the t
 pixtuoid's existing CI."** cogpin gates the closing-discipline; the compiled-code suite
 stays in CI where it already runs.
 
+**Runtime containment is *declared*, not enforced by cogpin.** To confine the agent — no
+network, no `~/.ssh`, a command allowlist — use the `[capability]` stanza: cogpin *records*
+the posture and compiles it to the harness (`cogpin capability emit` → `.claude/settings.json`),
+but the **OS / harness is what enforces it** — cogpin is never in the syscall path (policy, not
+enforcement; the in-band command deny is a forcing-function, not a sandbox). See
+[`examples/capability-sandbox/`](../examples/capability-sandbox/cogpin.toml) for a worked stanza
+with the honest per-field caveats (`no_network` can't *guarantee* no egress; `allow_commands` is
+adds-only). That same recipe also demos `scope_lock` — a positive path-allowlist for the
+scope-creep cut.
+
 If you additionally want cogpin to *enforce* that your existing CI was actually green
 before a merge — not just decline to re-run it — require those jobs with
 `require_checks_green` (an environment fact: the PR API's check conclusions):

@@ -708,6 +708,23 @@ class TestAgentLayer(unittest.TestCase):
         self.assertFalse(_ticked(md, "Design"))
         self.assertFalse(_ticked(md, "Impl-plan"))
 
+    def test_shipped_attestation_template_is_inert(self):
+        # the worked attestation template must NOT silently bypass or pre-tick the gate it
+        # documents — `_bypass_reason` scans raw text (HTML comments included), so a stray
+        # `DOD-BYPASS: …` line at column 0 would disable the gate for any adopter who lifts it.
+        root = os.path.dirname(os.path.abspath(R.__file__))
+        tmpl = os.path.join(root, "examples", "pixtuoid", ".dod", "attestation.md")
+        cfg_path = os.path.join(root, "examples", "pixtuoid", "cogpin.toml")
+        if not (os.path.exists(tmpl) and os.path.exists(cfg_path)):
+            self.skipTest("pixtuoid attestation template/config not present")
+        with open(cfg_path, encoding="utf-8") as fh:
+            cfg = Config.parse(fh.read())
+        with open(tmpl, encoding="utf-8") as fh:
+            md = fh.read()
+        self.assertIsNone(R._bypass_reason(cfg, md), "the shipped template activates a bypass")
+        for box in ("TDD", "Self-review", "Design", "Impl-plan", "Docs-currency"):
+            self.assertFalse(_ticked(md, box), f"template pre-ticks {box}")
+
     def test_change_classes(self):
         cfg = Config.parse(self.ATTEST_CFG)
         # 1 code file, not public → always only
