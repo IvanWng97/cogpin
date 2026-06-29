@@ -8,6 +8,16 @@ breaking config change.
 
 ## [Unreleased]
 
+### Fixed
+- **Engine hardening for the bare-`python3` hook path** ([#68](https://github.com/IvanWng97/cogpin/issues/68)):
+  `_glob_to_re` is now `lru_cache`-memoized — a big-monorepo diff whose distinct-glob count
+  overflows `re`'s own 512-entry compile cache no longer recompiles the same glob thousands of
+  times (a measured 65× on the audit's 5000-line × 600-glob workload); `cogpin gate` decodes
+  stdin with `surrogateescape`, so a non-UTF-8 / foreign-harness payload degrades safe instead of
+  spilling a `UnicodeDecodeError` traceback; and an explicit Python-3.11 floor check now prints a
+  one-line "needs Python 3.11+" message before the `tomllib` import (Ubuntu/Debian system Python is
+  3.10), instead of an opaque `ModuleNotFoundError`.
+
 ### Changed
 - **The primitive-library tables are now generated from one registry, killing doc drift.**
   [`docs/primitives.md`](docs/primitives.md) is the single source of truth; `scripts/gen_primitives.py`

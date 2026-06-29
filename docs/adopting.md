@@ -215,3 +215,7 @@ flip-the-switch — **prove parity, then delete**:
 - **CI's `require_checks_green` self-blocks.** If cogpin runs as a job in the *same*
   workflow it gates, its own check is still pending at query time — exclude it with
   `ignore = ["<cogpin job name>"]`, or `need` only the other checks.
+- **`cogpin requires Python 3.11+`.** The engine uses the stdlib `tomllib` (Python 3.11). The
+  GitHub Action pins a modern Python, but the local PreToolUse/pre-push hooks run your *system*
+  `python3` — and Ubuntu/Debian's is still 3.10. If you hit this line, point the hook at a 3.11+
+  interpreter (a `pyenv`/`asdf` shim, or `python3.11` on `PATH`).

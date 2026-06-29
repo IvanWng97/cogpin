@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import functools
 import json
 import os
 import re
@@ -34,8 +35,13 @@ import shlex
 import subprocess
 import sys
 import tempfile
-import tomllib
-from dataclasses import dataclass, field, fields
+
+if sys.version_info < (3, 11):  # tomllib floor — a friendly line, not a raw ModuleNotFoundError
+    sys.stderr.write("cogpin requires Python 3.11+ (the stdlib `tomllib` is unavailable here)\n")
+    raise SystemExit(1)
+
+import tomllib  # noqa: E402 — intentionally imported after the version guard above
+from dataclasses import dataclass, field, fields  # noqa: E402
 
 SCHEMA_VERSION = 1
 
@@ -44,9 +50,12 @@ SCHEMA_VERSION = 1
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+@functools.lru_cache(maxsize=None)
 def _glob_to_re(pattern: str) -> re.Pattern[str]:
     """Translate a path glob to an anchored regex. `**/` matches zero+ dir
-    segments, `**` matches anything, `*` stays within a segment, `?` one char."""
+    segments, `**` matches anything, `*` stays within a segment, `?` one char.
+    Memoized: _path_matches calls this per (path, glob) in hot loops, and a big
+    monorepo's distinct-glob count overflows re's own 512-entry compile cache."""
     out: list[str] = []
     i, n = 0, len(pattern)
     while i < n:
@@ -4003,6 +4012,12 @@ def main(argv: list[str] | None = None) -> int:
             _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
         except (AttributeError, ValueError):
             pass
+    # stdin may carry a non-UTF-8 hook payload (binary, or a foreign harness); decode it
+    # losslessly so `gate` degrades safe instead of UnicodeDecodeError-ing into a traceback.
+    try:
+        sys.stdin.reconfigure(encoding="utf-8", errors="surrogateescape")  # type: ignore[union-attr]
+    except (AttributeError, ValueError):
+        pass
     p = argparse.ArgumentParser(
         prog="cogpin",
         description="Ungameable diff-fact enforcement of the closing-discipline.",
