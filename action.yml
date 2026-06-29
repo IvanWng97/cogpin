@@ -21,7 +21,11 @@ inputs:
   default-branch:
     description: >-
       Trusted base branch — fetched for the diff AND passed to the engine as the base-pin
-      name, so the base can't be redirected by the PR-head config (`--default-branch`).
+      name, so the base can't be redirected by the PR-head CONFIG (`--default-branch`). NOTE: on
+      the pull_request trigger the workflow YAML itself is read from the PR head, so a PR can
+      still pass a weaker base HERE — same caveat as report-only below: protect
+      .github/workflows/** with branch protection / CODEOWNERS (or use pull_request_target) for
+      security-sensitive gating.
     default: ${{ github.event.repository.default_branch }}
   python-version:
     description: Python for the engine (needs >= 3.11 for tomllib).
