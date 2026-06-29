@@ -3633,17 +3633,39 @@ def _strip_block(cur: str) -> str:
 # A husky/lefthook pre-push hook ends in a process-replacing `exec cmd …` or a terminal `exit`;
 # a managed block appended AFTER it is dead code that never runs (#62). Match at column 0 only —
 # an `exec`/`exit` indented inside an `if`/loop is conditional, so not a terminal terminator.
-_EXIT_TERMINATOR = re.compile(r"exit\b(?!=)")        # `exit`/`exit 1` ends the script; `exit=…` is a var assign
-_EXEC_TERMINATOR = re.compile(r"exec\s+[^\s<>&\d]")  # `exec cmd` REPLACES the process. `exec >log`/`exec 2>&1`/
-                                                     # `exec 3< f`/bare `exec` only re-point fds and CONTINUE.
+_EXIT_TERMINATOR = re.compile(r"exit\b(?!=)")          # `exit`/`exit 1` ends the script; `exit=…` is a var assign
+_EXEC_LINE = re.compile(r"exec(?:\s+(.*))?$")          # col-0 `exec`, capturing its argument remainder (not `execfoo`/`exec=`)
+_REDIR_OP = re.compile(r"[0-9]*(?:>>|>\||<>|>&|<&|<|>|&>>|&>)$")           # operator whose target is a SEPARATE token (`>`, `2>`, `>&`)
+_REDIR_TOK = re.compile(r"[0-9]*(?:>>|>\||<>|>&|<&|<<<|<<|&>>|&>|>|<)")    # self-contained redirection (`2>&1`, `>>file`, `<&-`)
+
+
+def _exec_replaces_process(rest: str) -> bool:
+    """True iff `exec <rest>` REPLACES the process — a command word survives after the leading
+    redirections. `exec 2>&1`/`exec >>log 2>&1`/bare `exec` are redirection-only (the shell
+    continues, NOT terminal); `exec 2>&1 cmd`/`exec > log cmd` run a command (terminal). Walks
+    tokens, consuming a separate `op target` pair or a self-contained redirection, until a real
+    word remains. Pathological forms (process-substitution targets) may over-call terminal."""
+    toks = rest.split()
+    i = 0
+    while i < len(toks):
+        if _REDIR_OP.fullmatch(toks[i]):     # `>` / `2>` / `>&` … its target is the NEXT token → skip both
+            i += 2
+        elif _REDIR_TOK.match(toks[i]):      # `2>&1` / `>>file` / `<&-` … target attached → skip one
+            i += 1
+        else:
+            return True                      # a real command word → the process is replaced
+    return False
 
 
 def _is_hook_terminator(line: str) -> bool:
     """True iff `line` (anchored at col 0) unconditionally ends the hook: a terminal `exit`, or an
-    `exec` that replaces the process. `exec` used solely for redirection/fd-dup (`exec >>log 2>&1`,
-    `exec 2>&1`, `exec 3< f`) or bare `exec` only mutates file descriptors and falls through — NOT a
-    terminator, so a managed block after it still runs (#62 review: medium false-UNREACHABLE bug)."""
-    return bool(_EXIT_TERMINATOR.match(line) or _EXEC_TERMINATOR.match(line))
+    `exec` that REPLACES the process (a command survives its redirections). `exec` used solely for
+    redirection/fd-dup (`exec >>log 2>&1`, `exec 2>&1`, `exec 3< f`) or bare `exec` only mutates
+    file descriptors and falls through — NOT a terminator, so a block after it still runs (#62)."""
+    if _EXIT_TERMINATOR.match(line):
+        return True
+    m = _EXEC_LINE.match(line)
+    return _exec_replaces_process(m.group(1) or "") if m else False
 
 
 def _prepush_insert_index(cur: str) -> int:

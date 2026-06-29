@@ -2113,14 +2113,18 @@ class TestPrepushWiring(unittest.TestCase):
         # `exec >>log 2>&1` / `exec 2>&1` / `exec 3< f` / bare `exec` only re-point fds and CONTINUE
         # (POSIX) — a block after them runs. Misclassifying them relocates a live block + false
         # UNREACHABLE (#62 review, medium). A reachable block must be refreshed in place, never moved.
-        for redirect in ('exec >>"$LOG" 2>&1', "exec 2>&1", "exec 3< file", "exec"):
+        for redirect in ('exec >>"$LOG" 2>&1', "exec 2>&1", "exec 3< file", "exec > log",
+                         "exec 2> file", "exec >&2", "exec"):
             hook = f"#!/bin/sh\n{redirect}\n" + PREPUSH_BLOCK + "echo real work\n"
             self.assertTrue(R._prepush_block_reachable(hook), redirect)
             self.assertEqual(self._wire(hook), hook, f"{redirect}: must not relocate a live block")
 
     def test_exec_with_real_command_still_terminates(self):
-        # the genuine process-replace forms stay terminal: `exec -a argv0 cmd` included.
-        for cmd in ('exec husky "$@"', "exec foo", "exec -a name cmd"):
+        # the genuine process-replace forms stay terminal: `exec -a argv0 cmd` + the redirect-PREFIXED
+        # `exec 2>&1 husky "$@"` (the redirect applies, then husky replaces the process — #62 review:
+        # the `\\d`-exclusion must not misread the leading fd as redirection-only and miss the command).
+        for cmd in ('exec husky "$@"', "exec foo", "exec -a name cmd",
+                    'exec 2>&1 husky "$@"', 'exec >>"$LOG" 2>&1 husky', "exec > log run"):
             dead = f"#!/bin/sh\n{cmd}\n" + PREPUSH_BLOCK
             self.assertFalse(R._prepush_block_reachable(dead), cmd)
             fixed = self._wire(dead)
