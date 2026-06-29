@@ -9,16 +9,14 @@ breaking config change.
 ## [Unreleased]
 
 ### Fixed
-- **`install` wires the pre-push block where it actually runs** ([#62](https://github.com/IvanWng97/cogpin/issues/62)):
+- **`install` places the pre-push block so it always runs** ([#62](https://github.com/IvanWng97/cogpin/issues/62)):
   a husky/lefthook pre-push hook ends in a process-replacing `exec "$@"` (or a terminal `exit`); the
   managed block was appended at EOF — *after* the `exec` — so it never ran (dead code → no local
-  pre-push gate, silently). `install` now inserts the block **before** a trailing top-level
-  `exec`/`exit`, and self-heals a block a prior install left stranded after one (strip + re-insert;
-  still byte-idempotent, and a present-and-reachable block is still refreshed in place). `doctor` now
-  reports a present-but-**UNREACHABLE** block instead of a misleading "present". (Only a genuine
-  process-replace counts as a terminator: an `exec`/`exit` indented inside a conditional, a col-0
-  `exec` inside a heredoc body, and an `exec` used solely for redirection — `exec >>log 2>&1`,
-  `exec 2>&1`, bare `exec` — all keep running, so the block is appended/kept in place normally.)
+  pre-push gate, silently). `install` now places the block **first**, immediately after the shebang,
+  so it runs (and `… || exit 1` gates) before any user code — unconditionally reachable, with no part
+  of the hook's shell parsed to find a safe spot. A block a prior install stranded after an `exec` is
+  lifted to the top on the next `install` (byte-idempotent thereafter). This retires the entire
+  shell-terminator detector (and `doctor`'s "UNREACHABLE" message): there is nothing left to misparse.
 - **Author-regex evaluation is now wall-clock bounded (ReDoS hardening)** ([#67](https://github.com/IvanWng97/cogpin/issues/67)):
   `forbid_pattern` / `secret_scan` / `forbid_removal` / `numeric_floor` author regexes run over diff
   content a (public-repo) PR author controls. A catastrophic-backtracking pattern could hang the

@@ -41,7 +41,6 @@ from cogpin import (  # noqa: E402
     _install_prepush,
     _marked_ids,
     _protects_gate_files,
-    _replace_or_append_block,
     _strip_block,
     _ticked,
     approval_policy,
@@ -2041,27 +2040,14 @@ def _quiet(fn, *a, **k):
 class TestBlockHelpers(unittest.TestCase):
     """Pure sentinel-block surgery — no git, no fs."""
 
-    def test_append_when_absent(self):
-        out = _replace_or_append_block("#!/bin/sh\necho hi\n", PREPUSH_BLOCK)
-        self.assertTrue(out.startswith("#!/bin/sh\necho hi\n"))
-        self.assertIn(COGPIN_BEGIN, out)
+    def test_strip_then_wire_round_trips(self):
+        wired = R._wire_prepush_block("#!/bin/sh\necho hi\n", PREPUSH_BLOCK)
+        self.assertEqual(R._strip_block(wired), "#!/bin/sh\necho hi\n")
 
-    def test_replace_in_place_no_double_append(self):
-        once = _replace_or_append_block("#!/bin/sh\n", PREPUSH_BLOCK)
-        twice = _replace_or_append_block(once, PREPUSH_BLOCK)
-        self.assertEqual(once, twice)  # byte-idempotent
-        self.assertEqual(once.count(COGPIN_BEGIN), 1)
-
-    def test_append_adds_separator_when_no_trailing_newline(self):
-        out = _replace_or_append_block("echo hi", PREPUSH_BLOCK)
-        self.assertIn("echo hi\n" + COGPIN_BEGIN, out)
-
-    def test_replace_preserves_surrounding(self):
-        cur = _replace_or_append_block("#!/bin/sh\nA\n", PREPUSH_BLOCK) + "Z\n"
-        out = _replace_or_append_block(cur, PREPUSH_BLOCK)
-        self.assertIn("#!/bin/sh\nA\n", out)
-        self.assertTrue(out.rstrip().endswith("Z"))
-        self.assertEqual(out.count(COGPIN_BEGIN), 1)
+    def test_strip_malformed_begin_without_end(self):
+        # a truncated block (BEGIN but no END) is removed to EOF — degrade-safe
+        cur = "#!/bin/sh\n" + COGPIN_BEGIN + "\noops no end\n"
+        self.assertEqual(R._strip_block(cur), "#!/bin/sh\n")
 
     def test_strip_removes_exactly_the_span(self):
         cur = "#!/bin/sh\nA\n" + PREPUSH_BLOCK + "Z\n"
@@ -2076,80 +2062,67 @@ class TestBlockHelpers(unittest.TestCase):
 
 
 class TestPrepushWiring(unittest.TestCase):
-    """#62: the managed pre-push block must land where it RUNS — before a trailing top-level
-    `exec`/`exit` (a husky/lefthook hook ends in `exec "$@"`), never as dead code after it."""
+    """#62/D1: the managed block runs FIRST — right after the shebang, before any user code — so it
+    is unconditionally reachable (it ends in `… || exit 1`). No part of the user's shell is parsed
+    to find a safe insertion point; a later `exec`/`exit` can never shadow it."""
 
     def _wire(self, cur):
         return R._wire_prepush_block(cur, PREPUSH_BLOCK)
 
-    def test_inserted_before_trailing_exec(self):
-        out = self._wire('#!/bin/sh\n. "$(dirname "$0")/h.sh"\nexec husky "$@"\n')
-        self.assertIn(COGPIN_BEGIN, out)
-        self.assertLess(out.index(COGPIN_BEGIN), out.index("exec husky"), "block must precede the exec")
-        self.assertTrue(R._prepush_block_reachable(out))
+    def _assert_block_first(self, out):
+        # nothing but an optional shebang precedes the managed block
+        bi = out.index(COGPIN_BEGIN)
+        head = out[:bi]
+        if head.startswith("#!"):
+            head = head.split("\n", 1)[1] if "\n" in head else ""
+        self.assertEqual(head.strip(), "", "only the shebang may precede the managed block")
 
-    def test_inserted_before_trailing_exit(self):
+    def test_prepended_after_shebang(self):
+        out = self._wire('#!/bin/sh\n. "$(dirname "$0")/h.sh"\nexec husky "$@"\n')
+        self.assertTrue(out.startswith("#!/bin/sh\n" + COGPIN_BEGIN))
+        self.assertLess(out.index(COGPIN_BEGIN), out.index("exec husky"))
+        self._assert_block_first(out)
+
+    def test_prepended_before_exit_terminated_hook(self):
         out = self._wire("#!/bin/sh\nrun_stuff\nexit 0\n")
+        self.assertLess(out.index(COGPIN_BEGIN), out.index("run_stuff"))
         self.assertLess(out.index(COGPIN_BEGIN), out.index("exit 0"))
 
-    def test_appends_when_no_terminator(self):
-        out = self._wire("#!/bin/sh\necho hi\n")
-        self.assertLess(out.index("echo hi"), out.index(COGPIN_BEGIN))
-        self.assertTrue(out.rstrip().endswith(R.COGPIN_END))  # at the end, nothing after
+    def test_prepended_when_no_shebang(self):
+        out = self._wire("echo hi\nexec foo\n")
+        self.assertTrue(out.startswith(COGPIN_BEGIN))
+        self.assertLess(out.index(COGPIN_BEGIN), out.index("echo hi"))
 
-    def test_indented_exec_is_not_a_terminator(self):
-        # an exec inside a conditional is NOT unconditional → append at end, don't wedge before it
-        out = self._wire('#!/bin/sh\nif [ "$X" ]; then\n  exec foo\nfi\n')
-        self.assertGreater(out.index(COGPIN_BEGIN), out.index("exec foo"))
+    def test_block_runs_before_a_trailing_exec(self):
+        # the whole point: a husky/lefthook hook ends in a process-replacing `exec "$@"`; the block
+        # sits ABOVE it (runs, then hands off) regardless of how that exec is spelled — no parsing.
+        for term in ('exec husky "$@"', "exec 2>&1 husky", 'exec >>"$LOG" 2>&1', "exit 0", "  exec foo"):
+            out = self._wire(f"#!/bin/sh\n{term}\n")
+            self.assertLess(out.index(COGPIN_BEGIN), out.index(term.strip()), term)
+            self._assert_block_first(out)
 
-    def test_col0_exec_inside_heredoc_is_not_a_terminator(self):
-        # a col-0 `exec` buried in a heredoc body is text, not an unconditional terminator: the
-        # block appended after it still RUNS, so reachability must not false-positive on it.
-        out = self._wire("#!/bin/sh\ncat <<EOF\nexec foo\nEOF\n")
-        self.assertGreater(out.index(COGPIN_BEGIN), out.index("exec foo"))  # appended at end
-        self.assertTrue(R._prepush_block_reachable(out))
+    def test_migrates_block_appended_after_exec_to_the_top(self):
+        # a prior (pre-D1) install appended the block AFTER a terminal exec — dead code (#62). Re-wiring
+        # lifts the single block to the top where it runs; no duplicate, byte-idempotent thereafter.
+        dead = '#!/bin/sh\nexec husky "$@"\n' + PREPUSH_BLOCK
+        fixed = self._wire(dead)
+        self.assertLess(fixed.index(COGPIN_BEGIN), fixed.index("exec husky"))
+        self.assertEqual(fixed.count(COGPIN_BEGIN), 1)
+        self.assertEqual(self._wire(fixed), fixed)  # idempotent once migrated
 
-    def test_exec_for_redirection_only_is_not_a_terminator(self):
-        # `exec >>log 2>&1` / `exec 2>&1` / `exec 3< f` / bare `exec` only re-point fds and CONTINUE
-        # (POSIX) — a block after them runs. Misclassifying them relocates a live block + false
-        # UNREACHABLE (#62 review, medium). A reachable block must be refreshed in place, never moved.
-        for redirect in ('exec >>"$LOG" 2>&1', "exec 2>&1", "exec 3< file", "exec > log",
-                         "exec 2> file", "exec >&2", "exec"):
-            hook = f"#!/bin/sh\n{redirect}\n" + PREPUSH_BLOCK + "echo real work\n"
-            self.assertTrue(R._prepush_block_reachable(hook), redirect)
-            self.assertEqual(self._wire(hook), hook, f"{redirect}: must not relocate a live block")
-
-    def test_exec_with_real_command_still_terminates(self):
-        # the genuine process-replace forms stay terminal: `exec -a argv0 cmd` + the redirect-PREFIXED
-        # `exec 2>&1 husky "$@"` (the redirect applies, then husky replaces the process — #62 review:
-        # the `\\d`-exclusion must not misread the leading fd as redirection-only and miss the command).
-        for cmd in ('exec husky "$@"', "exec foo", "exec -a name cmd",
-                    'exec 2>&1 husky "$@"', 'exec >>"$LOG" 2>&1 husky', "exec > log run"):
-            dead = f"#!/bin/sh\n{cmd}\n" + PREPUSH_BLOCK
-            self.assertFalse(R._prepush_block_reachable(dead), cmd)
-            fixed = self._wire(dead)
-            self.assertLess(fixed.index(COGPIN_BEGIN), fixed.index(cmd), cmd)  # block before the exec
-
-    def test_idempotent_reinstall_before_exec(self):
+    def test_idempotent_rewire(self):
         once = self._wire('#!/bin/sh\nexec husky "$@"\n')
         twice = self._wire(once)
         self.assertEqual(once, twice)               # byte-idempotent
         self.assertEqual(once.count(COGPIN_BEGIN), 1)
 
-    def test_self_heals_block_stranded_after_exec(self):
-        dead = '#!/bin/sh\nexec husky "$@"\n' + PREPUSH_BLOCK   # a prior buggy install left it dead
-        self.assertFalse(R._prepush_block_reachable(dead))
-        fixed = self._wire(dead)
-        self.assertTrue(R._prepush_block_reachable(fixed))
-        self.assertLess(fixed.index(COGPIN_BEGIN), fixed.index("exec husky"))
-        self.assertEqual(fixed.count(COGPIN_BEGIN), 1)
-
-    def test_reachable_block_refreshed_in_place_preserving_tail(self):
-        cur = "#!/bin/sh\nA\n" + PREPUSH_BLOCK + "B\n"   # present, reachable, user content after it
+    def test_refresh_preserves_user_content(self):
+        cur = "#!/bin/sh\nA\n" + PREPUSH_BLOCK + "B\n"   # present block with user content around it
         out = self._wire(cur)
         self.assertEqual(out.count(COGPIN_BEGIN), 1)
         self.assertIn("A\n", out)
-        self.assertIn("B\n", out)                    # in-place refresh keeps trailing user content
+        self.assertIn("B\n", out)                    # user content kept (now both below the block)
+        self._assert_block_first(out)
 
 
 class TestAtomicWrite(unittest.TestCase):
@@ -2306,19 +2279,21 @@ class TestInstall(_GitRepo):
         self.assertEqual(self._read(".git/hooks/pre-push"), pp1)
         self.assertEqual(self._read(".gitignore"), gi1)
 
-    def test_appends_to_existing_prepush(self):
+    def test_prepends_into_existing_prepush(self):
         self._w(".git/hooks/pre-push", "#!/bin/sh\necho custom\n")
         _quiet(cmd_install, self.d)
         pp = self._read(".git/hooks/pre-push")
-        self.assertIn("echo custom", pp)
-        self.assertLess(pp.index("echo custom"), pp.index(COGPIN_BEGIN))  # runs first
+        self.assertIn("echo custom", pp)                                  # user content preserved
+        self.assertTrue(pp.startswith("#!/bin/sh\n" + COGPIN_BEGIN))      # cogpin runs first (D1)
+        self.assertLess(pp.index(COGPIN_BEGIN), pp.index("echo custom"))
 
-    def test_install_inserts_before_trailing_exec(self):
-        # #62: a husky-style hook ends in a process-replacing `exec` — the managed block must land
-        # BEFORE it (so it runs), not be appended as dead code after the exec.
+    def test_install_prepends_block_before_trailing_exec(self):
+        # #62/D1: a husky-style hook ends in a process-replacing `exec` — the managed block runs
+        # FIRST (after the shebang), so it can never be shadowed by that exec.
         self._w(".git/hooks/pre-push", '#!/bin/sh\nexec husky "$@"\n')
         _quiet(cmd_install, self.d)
         pp = self._read(".git/hooks/pre-push")
+        self.assertTrue(pp.startswith("#!/bin/sh\n" + COGPIN_BEGIN))
         self.assertLess(pp.index(COGPIN_BEGIN), pp.index("exec husky"))
         self.assertEqual(pp.count(COGPIN_BEGIN), 1)
 
@@ -2454,22 +2429,14 @@ class TestDoctor(_GitRepo):
         rc, out = _quiet(cmd_doctor, self.d)
         self.assertEqual(rc, 0, out)  # missing pre-push is ~ , not ✗
 
-    def test_flags_unreachable_block(self):
-        # #62: a managed block stranded after a top-level exec/exit is present-but-dead — doctor
-        # must say UNREACHABLE (advisory, rc still 0), not the misleading "present" ok.
+    def test_reports_present_block(self):
+        # #62/D1: the block is placed at the top so it always runs — doctor reports present, and the
+        # whole "UNREACHABLE" concept (and its shell-parsing) is gone.
         _quiet(cmd_install, self.d)
-        self._w(".git/hooks/pre-push", '#!/bin/sh\nexec husky "$@"\n' + PREPUSH_BLOCK)
+        self._w(".git/hooks/pre-push", '#!/bin/sh\nexec husky "$@"\n' + PREPUSH_BLOCK)  # legacy dead layout
         rc, out = _quiet(cmd_doctor, self.d)
         self.assertEqual(rc, 0, out)
-        self.assertIn("UNREACHABLE", out)
-
-    def test_redirect_exec_block_is_not_flagged_unreachable(self):
-        # #62 review: `exec >>log 2>&1` re-points fds and CONTINUES — a block after it runs, so
-        # doctor must NOT cry UNREACHABLE (false positive that also triggered an unsolicited rewrite).
-        _quiet(cmd_install, self.d)
-        self._w(".git/hooks/pre-push", '#!/bin/sh\nexec >>"$LOG" 2>&1\n' + PREPUSH_BLOCK + "echo work\n")
-        rc, out = _quiet(cmd_doctor, self.d)
-        self.assertEqual(rc, 0, out)
+        self.assertIn("present", out)
         self.assertNotIn("UNREACHABLE", out)
 
     def test_json_shape(self):
