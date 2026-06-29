@@ -59,17 +59,13 @@ unresolved `# TODO(cogpin:review)` markers); `--simulate` additionally replays e
 the tree — i.e. a check that would block your *next* commit for a pre-existing reason. Fix
 the scope or downgrade to `warn` before arming, so day one isn't a wall of false blocks.
 
-`--simulate` proves a check won't *false-block*; the complement is proving it **will** fire
-on a real violation. Don't wait until §6 to do that — smoke-test the draft against a crafted
-bad diff *now*, before you arm it:
-
-```
-git diff > bad.diff   # on a deliberately-broken change (a stray debugger, a deleted assert)
-python3 cogpin.py check --diff-file bad.diff --expect-block <id>   # exit 0 = the block fired
-```
-
-§6 builds this same `--diff-file --expect-block` check into a permanent regression net; running
-it against the draft here is the cheap pre-arming confidence that your policy isn't inert.
+`--simulate` is the *pre-arming* test: it reads the **draft** directly and proves no `block`
+would false-fire on your existing code. Its complement — proving a block **does** fire on a
+real violation, so your policy isn't silently inert — needs a live `cogpin.toml` and a check
+that's actually at `block`, so it lands *after* you arm and promote: that's §6's
+`check --diff-file … --expect-block <id>` (which reads the working `cogpin.toml`, not the
+`.draft`). Knowing both tests exist up front lets you arm with evidence on both sides, instead
+of eating a week of noisy real-PR warnings to discover the policy was wrong.
 
 ### 4 · Ride non-failing first
 
