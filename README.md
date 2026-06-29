@@ -148,7 +148,9 @@ sequenceDiagram
 The agent layer is *friction in real time* — it catches the cut at the moment the
 agent reaches for it and mirrors what CI will enforce, so you fix it before you
 push. The change layer is the *final word* — a red CI check no env var can turn
-green.
+green. It's **base-pinned**: it reads your policy *and* the engine from the PR's
+**base** commit, never the changed head — so a diff can't loosen the gate it's
+gated by (the [bypass-proof](#why-its-bypass-proof) section shows the mechanism).
 
 > **The agent-layer deny is a forcing-function, not containment.** `forbid_command`
 > (`--no-verify`), `self_protect`, `scope_lock`, and the secret-path deny are *string
@@ -174,7 +176,8 @@ setups. If it isn't, nothing errors; the always-on gate just stays quiet.
 ```
 /plugin install cogpin@cogpin
 ```
-(Two separate prompts — send them one at a time.)
+(Two Claude Code slash commands: the first **registers** the marketplace source, the
+second **installs** cogpin from it. They're separate prompts — send them one at a time.)
 
 > The desktop app has no `/plugin` command: Customize → the `+` by personal
 > plugins → Create plugin and add marketplace → Add from repository → the repo URL.
