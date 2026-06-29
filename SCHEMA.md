@@ -86,9 +86,11 @@ read from the pinned base ref for free.
 | `backend` | string | `claude-code` | the `emit` target (`claude-code` \| `bubblewrap` \| `docker` \| `seccomp`); only `claude-code` is rendered today |
 
 `cogpin capability emit` (claude-code) translates the floor into `.claude/settings.json`
-`permissions` (`deny_paths` → `Read/Edit/Write(<p>)`; `deny_commands` → `Bash(<verb>:*)`;
-`no_network` → deny `WebFetch`/`WebSearch`/`curl`/`wget`/`nc` **+ a warning that settings.json
-cannot *guarantee* no egress**). It is idempotent and **non-clobbering** — it manages only
+`permissions` (`deny_paths` → `Read/Edit/Write(<p>)`; `deny_commands` → deny `Bash(<verb>:*)`;
+`allow_commands` → allow `Bash(<verb>:*)`; `no_network` → deny `WebFetch`/`WebSearch`/`curl`/`wget`/`nc`
+**+ a warning that settings.json cannot *guarantee* no egress**). `allow_commands` only *adds*
+allow entries — for a true allowlist set `permissions.defaultMode` to `ask`/`deny` yourself (emit
+warns; cogpin won't flip your global mode). It is idempotent and **non-clobbering** — it manages only
 the entries it itself emitted (recorded in `.cogpin/capability-emitted.json`), never your
 own. A non-`claude-code` backend is *documented, not emitted* (cogpin declares; you wire the
 sandbox). **`emit` generates; it never contains.** `--dry-run` prints the merged settings
@@ -265,9 +267,12 @@ module) · `public_surface` · `claude_md`. `box` defaults to the check `id`.
 cogpin gate                    # agent layer: PreToolUse hook (reads the tool envelope on stdin)
 cogpin stop --cwd .            # agent layer: Stop hook (blocks turn-end on unmet DoD)
 cogpin check --cwd .           # change layer: gate the committed range (authoritative)
-    [--no-run] [--allow-bypass] [--report-only]
+    [--no-run] [--allow-bypass] [--report-only] [--default-branch BR]
     [--pr-body-file F] [--approvals a,b] [--reviews-file F]
     [--head-sha S] [--pr-author L] [--checks-file F]
+    # --default-branch BR: (CI only) the TRUSTED base branch name. Overrides cogpin.toml so the
+    #   base pin can't be redirected from the PR head; the action passes the repo's real
+    #   default_branch. An unfetchable trusted base fails CLOSED (exit 2), never a narrowed diff.
     # --report-only: print findings + a summary but exit 0 (global, temporary rollout switch;
     #   distinct from per-check severity="warn"). Infra/config errors (unreachable base,
     #   unloadable config) STILL fail closed. The action exposes it as `report-only:`.
@@ -314,6 +319,10 @@ cogpin install --cwd .         # vendor .cogpin/cogpin.py + scaffold config/hook
 cogpin uninstall --cwd .       # strip the local pre-push managed block (never removes committed source)
 cogpin update --cwd .          # re-vendor the active engine → .cogpin/cogpin.py (fixes a stale-engine skew #16)
 cogpin doctor --cwd . [--json] # diagnose both layers; one-line fix per finding
+
+# capability + misc
+cogpin capability emit --cwd . [--dry-run]  # compile [capability] → .claude/settings.json (declare → emit; --dry-run previews)
+cogpin selftest                # in-process smoke test (the full suite is tests/test_cogpin.py)
 ```
 
 Exit codes: `gate` → `2` denies (stderr shown to the agent), `0` allows. `check` →
