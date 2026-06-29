@@ -227,8 +227,9 @@ like `forbid_commit_on_branch` / `self_protect` — it is agent-layer-only; `val
 `msg_scope` ⊆ `{commit_subject, commit_body, pr_body}`.
 
 > **`path_requires` vs `cooccur`** — both co-require, on different axes. `path_requires` is a
-> **file-status** co-requirement: *a path changed ⇒ another path must change* ("touched
-> `code/` ⇒ touch `tests/`") — it reasons over which paths are in the diff. `cooccur` is a
+> **file-status** co-requirement: *a path changed (or `when_marker` matched the PR body) ⇒ a
+> `need` path must change* ("touched `code/` ⇒ touch `tests/`") — the *requirement* side always
+> reasons over which paths are in the diff. `cooccur` is a
 > **content-token** co-requirement: *a token appears ⇒ another token must appear* ("a
 > migration string ⇒ a rollback string") — it reasons over regex matches in the **added
 > lines** (and, at `warn`, the message / PR body). Pick by whether the rule is about *files
@@ -306,9 +307,11 @@ with underscores turned to dashes:
 COGPIN-BYPASS: hotfix — CI is down, paging on-call (ticket OPS-123)
 ```
 
-The reason must be non-empty. This skips the **agent** layer only and the bypass is visible in
-the hook invocation the harness records; the **change** layer (pre-push + CI) ignores it
-entirely — base-pinning keeps a bypass from ever reaching the authoritative gate.
+The reason must be non-empty. It skips the **agent** layer *and* the local pre-push hook (which
+runs `check --allow-bypass`); the reason rides in the committed attestation marker and the hook
+invocation the harness records. The **authoritative CI** run does **not** pass `--allow-bypass`,
+so it ignores the bypass entirely — a bypass can wave through a *local* push, but never the CI
+gate.
 
 ---
 

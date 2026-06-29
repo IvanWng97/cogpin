@@ -18,9 +18,11 @@ function, not paperwork. Format: a `- [x] <label>` line (a space `- [ ]` is unti
 - [ ] Docs-currency  <!-- README / SCHEMA / docs updated to match the change -->
 
 <!--
-Agent-layer escape hatch (skips the STOP nag + the push/merge DoD gate; the CHANGE layer —
-pre-push + CI — ignores it). [meta].bypass_env = "DOD_BYPASS", so the marker is the env name
-with underscores turned to dashes. The reason must be non-empty:
-
-DOD-BYPASS: <one-line reason — e.g. hotfix, CI down, paging on-call (ticket OPS-123)>
+Agent-layer escape hatch. It skips the STOP nag, the push/merge DoD gate, AND the local
+pre-push hook (which runs `check --allow-bypass`); the authoritative CI run does NOT pass
+--allow-bypass, so it ignores the bypass entirely. [meta].bypass_env = "DOD_BYPASS", so the
+marker is that env name with underscores turned to dashes and a non-empty reason — to use it,
+uncomment a line of the form `DOD-BYPASS: <one-line reason>` (e.g. hotfix, CI down, OPS-123).
+The marker is shown only inline here, never as a live line, so this template can't bypass the
+very gate it documents.
 -->
