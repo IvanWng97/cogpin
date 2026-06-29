@@ -20,6 +20,17 @@ breaking config change.
   husky → …` when husky is detected, else `directly → .git/hooks/pre-push (no hook manager detected)`).
 
 ### Fixed
+- **Three remaining fail-opens closed** (audit LOW batch):
+  - `require_checks_green` no longer lets a duplicate check name hide a failure — the name-keyed
+    set collapsed last-write-wins, so a `success` row after a `failure` of the same name (a
+    re-run / cross-workflow collision) dropped the failure and passed a red tree. A name is now
+    green only if **every** occurrence concluded `success`.
+  - `cogpin check` now **fails closed** (exit 2) on a present-but-unreadable `--pr-body-file`
+    instead of conflating "unreadable" with "absent" and silently skipping every `pr_body`-scoped
+    check (it matched the fail-closed `--checks-file` / `--reviews-file` handlers everywhere else).
+  - an **empty** `pr_body` (`""`) is now treated as real-but-empty by the message primitives, so a
+    required `pr_body` pattern fails rather than passing vacuously — matching the `DiffFacts`
+    contract `marker_present` already honored.
 - **`gaps` no longer reports an attestation house rule as UNBOUND while `suggest` emits it** — the
   two CLIs contradicted each other. `is_bound`'s match-token haystack was built from
   `pattern/marker/key/deny/allow/tokens/need` only, so an `attest` check whose sole discriminator
