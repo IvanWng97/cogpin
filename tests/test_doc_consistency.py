@@ -32,8 +32,10 @@ class TestCoverageFigures(unittest.TestCase):
     # 30-agent sweep · nine corpora · 95 findings · 19 candidate gaps · six verified
     CANON = frozenset({30, 9, 95, 19, 6})
     WORDS = {"thirty": 30, "nine": 9, "nineteen": 19, "six": 6}
+    # the OTHER surfaces that cite the figures; docs/coverage-map.md (canonical) is checked
+    # directly by test_canonical_figures_present_in_coverage_map, so listing it here too would
+    # only emit a confusing "coverage-map drifted from coverage-map" message when CANON goes stale.
     SURFACES = (
-        "docs/coverage-map.md",
         "site/src/content/docs/concepts.mdx",
         "site/src/content/docs/what-it-catches.mdx",
     )
